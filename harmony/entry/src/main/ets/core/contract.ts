@@ -36,6 +36,15 @@ import {
   WalkDuration,
 } from './types';
 
+export interface RouteManeuver {
+  direction: string;
+  label: string;
+  /** 这一段多长（米） */
+  distance: number;
+  /** 从起点到这个转向点的累计米数 */
+  cumulative: number;
+}
+
 /**
  * 步行路线折线（真实模式用于「迷雾路径」视图）。
  * points 是 [lon, lat] 数组（与 GeoJSON / Valhalla shape 一致）；
@@ -44,6 +53,7 @@ import {
 export interface RoutePolyline {
   points: number[][];
   distanceMeters: number;
+  maneuvers?: RouteManeuver[];
   /** 抓取时间戳（超过 10 分钟重新规划） */
   fetchedAt: number;
 }

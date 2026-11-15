@@ -18,7 +18,8 @@
 
 import { common, Want } from '@kit.AbilityKit';
 import { getStore, getStoreInstance } from '../core/store';
-import { AppSnapshot, RoutePolyline } from '../core/contract';
+import { AppSnapshot, RouteManeuver, RoutePolyline } from '../core/contract';
+import { RouteProgress, routeProgressOf } from '../core/fog';
 import {
   DRIVE_RESUME_METERS,
   ExploreScope,
@@ -61,6 +62,11 @@ import {
 } from '../components/Format';
 
 const CLUE_INDEXES: number[] = [0, 1, 2];
+
+interface UpcomingManeuver {
+  maneuver: RouteManeuver;
+  distance: number;
+}
 
 @Component
 export struct JourneyView {
@@ -422,6 +428,9 @@ export struct JourneyView {
       return '到了你就知道';
     }
     if (index === session.unlockedHintCount && index < HINT_THRESHOLDS.length) {
+      if (this.routeProgress() !== undefined) {
+        return '靠近后解锁第' + chineseIndex(index + 1) + '条线索';
+      }
       const gap: number = Math.max(0, session.remainingMeters - HINT_THRESHOLDS[index]);
       return '再走 ' + gap + ' 米，解锁第' + chineseIndex(index + 1) + '条线索';
     }
@@ -758,6 +767,88 @@ export struct JourneyView {
     return this.routePoints().length >= 2;
   }
 
+  private routeProgress(): RouteProgress | undefined {
+    if (!this.hasRoute() || this.fixLat === 0 && this.fixLon === 0) return undefined;
+    const route: RoutePolyline | undefined = this.snapshot.route;
+    if (route === undefined) return undefined;
+    return routeProgressOf(route, { latitude: this.fixLat, longitude: this.fixLon });
+  }
+
+  private upcomingManeuver(progress: RouteProgress): UpcomingManeuver | undefined {
+    const route: RoutePolyline | undefined = this.snapshot.route;
+    if (route === undefined || route.maneuvers === undefined) return undefined;
+    for (let i = 0; i < route.maneuvers.length; i += 1) {
+      const maneuver: RouteManeuver = route.maneuvers[i];
+      if (maneuver.direction === 'start' || maneuver.direction === 'arrive') continue;
+      if (maneuver.cumulative + 8 < progress.walked) continue;
+      const upcoming: UpcomingManeuver = {
+        maneuver: maneuver,
+        distance: Math.max(0, Math.round(maneuver.cumulative - progress.walked))
+      };
+      return upcoming;
+    }
+    return undefined;
+  }
+
+  private routeRemaining(progress: RouteProgress): number {
+    return Math.max(0, Math.round(this.routeDistance() - progress.walked));
+  }
+
+  private hasNavigationProgress(): boolean {
+    return this.routeProgress() !== undefined;
+  }
+
+  private activeManeuver(): UpcomingManeuver | undefined {
+    const progress: RouteProgress | undefined = this.routeProgress();
+    return progress === undefined ? undefined : this.upcomingManeuver(progress);
+  }
+
+  private navigationRemainingMeters(): number {
+    const progress: RouteProgress | undefined = this.routeProgress();
+    return progress === undefined ? this.remainingMeters() : this.routeRemaining(progress);
+  }
+
+  private navigationWalkedMeters(): number {
+    const progress: RouteProgress | undefined = this.routeProgress();
+    return progress === undefined ? this.walkedMeters() : Math.round(progress.walked);
+  }
+
+  private navigationTotalMeters(): number {
+    return this.hasNavigationProgress() ? this.routeDistance() : this.totalMeters();
+  }
+
+  private navigationProgressPercent(): number {
+    const progress: RouteProgress | undefined = this.routeProgress();
+    if (progress === undefined || this.routeDistance() <= 0) return this.progressValue() * 100;
+    return Math.min(100, Math.round(progress.walked / this.routeDistance() * 100));
+  }
+
+  private activeManeuverText(): string {
+    const next: UpcomingManeuver | undefined = this.activeManeuver();
+    if (next === undefined) return '';
+    return next.distance <= 12
+      ? '现在' + next.maneuver.label
+      : String(next.distance) + ' 米后' + next.maneuver.label;
+  }
+
+  private activeManeuverHint(): string {
+    const next: UpcomingManeuver | undefined = this.activeManeuver();
+    return next !== undefined && next.distance <= 45 ? '留意前方路口' : '沿步行路线前进';
+  }
+
+  private activeManeuverGlyph(): string {
+    const next: UpcomingManeuver | undefined = this.activeManeuver();
+    return next === undefined ? '↑' : this.maneuverGlyph(next.maneuver.direction);
+  }
+
+  private maneuverGlyph(direction: string): string {
+    if (direction === 'left' || direction === 'sharp-left' || direction === 'slight-left') return '↰';
+    if (direction === 'right' || direction === 'sharp-right' || direction === 'slight-right') return '↱';
+    if (direction === 'uturn') return '↶';
+    if (direction === 'roundabout') return '⟳';
+    return '↑';
+  }
+
   /**
    * 迷雾路径视图（真实模式 + 有路线时）。
    * 没有路线时退回抽象地图（并且不显示任何终点标记）。
@@ -766,6 +857,7 @@ export struct JourneyView {
   pathSection() {
     if (this.isRealMode() && this.hasRoute()) {
       Column({ space: 6 }) {
+        this.mapOrientationControl()
         WaFogPath({
           routePoints: this.routePoints(),
           routeDistance: this.routeDistance(),
@@ -792,14 +884,45 @@ export struct JourneyView {
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .layoutWeight(1)
         }
-        .width('100%')
-        .padding({ left: 4, right: 4 })
       }
       .width('100%')
       .padding({ left: WASize.pagePadding, right: WASize.pagePadding })
     } else {
       this.mapSection()
     }
+  }
+
+  @Builder
+  mapOrientationControl() {
+    Row({ space: 2 }) {
+      this.orientationButton('正北', false)
+      this.orientationButton('随我转向', true)
+    }
+    .padding(3)
+    .backgroundColor(WAColor.paper)
+    .borderRadius(WASize.chipRadius)
+    .border({ width: 1, color: WAColor.line, radius: WASize.chipRadius })
+    .alignSelf(ItemAlign.End)
+  }
+
+  @Builder
+  orientationButton(label: string, followsHeading: boolean) {
+    Button() {
+      Text(label)
+        .fontSize(WAFont.microSm)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.mapFollowsHeading === followsHeading ? WAColor.paper : WAColor.ink2)
+        .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+        .backgroundColor(this.mapFollowsHeading === followsHeading ? WAColor.ink : WAColor.paper)
+        .borderRadius(WASize.chipRadius)
+    }
+    .type(ButtonType.Capsule)
+    .height(30)
+    .padding(0)
+    .backgroundColor(WAColor.paper)
+    .onClick(() => {
+      this.mapFollowsHeading = followsHeading;
+    })
   }
 
   @Builder
@@ -842,11 +965,52 @@ export struct JourneyView {
   @Builder
   distanceSection() {
     Column({ space: 8 }) {
+      if (this.hasNavigationProgress() && this.activeManeuver() !== undefined) {
+        Row({ space: 12 }) {
+          Text(this.activeManeuverGlyph())
+            .fontSize(26)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(WAColor.amberDeep)
+            .width(32)
+            .textAlign(TextAlign.Center)
+          Column({ space: 3 }) {
+            Text(this.activeManeuverText())
+              .fontSize(WAFont.titleSm)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(WAColor.ink)
+            Text(this.activeManeuverHint())
+              .fontSize(WAFont.caption)
+              .fontColor(WAColor.ink2)
+          }
+          .alignItems(HorizontalAlign.Start)
+          .layoutWeight(1)
+        }
+        .width('100%')
+        .padding(12)
+        .backgroundColor(WAColor.amberSoft)
+        .borderRadius(WASize.cardRadiusSm)
+      } else if (this.hasNavigationProgress()) {
+        Row({ space: 10 }) {
+          SymbolGlyph($r('sys.symbol.figure_walk'))
+            .fontSize(WAFont.titleSm)
+            .fontColor([WAColor.teal])
+            .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+          Text(this.navigationRemainingMeters() < 60 ? '就在附近 · 抬头看看周围' : '沿步行路线继续')
+            .fontSize(WAFont.titleSm)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(WAColor.ink)
+        }
+        .width('100%')
+        .padding(12)
+        .backgroundColor(WAColor.paper2)
+        .borderRadius(WASize.cardRadiusSm)
+      }
+
       Row() {
         Row() {
           // 漫游里程动辄十几公里：一律用公里读数，「还有 23456 米」没法读
-          if (this.remainingMeters() >= 1000) {
-            Text((this.remainingMeters() / 1000).toFixed(1))
+          if (this.navigationRemainingMeters() >= 1000) {
+            Text((this.navigationRemainingMeters() / 1000).toFixed(1))
               .fontSize(this.isShort() ? 46 : WAFont.digits)
               .fontWeight(FontWeight.Bold)
               .fontColor(WAColor.ink)
@@ -855,7 +1019,7 @@ export struct JourneyView {
               .fontColor(WAColor.ink2)
               .margin({ left: 4 })
           } else {
-            Text(String(this.remainingMeters()))
+            Text(String(this.navigationRemainingMeters()))
               .fontSize(this.isShort() ? 46 : WAFont.digits)
               .fontWeight(FontWeight.Bold)
               .fontColor(WAColor.ink)
@@ -869,19 +1033,25 @@ export struct JourneyView {
 
         Blank()
 
-        Text(this.bearingGlyph())
-          .fontSize(34)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(WAColor.amberDeep)
+        if (this.hasNavigationProgress()) {
+          Text('约 ' + String(this.estimateMinutes()) + ' 分钟')
+            .fontSize(WAFont.caption)
+            .fontColor(WAColor.ink2)
+        } else {
+          Text(this.bearingGlyph())
+            .fontSize(34)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(WAColor.amberDeep)
+        }
       }
       .width('100%')
 
-      Text(this.directionCopy())
+      Text(this.hasNavigationProgress() ? '步行路线 · 距离按路线计算' : this.directionCopy())
         .fontSize(WAFont.bodySm)
         .fontColor(WAColor.ink2)
         .width('100%')
 
-      Progress({ value: this.progressValue() * 100, total: 100, type: ProgressType.Linear })
+      Progress({ value: this.navigationProgressPercent(), total: 100, type: ProgressType.Linear })
         .width('100%')
         .height(5)
         .color(WAColor.amber)
@@ -891,9 +1061,9 @@ export struct JourneyView {
       // 数据条：把「已走 / 总长 / 预计剩余 / 平均速度」一次说清，
       // 同时填充导航面板下方原本的大片空白。
       Row({ space: 0 }) {
-        this.statCell('已走', this.distanceShort(this.walkedMeters()))
+        this.statCell('已走', this.distanceShort(this.navigationWalkedMeters()))
         this.statDivider()
-        this.statCell('全程', this.distanceShort(this.totalMeters()))
+        this.statCell(this.hasNavigationProgress() ? '路线' : '全程', this.distanceShort(this.navigationTotalMeters()))
         this.statDivider()
         this.statCell('预计', String(this.estimateMinutes()) + ' 分钟')
         this.statDivider()
@@ -939,8 +1109,8 @@ export struct JourneyView {
   }
 
   /** 按 75 米/分钟估算剩下的步行时间 */
-  private estimateMinutes(): number {
-    const meters: number = this.remainingMeters();
+  private estimateMinutes(remainingMeters: number = this.navigationRemainingMeters()): number {
+    const meters: number = remainingMeters;
     if (this.isDriveSegment()) {
       // 开车段：按 40km/h 粗估，至少 1 分钟
       const minutes: number = Math.round(meters / 1000 / 40 * 60);
@@ -951,10 +1121,10 @@ export struct JourneyView {
   }
 
   /** 平均速度（km/h）：用已走里程 ÷ 已用时间；不够 20 秒时显示 — */
-  private paceText(): string {
+  private paceText(walkedMeters: number = this.navigationWalkedMeters()): string {
     const seconds: number = this.elapsedSeconds();
     if (seconds < 20) return '—';
-    const km: number = this.walkedMeters() / 1000;
+    const km: number = walkedMeters / 1000;
     const speed: number = km / (seconds / 3600);
     if (!isFinite(speed) || speed < 0) return '—';
     return speed.toFixed(1) + ' km/h';

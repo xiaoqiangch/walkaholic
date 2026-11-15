@@ -544,6 +544,7 @@ export class WalkaholicStore implements WalkaholicStoreApi {
     this.routeValue = {
       points: points,
       distanceMeters: route.distanceMeters,
+      maneuvers: route.maneuvers === undefined ? undefined : route.maneuvers.slice(),
       fetchedAt: route.fetchedAt
     };
   }
@@ -613,6 +614,7 @@ export class WalkaholicStore implements WalkaholicStoreApi {
     const copy: RoutePolyline = {
       points: points,
       distanceMeters: route.distanceMeters,
+      maneuvers: route.maneuvers === undefined ? undefined : route.maneuvers.slice(),
       fetchedAt: route.fetchedAt
     };
     return copy;

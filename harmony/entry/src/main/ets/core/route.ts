@@ -13,7 +13,7 @@
 
 import { HttpClient, errorText, parseJson, requestText } from './http';
 import { GeoPoint } from './types';
-import { RoutePolyline } from './contract';
+import { RouteManeuver, RoutePolyline } from './contract';
 
 export const ROUTE_ENDPOINT: string = 'https://valhalla1.openstreetmap.de/route';
 export const ROUTE_TIMEOUT_MS: number = 6000;
@@ -49,16 +49,6 @@ export const DIRECTION_LABELS: Record<string, string> = {
   roundabout: '走环岛',
   arrive: '到达'
 };
-
-/** 一个转向点 */
-export interface RouteManeuver {
-  direction: string;
-  label: string;
-  /** 这一段多长（米） */
-  distance: number;
-  /** 从起点到这个转向点的累计米数 */
-  cumulative: number;
-}
 
 /** 路线（折线 + 转向序列） */
 export interface WalkingRoute {
@@ -236,6 +226,7 @@ export function toRoutePolyline(route: WalkingRoute, now: number): RoutePolyline
   const polyline: RoutePolyline = {
     points: route.points,
     distanceMeters: route.distanceMeters,
+    maneuvers: route.maneuvers,
     fetchedAt: now
   };
   return polyline;

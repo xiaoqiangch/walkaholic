@@ -70,7 +70,7 @@
 
 ## 3.1 地图朝向开关（三端一致）
 
-设置项「地图跟随我转身」（默认开）：
+设置项「地图跟随我转身」（默认开），旅程导航地图也提供「正北 / 随我转向」快捷切换：
 
 - **开**：地图「上」= 设备朝向（罗盘 > 移动方向 > 路线方向）
 - **关**：地图固定**北朝上**（upBearing = 0），罗盘/移动方向都不影响旋转
@@ -80,8 +80,11 @@
 - 「你」的箭头：屏幕角度 = 设备朝向 − 地图朝上方向（跟随模式恒为 0）
 
 Web：旅程页路径卡左上角胶囊可点击快速切换（`data-action="toggle-map-orientation"`），
-「我的 → 地图跟随我转身」有开关；iOS：`@AppStorage("wa.mapFollowsHeading")`；
-鸿蒙：`@StorageLink('mapFollowsHeading')` + `PersistentStorage.persistProp`。
+「我的 → 地图跟随我转身」有开关；iOS：`@AppStorage("wa.mapFollowsHeading")`，旅程地图上可切换；
+鸿蒙：`@StorageLink('mapFollowsHeading')` + `PersistentStorage.persistProp`，路线地图上可切换。
+
+有步行路线时，主距离、ETA、进度和当前转向均按当前位置在路线上的投影计算，不与直线距离混用。
+转向提示在 12 米内显示「现在转向」，并保留 8 米滞回；无路线时仍显示原有方向与距离兜底。
 
 ## 4. 账号（三端一致）
 

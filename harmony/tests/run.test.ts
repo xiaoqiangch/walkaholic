@@ -2842,6 +2842,7 @@ test('路线：取路线带 10 分钟缓存；失败返回 undefined（不阻塞
     const polyline = toRoutePolyline(first, now);
     assert.equal(polyline.distanceMeters, first.distanceMeters);
     assert.equal(polyline.fetchedAt, now);
+    assert.deepEqual(polyline.maneuvers, first.maneuvers, '路线快照应保留逐步导航指令');
   }
 });
 

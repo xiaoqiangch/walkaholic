@@ -78,26 +78,6 @@ struct FogPathView: View {
                         .padding(.bottom, 32)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
 
-                    // 偏离方向 > 35° 时，单独给一个「该往这边走」的指示。
-                    // 这是**独立**信息，不塞进圆点箭头 —— 圆点箭头只表示你面朝哪。
-                    if let turnHint = turnHintText(for: frame) {
-                        HStack(spacing: 5) {
-                            Image(systemName: "arrow.turn.up.right")
-                                .font(.system(size: 11, weight: .semibold))
-                            Text(turnHint)
-                                .font(.system(size: 12, weight: .medium))
-                        }
-                        .foregroundStyle(WATheme.amberDeep)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(WATheme.amberSoft)
-                        .clipShape(Capsule())
-                        .padding(.top, 12)
-                        .padding(.trailing, 12)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                        .accessibilityHidden(true)
-                    }
-
                     // 顶部保密标签
                     HStack(spacing: 5) {
                         Image(systemName: "cloud.fog")
@@ -153,18 +133,6 @@ struct FogPathView: View {
             }
         }
         .accessibilityElement(children: .combine)
-    }
-
-    /// 「该往这边走」的方向提示。只在方向差够大时出现，避免一直有个箭头在闪。
-    /// 返回 nil 表示不用提示（方向基本一致，或者没有罗盘）。
-    private func turnHintText(for frame: FogFrame) -> String? {
-        guard let heading else { return nil }
-        var delta = (frame.walkBearing - heading).truncatingRemainder(dividingBy: 360)
-        if delta > 180 { delta -= 360 }
-        if delta < -180 { delta += 360 }
-        guard abs(delta) > 35 else { return nil }
-        if abs(delta) > 135 { return "方向反了，往回走" }
-        return delta > 0 ? "往右前方调整" : "往左前方调整"
     }
 
     private func caption(for frame: FogFrame) -> String {

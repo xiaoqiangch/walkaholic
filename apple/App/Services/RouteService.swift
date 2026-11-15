@@ -52,10 +52,11 @@ final class RouteService {
             guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let trip = root["trip"] as? [String: Any],
                   let legs = trip["legs"] as? [[String: Any]],
-                  let shape = legs.first?["shape"] as? String else { return nil }
+                  let leg = legs.first,
+                  let shape = leg["shape"] as? String else { return nil }
             let coordinates = Self.decodePolyline6(shape)
             guard coordinates.count >= 2 else { return nil }
-            let route = WalkingRoute(points: coordinates)
+            let route = WalkingRoute(points: coordinates, maneuvers: Self.parseManeuvers(leg["maneuvers"]))
             guard route.distanceMeters > 0 else { return nil }
             cache[key] = CacheEntry(route: route, date: Date())
             return route
@@ -63,6 +64,43 @@ final class RouteService {
             return nil
         }
     }
+
+    private static func parseManeuvers(_ rawValue: Any?) -> [RouteManeuver] {
+        guard let rawManeuvers = rawValue as? [[String: Any]] else { return [] }
+        var cumulative = 0.0
+        return rawManeuvers.compactMap { raw in
+            guard let type = raw["type"] as? Int,
+                  let kilometers = raw["length"] as? Double else { return nil }
+            let direction = maneuverDirections[type] ?? "straight"
+            let distance = max(0, Int((kilometers * 1000).rounded()))
+            let maneuver = RouteManeuver(
+                direction: direction,
+                label: maneuverLabels[direction] ?? "直行",
+                distance: distance,
+                cumulative: cumulative
+            )
+            cumulative += Double(distance)
+            return maneuver
+        }
+    }
+
+    private static let maneuverDirections: [Int: String] = [
+        1: "start", 2: "start", 3: "start",
+        4: "arrive", 5: "arrive", 6: "arrive",
+        7: "straight", 8: "straight", 9: "slight-right", 10: "right",
+        11: "sharp-right", 12: "uturn", 13: "uturn", 14: "sharp-left",
+        15: "left", 16: "slight-left", 18: "right", 19: "left",
+        20: "right", 21: "left", 22: "straight", 23: "slight-right",
+        24: "slight-left", 25: "straight", 26: "roundabout", 27: "roundabout",
+        37: "straight", 38: "straight", 39: "straight", 40: "straight"
+    ]
+
+    private static let maneuverLabels: [String: String] = [
+        "start": "出发", "straight": "直行", "slight-right": "向右前方",
+        "right": "右拐", "sharp-right": "向右大拐", "slight-left": "向左前方",
+        "left": "左拐", "sharp-left": "向左大拐", "uturn": "掉头",
+        "roundabout": "走环岛", "arrive": "到达"
+    ]
 
     /// Valhalla 的 shape 是 polyline6（精度 1e-6）
     private static func decodePolyline6(_ encoded: String) -> [GeoPoint] {

@@ -8,13 +8,22 @@ import Foundation
 // 保密约束：窗口长度永远小于「剩余里程」，最后 60 米整段隐藏；
 // 绝不输出终点、街道名。
 
+public struct RouteManeuver: Hashable, Sendable {
+    public let direction: String
+    public let label: String
+    public let distance: Int
+    public let cumulative: Double
+}
+
 public struct WalkingRoute: Hashable, Sendable {
     public let points: [GeoPoint]
     public let distanceMeters: Double
     public let cumulative: [Double]
+    public let maneuvers: [RouteManeuver]
 
-    public init(points: [GeoPoint]) {
+    public init(points: [GeoPoint], maneuvers: [RouteManeuver] = []) {
         self.points = points
+        self.maneuvers = maneuvers
         var cumulative: [Double] = [0]
         if points.count > 1 {
             for index in 0..<(points.count - 1) {
