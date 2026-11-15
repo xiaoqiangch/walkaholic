@@ -16,7 +16,7 @@ import { Achievement, FeedPost, Place } from '../core/types';
 import { HttpClient } from '../core/http';
 import { AccountConfig, isLoggedIn, readAccountConfig } from '../core/account';
 import { uploadCheckInPhoto } from '../core/surpriseRemote';
-import { PickedPhoto, photoDataURL, pickAndAdoptPhoto, takeAndAdoptPhoto } from '../components/PhotoPick';
+import { PickedPhoto, photoDataURL, pickAndAdoptPhoto, takeAndAdoptPhoto, toImageUri } from '../components/PhotoPick';
 import {
   WaHairline,
   WaMicroLabel,
@@ -182,7 +182,7 @@ export struct RevealView {
     Column({ space: 6 }) {
       if (this.checkInUri.length > 0) {
         Stack({ alignContent: Alignment.TopStart }) {
-          Image(this.checkInUri)
+          Image(toImageUri(this.checkInUri))
             .width('100%')
             .height(168)
             .objectFit(ImageFit.Cover)
@@ -309,7 +309,7 @@ export struct RevealView {
     if (place.source === 'baidu') return '百度地图 · 真实地点';
     if (place.source === 'osm') return 'OpenStreetMap · 真实地点';
     if (place.source === 'wiki') return '维基百科 · 真实地标';
-    return '演示模式 · 内置地点';
+    return '仅存本机';
   }
 
   private hasPhoto(place: Place): boolean {
@@ -588,35 +588,49 @@ export struct RevealView {
     .padding({ left: WASize.pagePadding, right: WASize.pagePadding })
   }
 
+  /**
+   * 小任务卡（紧凑版）。
+   *
+   * 之前的问题：`Text(place.task)` 上挂了 `layoutWeight(1)`，而它所在的 Row 没有固定高度 ——
+   * layoutWeight 在「高度不受约束」的容器里会吃掉整块剩余空间，
+   * 于是一句话的小任务被撑成半屏大空白框（真机截图里非常明显）。
+   * 现在改成：Text 不参与权重分配，只按内容高度排，最多 3 行。
+   */
   @Builder
   taskCard(place: Place) {
     Row({ space: 10 }) {
-      Column({ space: 4 }) {
+      Column({ space: 3 }) {
         Row({ space: 3 }) {
           SymbolGlyph($r('sys.symbol.warning'))
             .fontSize(WAFont.micro)
             .fontColor([WAColor.gold])
             .renderingStrategy(SymbolRenderingStrategy.SINGLE)
-            .fontSize(WAFont.micro)
-          WaMicroLabel({ text: '小任务：' })
+          WaMicroLabel({ text: '小任务' })
         }
+
         Text(place.task)
           .fontSize(WAFont.caption)
           .fontColor(WAColor.ink)
-          .lineHeight(21)
-          .layoutWeight(1)
+          .lineHeight(20)
+          .maxLines(3)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
 
-      Text(this.taskDone ? '已完成' : '完成后点一下')
+      Text(this.taskDone ? '已完成' : '完成')
         .fontSize(WAFont.micro)
-        .fontColor(this.taskDone ? WAColor.teal : WAColor.ink3)
+        .fontColor(this.taskDone ? WAColor.teal : WAColor.amberDeep)
+        .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+        .backgroundColor(this.taskDone ? WAColor.tealSoft : WAColor.amberSoft)
+        .borderRadius(WASize.chipRadius)
         .onClick(() => {
           this.toggleTaskDone();
         })
     }
     .width('100%')
+    .alignItems(VerticalAlign.Top)
     .padding({ left: 12, right: 12, top: 10, bottom: 10 })
     .backgroundColor(WAColor.paper2)
     .borderRadius(WASize.cardRadiusSm)

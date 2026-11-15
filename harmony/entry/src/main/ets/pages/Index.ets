@@ -34,14 +34,14 @@ import { WAColor, WAFont, WASize } from '../theme/Theme';
 import { WaBoxArt } from '../components/BoxArt';
 import { AchievementsPanel } from '../components/AchievementsPanel';
 import { KeyValueStore, RoutePolyline } from '../core/contract';
-import { QuestFlowDeps, planRoute } from '../core/flow';
+import { QuestFlowDeps, loadCuratedPois, planRoute } from '../core/flow';
 import { discoverNearbyPlaces } from '../core/nearby';
 import { getCurrentLocationOnce, requestLocationPermission } from '../components/Location';
 import { applySyncedPayload, buildSyncPayload } from '../components/StoreBridge';
 import { readAccountConfig } from '../core/account';
 import { MAPKEYS_CACHE_KEY, loadMapKeys, mapKeysSourceText } from '../core/mapkeys';
 import { waToast } from '../components/Async';
-import { BuriedSurprise, GeoPoint, Place } from '../core/types';
+import { GeoPoint, Place } from '../core/types';
 import { HomeView } from '../views/HomeView';
 import { CardsView } from '../views/CardsView';
 import { SocialView } from '../views/SocialView';
@@ -142,12 +142,37 @@ struct Index {
       getStore().snapshot();
       this.ready = true;
       this.revision = this.revision + 1;
+      // 抽盒前先把「地图 Key + 策展数据」预热掉：
+      // 这两样是抽盒的前置依赖，用户点开设置页的几秒里通常就拉完了，
+      // 真正点「摇一个盲盒」时只剩一次真实搜索。
+      this.prewarmQuestDeps();
       // 有定位就顺手把附近兴趣点拉了（进图鉴立刻有内容）
       this.loadNearbyPlaces();
       // 冷启动：补齐未上传的惊喜 + 同步「被找到」回执（失败静默）
       this.syncSurprises();
     } catch (err) {
       this.initError = '本地数据没准备好，重新打开试试。';
+    }
+  }
+
+  /**
+   * 预热抽盒依赖（地图 Key + 策展数据）。
+   *
+   * 为什么单独做：这两项都是网络请求，加起来最坏能到 8 秒。
+   * 放在这里并行预跑，用户从打开 app 到点「摇一个盲盒」一般有 3–5 秒，
+   * 正好覆盖掉；点下去时通常只等一次真实搜索（1–2 秒）。
+   * 失败完全静默 —— 抽盒时会重新按需取。
+   */
+  private async prewarmQuestDeps(): Promise<void> {
+    if (this.http === undefined || this.kv === undefined) return;
+    try {
+      await Promise.all([
+        loadMapKeys(this.http, this.kv, (): string | undefined => this.bundledKeys,
+          this.adminBase, Date.now()),
+        loadCuratedPois(this.http, Date.now(), this.kv)
+      ]);
+    } catch (err) {
+      // 预热失败不影响任何功能
     }
   }
 
@@ -830,6 +855,10 @@ struct Index {
           revision: this.revision,
           winWidth: this.winWidth,
           winHeight: this.winHeight,
+          http: this.http,
+          kv: this.kv,
+          readBundledKeys: (): string | undefined => this.bundledKeys,
+          adminBase: this.adminBase,
           onBack: () => {
             this.activeOverlay = OVERLAY_NONE;
             this.refresh();

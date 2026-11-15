@@ -21,6 +21,7 @@ import {
   Area,
   BuriedSurprise,
   ExploreScope,
+  ROAM_MAX_METERS,
   FeedPost,
   GeoPoint,
   Mood,
@@ -133,7 +134,9 @@ import {
   HARD_MAX_METERS,
   LANDMARK_KEYWORD_LIMIT,
   LANDMARK_KEYWORDS,
+  LANDMARK_BOOST,
   landmarkKeywordList,
+  MIN_PLACE_DISTANCE_METERS,
   POI_NEVER_WORDS,
   POI_SOFT_BAD_WORDS,
   PER_CATEGORY_LIMIT,
@@ -200,7 +203,8 @@ import {
   findRealPlace,
   isRealSource,
   parseCuratedPois,
-  pickCurated
+  pickCurated,
+  resetPoolCache
 } from '../entry/src/main/ets/core/search';
 import {
   CHEVRON_SPACING_METERS,
@@ -280,9 +284,20 @@ function geoPoint(latitude: number, longitude: number): GeoPoint {
   return point;
 }
 
+/**
+ * 测试用 store：显式播种演示档案（testSeed = true）。
+ *
+ * 生产代码里 initStore 默认**不播种任何虚构内容**；
+ * 这里需要种子数据来验证「演示态」下的契约（卡片/成就/保密/惊喜）。
+ */
+/** 清空 search.ts 的候选池缓存（每个搜索测试前调用，避免串味） */
+function clearPoolCache(): void {
+  resetPoolCache();
+}
+
 async function freshStore(): Promise<WalkaholicStoreApi> {
   const kv: MemoryKV = new MemoryKV();
-  await initStore(kv);
+  await initStore(kv, true);
   return getStore();
 }
 
@@ -671,13 +686,38 @@ test('保密：到达前地点名与地址被抹掉，且不改内部对象', ()
 });
 
 // ============================================================
-// 6. Store：演示口径 / 契约新增字段
+// 6. Store：生产环境红线 —— 绝不出现虚构地点
+// ============================================================
+
+// ============================================================
+// 6.1 Store：测试种子下的演示口径
 // ============================================================
 
 test('Store：getStore() 未初始化时抛错', (): void => {
   assert.throws((): void => {
     getStore();
   }, '未初始化应抛错');
+});
+
+test('红线：生产环境（testSeed=false）不播种任何虚构地点/假动态/假惊喜', async (): Promise<void> => {
+  const kv: MemoryKV = new MemoryKV();
+  await initStore(kv); // 默认 testSeed = false，等同真实 app 首次启动
+  const store: WalkaholicStoreApi = getStore();
+  const snap = store.snapshot();
+
+  assert.equal(snap.places.length, 0, '首次启动绝不能有内置虚构地点');
+  assert.equal(snap.profile.cards.length, 0, '没有卡片');
+  assert.equal(snap.profile.xp, 0, '没有演示 XP');
+  assert.equal(snap.feed.length, 0, '不能有 mock 动态');
+  assert.equal(snap.mySurprises.length, 0, '不能有预置惊喜');
+  assert.equal(snap.explorableSurprises.length, 0, '附近不能凭空出现惊喜');
+  assert.equal(snap.demoMode, false, '生产环境永远不是演示模式');
+  assert.equal(snap.session, undefined, '首次启动不该有进行中的旅程');
+  assert.equal(snap.currentPlace, undefined);
+
+  // 抽盒也不能凭空空转出虚构地点（地点库为空 → 明确失败）
+  const drawn: DrawResult | undefined = store.startQuest();
+  assert.equal(drawn, undefined, '没有真实地点时必须明确失败，不许编造');
 });
 
 test('Store：演示态口径 4240 xp / 18 卡 / 12 天 / 305 惊喜值 / 480m', async (): Promise<void> => {
@@ -690,7 +730,9 @@ test('Store：演示态口径 4240 xp / 18 卡 / 12 天 / 305 惊喜值 / 480m',
   assert.equal(snap.profile.streakDays, 12);
   assert.equal(snap.profile.weeklySurprise, 305);
   assert.equal(snap.places.length, 24);
-  assert.equal(snap.togetherCode, 'K7M2QX');
+  // 同频码由本机真实数据派生（不再是写死的 K7M2QX）
+  assert.equal(snap.togetherCode.length, 6, '同频码应为 6 位');
+  assert.ok(/^[A-Z0-9]{6}$/.test(snap.togetherCode), '同频码只能是大写字母数字');
   assert.equal(snap.selectedMood, Mood.Drift);
   assert.equal(snap.selectedDuration, WalkDuration.M30);
   assert.equal(snap.demoMode, true);
@@ -726,18 +768,12 @@ test('Store：演示态口径 4240 xp / 18 卡 / 12 天 / 305 惊喜值 / 480m',
   assert.equal(buryUnlocked, false, '演示态 bury_1 未解锁');
 });
 
-test('Store：周榜本人 305 第 4 名', async (): Promise<void> => {
+test('Store：周榜只有本人（不再写死虚构用户）', async (): Promise<void> => {
   const store: WalkaholicStoreApi = await freshStore();
   const snap = store.snapshot();
-  let meIndex: number = -1;
-  for (let i = 0; i < snap.leaderboard.length; i += 1) {
-    if (snap.leaderboard[i].isMe) meIndex = i;
-  }
-  assert.equal(meIndex, 3, '本人应排第 4（下标 3）');
-  assert.equal(snap.leaderboard[meIndex].score, 305);
-  assert.equal(snap.leaderboard[0].score, 520);
-  assert.equal(snap.leaderboard[1].score, 465);
-  assert.equal(snap.leaderboard[2].score, 400);
+  assert.equal(snap.leaderboard.length, 1, '红线：不许出现虚构用户/分数');
+  assert.equal(snap.leaderboard[0].isMe, true);
+  assert.equal(snap.leaderboard[0].score, 305);
 });
 
 test('Store：places 包含全部 24 个内置地点 + 注册的真实地点', async (): Promise<void> => {
@@ -771,6 +807,8 @@ test('Store：places 包含全部 24 个内置地点 + 注册的真实地点', a
     address: '测试路 1 号',
     source: 'geo'
   };
+  // 注意：新规则下 300 米以内的地点不进图鉴，所以测试点放在约 600 米外
+  realPlace.coordinate = geoPoint(31.2304, 121.4802);
   registerPlaces([realPlace]);
   const snap2 = store.snapshot();
   assert.ok(snap2.places.length > 24, '注册真实地点后 places 应 > 24');
@@ -1148,7 +1186,7 @@ test('成就：定义 13 个；进度与解锁语义', (): void => {
 
 test('持久化：MemoryKV 存读 profile + surprises，重启后数据仍在', async (): Promise<void> => {
   const kv: MemoryKV = new MemoryKV();
-  await initStore(kv);
+  await initStore(kv, true);
   const store: WalkaholicStoreApi = getStore();
   assert.equal(kv.has(PROFILE_KEY), true, '初始化应写入 profile');
   assert.equal(kv.has(SURPRISES_KEY), true, '初始化应写入 surprises');
@@ -1159,7 +1197,7 @@ test('持久化：MemoryKV 存读 profile + surprises，重启后数据仍在', 
   const xpAfterBury: number = store.snapshot().profile.xp;
   assert.equal(xpAfterBury, before.profile.xp + 30);
 
-  await initStore(kv); // 模拟 App 重启
+  await initStore(kv, true); // 模拟 App 重启（测试种子）
   const reloaded: WalkaholicStoreApi = getStore();
   const after = reloaded.snapshot();
   assert.equal(after.profile.xp, xpAfterBury);
@@ -1176,11 +1214,11 @@ test('持久化：MemoryKV 存读 profile + surprises，重启后数据仍在', 
 
 test('持久化：坏 JSON 容错，不抛异常', async (): Promise<void> => {
   const kv: MemoryKV = new MemoryKV();
-  await initStore(kv);
+  await initStore(kv, true);
   const buried: BuriedSurprise | undefined = getStore().burySurprise(buryParams());
   assert.ok(buried !== undefined);
   kv.putString(PROFILE_KEY, '{这不是合法 JSON');
-  await initStore(kv);
+  await initStore(kv, true);
   const store: WalkaholicStoreApi = getStore();
   const snap = store.snapshot();
   assert.equal(typeof snap, 'object');
@@ -1189,7 +1227,7 @@ test('持久化：坏 JSON 容错，不抛异常', async (): Promise<void> => {
 });
 
 test('保密：到达前 why / task / hints / address 都不能暴露地点特征', async () => {
-  await initStore(new MemoryKV());
+  await initStore(new MemoryKV(), true);
   const store = getStore();
   store.abandonQuest();
   const draw = store.startQuest({ latitude: 31.2304, longitude: 121.4737 });
@@ -1431,6 +1469,26 @@ test('选点：择优取前 40%（至少 3 个）做加权随机', (): void => {
   }), undefined);
 });
 
+test('选点：地标命中的候选权重更高（名胜/美食压过楼下小店）', (): void => {
+  const shop: PoiCandidate = {
+    id: 'shop', name: '某某便利店', latitude: 31.2354, longitude: 121.4737,
+    category: 'convenience', source: 'osm', distance: 500
+  };
+  const landmark: PoiCandidate = {
+    id: 'lmark', name: '静安公园', latitude: 31.2354, longitude: 121.4737,
+    category: 'park', source: 'osm', distance: 520, landmark: true
+  };
+  const plainPark: PoiCandidate = {
+    id: 'park', name: '静安公园', latitude: 31.2354, longitude: 121.4737,
+    category: 'park', source: 'osm', distance: 520
+  };
+  const boosted: number = candidateWeight(landmark, Mood.Drift, 0);
+  const plain: number = candidateWeight(plainPark, Mood.Drift, 0);
+  assert.ok(boosted > plain, '地标命中应有额外加权');
+  assert.ok(Math.abs(boosted / plain - LANDMARK_BOOST) < 0.001, '加权倍数 = LANDMARK_BOOST');
+  assert.ok(boosted > candidateWeight(shop, Mood.Drift, 0) * 3, '地标远高于软黑名单店铺');
+});
+
 // ============================================================
 // 12. 数据源解析（fixture，不依赖网络）
 // ============================================================
@@ -1618,9 +1676,11 @@ test('数据源：去重时不同名 POI 不能互相借类别（实测踩过的
 test('数据源：地标关键字必须拆成单个词（整串会让高德返回 count=0）', (): void => {
   assert.ok(LANDMARK_KEYWORDS.indexOf('|') >= 0, '规格原文用 | 分隔');
   const words = landmarkKeywordList();
-  assert.equal(words.length, 11);
-  assert.equal(words[0], '公园');
-  assert.equal(words[10], '古镇');
+  assert.equal(words.length, 21);
+  assert.equal(words[0], '风景名胜', '名胜优先（大众关注度最高）');
+  assert.ok(words.indexOf('美食街') >= 0, '美食是盲盒的主要目标类型之一');
+  assert.ok(words.indexOf('老字号') >= 0, '经典老店');
+  assert.ok(words.indexOf('美术馆') >= 0, '文化艺术');
   for (let i = 0; i < words.length; i += 1) {
     assert.ok(words[i].indexOf('|') < 0, '拆出来的词不能再带分隔符');
   }
@@ -1739,6 +1799,7 @@ test('编排：多源去重 + 按距离排序 + 类别多样性', async (): Prom
 // ============================================================
 
 test('搜索：找到真实地点 → 返回 place，source 真实', async (): Promise<void> => {
+  clearPoolCache();
   const client = new FakeHttp((request: HttpRequest): HttpResponse => {
     if (request.url.indexOf('overpass') >= 0) {
       return jsonResponse({
@@ -1762,6 +1823,7 @@ test('搜索：找到真实地点 → 返回 place，source 真实', async (): P
 });
 
 test('搜索：全源无结果 → 明确失败，绝不用内置虚构地点', async (): Promise<void> => {
+  clearPoolCache();
   const client = new FakeHttp((request: HttpRequest): HttpResponse => {
     if (request.url.indexOf('overpass') >= 0) return jsonResponse({ elements: [] });
     return jsonResponse({ query: { pages: {} } });
@@ -1776,8 +1838,28 @@ test('搜索：全源无结果 → 明确失败，绝不用内置虚构地点', 
   assert.ok(reportLines >= 1, '失败面板要能逐条列出每个源的原因');
 });
 
-test('搜索：三档放宽 —— 档 1 太近的点，档 2/3 能接受', async (): Promise<void> => {
-  // 只在 130 米处有一个图书馆：档 1 最小 168m 拒绝，档 2 最小 120m 接受
+test('搜索：三档放宽 —— 档 1 太远的点，档 2 能接受', async (): Promise<void> => {
+  clearPoolCache();
+  // 只在约 900 米处有一个图书馆：档 1 上限 816m 拒绝，档 2 上限 1056m 接受
+  const client = new FakeHttp((request: HttpRequest): HttpResponse => {
+    if (request.url.indexOf('overpass') >= 0) {
+      return jsonResponse({
+        elements: [{ type: 'node', id: 1, lat: 31.23851, lon: 121.4737, tags: { name: '社区图书馆', amenity: 'library' } }]
+      });
+    }
+    return jsonResponse({ query: { pages: {} } });
+  });
+  const origin: GeoPoint = geoPoint(31.2304, 121.4737);
+  const outcome = await findRealPlace(
+    client, emptyKeys(), [], origin, Mood.Drift, WalkDuration.M30, 0.3, 40
+  );
+  assert.ok(outcome.place !== undefined, '放宽档应该接受 900m 的点');
+  assert.ok(outcome.tier >= 1, '第 1 档上限不够，至少要到第 2 档');
+});
+
+test('搜索：300 米以内的点一律不出（哪怕三档都放宽）', async (): Promise<void> => {
+  clearPoolCache();
+  // 130 米处的图书馆：所有档位都被 MIN_PLACE_DISTANCE_METERS 挡住
   const client = new FakeHttp((request: HttpRequest): HttpResponse => {
     if (request.url.indexOf('overpass') >= 0) {
       return jsonResponse({
@@ -1790,11 +1872,11 @@ test('搜索：三档放宽 —— 档 1 太近的点，档 2/3 能接受', asyn
   const outcome = await findRealPlace(
     client, emptyKeys(), [], origin, Mood.Drift, WalkDuration.M30, 0.3, 40
   );
-  assert.ok(outcome.place !== undefined, '放宽档应该接受 130m 的点');
-  assert.equal(outcome.tier, 1, '应该是第 2 档（relax=1）找到的');
+  assert.equal(outcome.place, undefined, '130m 太近，宁可失败也不给');
 });
 
 test('搜索：只有软黑名单地点时，最后仍用它（不编造，不失败）', async (): Promise<void> => {
+  clearPoolCache();
   const client = new FakeHttp((request: HttpRequest): HttpResponse => {
     if (request.url.indexOf('overpass') >= 0) {
       return jsonResponse({
@@ -1815,6 +1897,7 @@ test('搜索：只有软黑名单地点时，最后仍用它（不编造，不�
 });
 
 test('搜索：策展数据优先于多数据源', async (): Promise<void> => {
+  clearPoolCache();
   const client = new FakeHttp((): HttpResponse => jsonResponse({ elements: [] }));
   const curated = [{
     id: 'c1', name: '编辑精选的咖啡馆', lat: 31.2344, lon: 121.4737, category: 'cafe',
@@ -2157,9 +2240,34 @@ test('迷雾：几何数据（已走/前方颜色、箭头间距、两端渐隐�
   assert.ok(geometry.chevrons.length <= Math.floor(geometry.remaining / CHEVRON_SPACING_METERS) + 1);
   // 指北针：正北路线 → 旋转 0
   assert.ok(Math.abs(geometry.compassRotation) < 1);
-  // 「你」在画布下方居中
-  assert.ok(Math.abs(geometry.userX - layout.centerX) < 2);
+  // 「你」钉在画布正中（不是偏下 86%）
+  assert.equal(geometry.userX, layout.centerX);
   assert.equal(geometry.userY, layout.centerY);
+  assert.equal(layout.centerY, 196 * 0.5, '默认布局居中');
+});
+
+test('迷雾：「你」始终钉在正中，左右偏移时是地图在动', (): void => {
+  const line = straightRoute();
+  const cumulative = buildCumulative(line)!;
+  const at100 = pointAlongPath(cumulative, 100);
+  const layout = defaultLayout(320, 196);
+
+  // 严格在路线上
+  const onPath = fogGeometry(line, at100, layout);
+  assert.equal(onPath.userX, layout.centerX);
+  assert.equal(onPath.userY, layout.centerY);
+
+  // 向东偏 30 米：人仍在正中，是路径整体西移
+  const shifted: GeoPoint = geoPoint(at100.latitude, at100.longitude + 0.00032);
+  const offPath = fogGeometry(line, shifted, layout);
+  assert.equal(offPath.userX, layout.centerX, '偏移时「你」也必须居中');
+  assert.equal(offPath.userY, layout.centerY);
+  // 路径相对画布中心应整体左移（东偏 → 路面在人左边）
+  let minX: number = Infinity;
+  for (let i = 0; i < offPath.segments.length; i += 1) {
+    if (offPath.segments[i].x1 < minX) minX = offPath.segments[i].x1;
+  }
+  assert.ok(minX < layout.centerX - 10, '路径应整体偏到左侧，实测最左 ' + minX.toFixed(1));
 });
 
 test('迷雾：剩余 < 60m 时不画任何路径（不露终点）', (): void => {
@@ -2291,7 +2399,7 @@ test('抽盒编排：Key 下发 + 策展优先 + 真实地点（成功路径）'
   resetCuratedCache();
   const pois = {
     pois: [{
-      id: 'c1', name: '上海音乐厅', lat: 31.2330, lon: 121.4737, category: 'venue',
+      id: 'c1', name: '上海音乐厅', lat: 31.2360, lon: 121.4737, category: 'venue',
       why: '编辑的理由', task: '编辑的任务', hints: ['一', '二', '三']
     }]
   };
@@ -2309,6 +2417,7 @@ test('抽盒编排：Key 下发 + 策展优先 + 真实地点（成功路径）'
     adminBase: 'http://127.0.0.1:8802',
     now: (): number => 1700000000000
   };
+  clearPoolCache();
   const result = await prepareQuest(deps, {
     origin: geoPoint(31.2304, 121.4737),
     mood: Mood.Drift,
@@ -2347,6 +2456,7 @@ test('抽盒编排：没有真实地点时返回 failReason（绝不虚构）', 
     adminBase: 'http://127.0.0.1:8802',
     now: (): number => 1700000000000
   };
+  clearPoolCache();
   const result = await prepareQuest(deps, {
     origin: geoPoint(31.2304, 121.4737),
     mood: Mood.Drift,
@@ -2515,10 +2625,12 @@ test('账号恢复：applyRemotePayload 覆盖本机（缺字段保留原值）'
 test('常量：地标关键字与 parity 一致', (): void => {
   assert.equal(
     LANDMARK_KEYWORDS,
-    '公园|风景名胜|博物馆|展览馆|广场|图书馆|书店|体育馆|寺|教堂|古镇'
+    '风景名胜|公园|博物馆|展览馆|美术馆|广场|图书馆|书店|古镇|寺|教堂|体育馆|' +
+    '美食街|夜市|老字号|小吃街|步行街|文化馆|剧院|音乐厅|观景台'
   );
   assert.equal(DEDUPE_METERS, 30);
   assert.equal(PER_CATEGORY_LIMIT, 5);
+  assert.equal(MIN_PLACE_DISTANCE_METERS, 300, '抽盒不接受 300 米以内的点');
 });
 
 // ============================================================
@@ -3159,20 +3271,25 @@ test('时段：权重偏置 黄昏偏水边 / 夜里避开公园（不硬排除�
   assert.ok(night < dusk, '夜里的公园应比黄昏轻，实际 ' + String(night) + ' vs ' + String(dusk));
 });
 
-test('漫游：环带下限固定 10 公里，上限 45/55/65 逐档放宽', (): void => {
+test('漫游：环带下限固定 10 公里，上限封顶 20 公里', (): void => {
   assert.equal(roamRange(0)[0], 10000);
-  assert.equal(roamRange(0)[1], 45000);
-  assert.equal(roamRange(1)[1], 55000);
-  assert.equal(roamRange(2)[1], 65000);
+  assert.equal(roamRange(0)[1], 16000);
+  assert.equal(roamRange(1)[1], 18000);
+  assert.equal(roamRange(2)[1], 20000);
   // 任何档位都不得低于 10 公里（否则就变成「能走过去却按开车流程」）
   assert.equal(roamRange(9)[0], 10000);
+  // 任何档位都不得高于 20 公里（再远单程开车一小时，抽到也不会去）
+  for (let relax = 0; relax <= 5; relax += 1) {
+    assert.ok(roamRange(relax)[1] <= 20000, '上限必须 ≤ 20000');
+    assert.ok(roamSearchRadius(relax) <= 20000, '搜索半径也不得超过 20 公里');
+  }
   assert.ok(roamSearchRadius(0) >= 12000);
-  assert.ok(roamSearchRadius(2) <= 50000);
+  assert.equal(ROAM_MAX_METERS, 20000, '会话层的漫游上限同步收紧');
 });
 
 test('漫游：会话 scope 落盘并可恢复；老存档按里程兜底', async (): Promise<void> => {
   const kv: MemoryKV = new MemoryKV();
-  await initStore(kv);
+  await initStore(kv, true);
   const store = getStore();
   store.setScope(ExploreScope.Roam);
   assert.equal(store.snapshot().selectedScope, ExploreScope.Roam);
@@ -3189,7 +3306,7 @@ test('漫游：会话 scope 落盘并可恢复；老存档按里程兜底', asyn
   assert.equal(store.snapshot().session?.scope, ExploreScope.Roam);
 
   // 重启：session / selectedScope 都从存档恢复
-  await initStore(kv);
+  await initStore(kv, true);
   const rebooted = getStore();
   assert.equal(rebooted.snapshot().session?.scope, ExploreScope.Roam);
   assert.equal(rebooted.snapshot().selectedScope, ExploreScope.Roam);
@@ -3273,7 +3390,7 @@ test('回执：合并保留本地已读、新条目才算 hasNew、标记已读�
 
 test('回执：Store 收到回执后把本机惊喜标成「被找到」，入口有未读数', async (): Promise<void> => {
   const kv: MemoryKV = new MemoryKV();
-  await initStore(kv);
+  await initStore(kv, true);
   const store = getStore();
   const buriedValue: BuriedSurprise | undefined = store.burySurprise(buryParams());
   if (buriedValue === undefined) throw new Error('埋惊喜失败');
@@ -3297,7 +3414,7 @@ test('回执：Store 收到回执后把本机惊喜标成「被找到」，入�
 
 test('到达照片：挂到卡片上、可重拍覆盖、随存档与技术无关地读回', async (): Promise<void> => {
   const kv: MemoryKV = new MemoryKV();
-  await initStore(kv);
+  await initStore(kv, true);
   const store = getStore();
   const place: Place = {
     id: 'real-photo-1', name: '某处', area: Area.Near, category: '广场', emoji: '⛲️',
@@ -3322,7 +3439,7 @@ test('到达照片：挂到卡片上、可重拍覆盖、随存档与技术无�
   assert.equal(secondPhoto.remote, '/api/photos/' + place.id);
 
   // 重启后仍在
-  await initStore(kv);
+  await initStore(kv, true);
   const reloaded = getStore().cardPhoto(place.id);
   if (reloaded === undefined) throw new Error('重启后照片丢了');
   assert.equal(reloaded.remote, '/api/photos/' + place.id);
@@ -3402,7 +3519,7 @@ test('回执接口：只把 status=found 转成回执，其余（waiting）忽�
 
 test('清除数据：reset 后卡片/成就/惊喜/回执/轨迹全部清空', async (): Promise<void> => {
   const kv: MemoryKV = new MemoryKV();
-  await initStore(kv);
+  await initStore(kv, true);
   const store = getStore();
   store.burySurprise(buryParams());
   const before = store.snapshot();
@@ -3417,7 +3534,7 @@ test('清除数据：reset 后卡片/成就/惊喜/回执/轨迹全部清空', a
 
 test('埋惊喜：一句话与半径落盘，isMine 标记让改名后仍认得自己埋的', async (): Promise<void> => {
   const kv: MemoryKV = new MemoryKV();
-  await initStore(kv);
+  await initStore(kv, true);
   const store = getStore();
   const params: BuryParams = buryParams();
   params.message = '这张是我在等一杯咖啡时拍的。';
@@ -3430,7 +3547,7 @@ test('埋惊喜：一句话与半径落盘，isMine 标记让改名后仍认得�
   assert.equal(buried.isUploaded, false);
 
   // 重启后仍在（含扩展字段）
-  await initStore(kv);
+  await initStore(kv, true);
   const reloaded = getStore().snapshot().mySurprises;
   assert.equal(reloaded.length, 1);
   assert.equal(reloaded[0].message, '这张是我在等一杯咖啡时拍的。');
@@ -3439,7 +3556,7 @@ test('埋惊喜：一句话与半径落盘，isMine 标记让改名后仍认得�
 
 test('寻惊喜：先拍后看 —— 本机有作者哈希走真实比对，远端没有则走演示相似度', async (): Promise<void> => {
   const kv: MemoryKV = new MemoryKV();
-  await initStore(kv);
+  await initStore(kv, true);
   const store = getStore();
   const buried: BuriedSurprise | undefined = store.burySurprise(buryParams());
   if (buried === undefined) throw new Error('埋惊喜失败');
@@ -3459,7 +3576,7 @@ test('寻惊喜：先拍后看 —— 本机有作者哈希走真实比对，远
 
 test('寻惊喜：达标结算后可从「我找到的」看到，并记下复刻照片', async (): Promise<void> => {
   const kv: MemoryKV = new MemoryKV();
-  await initStore(kv);
+  await initStore(kv, true);
   const store = getStore();
   // 演示数据里有别人埋的惊喜（river 一带 320/540/760m）
   const target: BuriedSurprise = store.snapshot().explorableSurprises[0];

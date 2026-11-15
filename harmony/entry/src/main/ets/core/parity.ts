@@ -22,14 +22,19 @@ import { DayMoment, currentMoment, momentAffinity } from './moment';
 // ============================================================
 
 /**
- * 地标关键字（parity.md §2）。
+ * 地标关键字（parity.md §2 扩充版）。
  *
  * `|` 是**规格里的分隔符**，不是能直接丢给高德的关键字串：
  * 实测把整串（含 `|`）当 keywords 传给高德，接口返回 status=1 但 count=0 —— 静默空结果。
  * 所以这里存规格原文（便于与文档对照），真正查询时用 `landmarkKeywordList()` 拆成单个词。
+ *
+ * 选词原则（产品要求）：盲盒要抽「值得专程走一趟」的地方 ——
+ * 名胜 / 美食 / 经典 / 文艺，而不是楼下随机的某个门店。
+ * 顺序即优先级：越靠前越先查（高德 QPS 有限，只查前几个）。
  */
 export const LANDMARK_KEYWORDS: string =
-  '公园|风景名胜|博物馆|展览馆|广场|图书馆|书店|体育馆|寺|教堂|古镇';
+  '风景名胜|公园|博物馆|展览馆|美术馆|广场|图书馆|书店|古镇|寺|教堂|体育馆|' +
+  '美食街|夜市|老字号|小吃街|步行街|文化馆|剧院|音乐厅|观景台';
 
 /** 拆成单个关键字（高德/百度逐词查询用） */
 export function landmarkKeywordList(): string[] {
@@ -42,6 +47,16 @@ export function landmarkKeywordList(): string[] {
  * 所以只查最能体现「值得走」的前几个，且失败不重试（继续普通搜索即可）。
  */
 export const LANDMARK_KEYWORD_LIMIT: number = 3;
+
+/**
+ * 抽盒的「值得专程去」加权：来自地标关键字查询的候选 ×2.2。
+ *
+ * 为什么需要它：普通周边搜索里 90% 是「楼下的店」，只靠类别权重
+ * （distinctive 1.7 vs 0.35）压不住数量优势 —— 一个街区能有 40 家店、
+ * 3 个公园，加权随机还是会经常抽到店。直接给「地标查询命中」加一档，
+ * 让名胜/美食街/美术馆这类真正被大众关注的地点成为默认结果。
+ */
+export const LANDMARK_BOOST: number = 2.2;
 
 /** 硬排除：绝对不适合步迷的地方（去了也尴尬）→ 直接淘汰 */
 export const POI_NEVER_WORDS: RegExp =
@@ -64,41 +79,95 @@ const RELAX_MIN_FLOOR: number[] = [168, 120, 86];
 /** 三档最大距离倍数 */
 const RELAX_MAX_SCALE: number[] = [1.7, 2.2, 2.7];
 
+/**
+ * 抽盒的**绝对**最小距离（米）：任何档位都不得低于它。
+ *
+ * 为什么要有这条硬下限：三档放宽的 minFloor 会一路掉到 86 米，
+ * 于是「楼下的便利店」「隔壁的咖啡馆」也能被抽中 —— 开门就到，毫无「抽到一个地方」的感觉。
+ * 300 米大约是「认真走出去 4 分钟」，是产品可接受的最低新鲜感门槛。
+ */
+export const MIN_PLACE_DISTANCE_METERS: number = 300;
+
 /** 距离硬帽：min(3500, 3.4 × 时长米)，任何档位都不得突破 */
 export const HARD_MAX_METERS: number = 3500;
 export const HARD_MAX_SCALE: number = 3.4;
+
+// ============================================================
+// 自动扩范围（附近真的没有盲盒时，逐级放大，而不是直接失败）
+// ============================================================
+
+/**
+ * 扩范围档位的搜索半径倍数。
+ *
+ * 三档放宽（1× / 1.8× / 3.2×）之后如果还是没有点，说明这一带 POI 确实稀。
+ * 与其弹「没找到」让用户手动点「扩大范围」，不如自动再往外推两级 ——
+ * 用户要的是「给我一个地方」，不是「让我重试」。
+ */
+const EXPAND_RADIUS_SCALE: number[] = [4.5, 6.5, 9.0];
+
+/**
+ * 第 step 级扩范围参数（step 从 1 开始）。
+ *
+ * 特点：半径按倍数放大，**距离上限直接放到硬帽**（最多 3500 米），
+ * 最近距离仍然守着 MIN_PLACE_DISTANCE_METERS —— 扩的是「多远都能接受」，
+ * 不是「近一点也能接受」。
+ */
+export function expandParams(step: number, duration: WalkDuration): TierParams {
+  let index: number = Math.floor(step) - 1;
+  if (index < 0) index = 0;
+  if (index > EXPAND_RADIUS_SCALE.length - 1) index = EXPAND_RADIUS_SCALE.length - 1;
+  const meters: number = durationMeters(duration);
+  const hardMax: number = Math.min(HARD_MAX_METERS, meters * HARD_MAX_SCALE);
+  const radius: number = Math.round(meters * 1.8 * EXPAND_RADIUS_SCALE[index]);
+  const params: TierParams = {
+    relax: 2,
+    radiusScale: EXPAND_RADIUS_SCALE[index],
+    minDistance: MIN_PLACE_DISTANCE_METERS,
+    maxDistance: hardMax,
+    radius: Math.max(1200, radius)
+  };
+  return params;
+}
+
+/** 扩范围最多推几级（1 → 7 公里级半径，再大就纯属浪费请求） */
+export const EXPAND_MAX_STEPS: number = EXPAND_RADIUS_SCALE.length;
 
 // ============================================================
 // 远程漫游（对齐 iOS POISelection.roamRange / roamSearchRadius）
 // ============================================================
 
 /**
- * 漫游距离窗口（米）：下限固定 10 公里，上限逐档放宽（45 → 55 → 65 公里）。
+ * 漫游距离窗口（米）：下限固定 10 公里，上限逐档放宽但**封顶 20 公里**。
+ *
+ * 为什么上限收到 20 公里：超过这个数已经不是「一趟顺手的专程」了 ——
+ * 单程开车近一小时、来回两小时起步，用户抽到也不会去。
+ * 宁可把窗口收紧，让抽到的每个地方都真的够得着。
  *
  * 为什么下限不再往下掉：早年为了让「10 公里外一个点都没有」也能出结果，
  * 第三档会掉到 6 公里 —— 那已经能走过去了，却还按「先开车」的流程展示，
  * 用户会觉得被耍。宁可明确失败，也不把近距离的点伪装成漫游。
  */
 export function roamRange(relax: number = 0): Array<number> {
-  const ups: number[] = [45000, 55000, 65000];
+  const ups: number[] = [16000, 18000, 20000];
   let index: number = Math.floor(relax);
   if (index < 0) index = 0;
   if (index > ups.length - 1) index = ups.length - 1;
   return [10000, ups[index]];
 }
 
-/** 远程漫游的搜索半径（米）。高德/百度的 around 半径上限是 50000 */
+/** 远程漫游的搜索半径（米）。以 20 公里窗口为准，留一点余量 */
 export function roamSearchRadius(relax: number = 0): number {
   const range: number[] = roamRange(relax);
   const radius: number = range[1] * 1.15;
-  return Math.round(Math.min(50000, Math.max(12000, radius)));
+  return Math.round(Math.min(20000, Math.max(12000, radius)));
 }
 
 /** 漫游环带采样：4 个方向 + ±30° 抖动，返回采样中心 */
 export function roamSampleCenters(origin: GeoPoint, relax: number, random: number[]): GeoPoint[] {
   const range: number[] = roamRange(relax);
-  const low: number = Math.max(range[0] + 2000, 12000);
-  const high: number = Math.max(low + 1000, Math.min(range[1] - 1200, 43000));
+  const low: number = Math.max(range[0] + 1000, 11000);
+  // 上界卡在窗口内（封顶 20 公里，留 1.2 公里余量避免落在窗外）
+  const high: number = Math.max(low + 800, range[1] - 1200);
   const centers: GeoPoint[] = [];
   for (let index = 0; index < 4; index += 1) {
     const jitter: number = random.length > index ? random[index] : 0.5;
@@ -283,6 +352,11 @@ export function candidateWeight(
   if (candidate.source === 'wiki' || candidate.source === 'osm') weight *= SOURCE_WEIGHT_FREE;
   if (candidate.photoUrl !== undefined && candidate.photoUrl.length > 0) weight *= PHOTO_WEIGHT;
 
+  // 地标加权：由「风景名胜/博物馆/美食街/老字号」这类关键字查出来的点，
+  // 才是大众真正关注的地方。只按类别权重压不住街区里成百上千的店铺，
+  // 所以对关键字命中单独加一档。
+  if (candidate.landmark === true) weight *= LANDMARK_BOOST;
+
   return weight;
 }
 
@@ -303,6 +377,8 @@ export interface PoiCandidate {
   photoCredit?: string;
   /** amap / baidu / osm / wiki / curated */
   source: string;
+  /** 是否由「地标关键字」查询命中（风景名胜/博物馆/美食街…），抽盒时加权 */
+  landmark?: boolean;
   /** 到起点的距离（米），由 rankCandidates 填 */
   distance?: number;
 }
@@ -321,6 +397,7 @@ export function cloneCandidate(candidate: PoiCandidate): PoiCandidate {
   if (candidate.photoUrl !== undefined) copy.photoUrl = candidate.photoUrl;
   if (candidate.photoCredit !== undefined) copy.photoCredit = candidate.photoCredit;
   if (candidate.distance !== undefined) copy.distance = candidate.distance;
+  if (candidate.landmark === true) copy.landmark = true;
   return copy;
 }
 
@@ -351,6 +428,8 @@ function qualityScore(candidate: PoiCandidate): number {
 }
 
 function mergeMissing(target: PoiCandidate, other: PoiCandidate): void {
+  // 地标标记是最强的正向信号：任一来源命中了关键字查询，合并后仍算地标
+  if (target.landmark !== true && other.landmark === true) target.landmark = true;
   if ((target.photoUrl === undefined || target.photoUrl.length === 0) &&
       other.photoUrl !== undefined && other.photoUrl.length > 0) {
     target.photoUrl = other.photoUrl;

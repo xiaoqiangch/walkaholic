@@ -335,23 +335,33 @@ export interface FogLayout {
   /** 画布宽 / 高（vp） */
   width: number;
   height: number;
-  /** 「你」在画布上的位置（默认水平居中、偏下） */
+  /** 「你」在画布上的位置（默认居中） */
   centerX: number;
   centerY: number;
-  /** 竖向前方可用像素（默认 height * 0.74） */
+  /** 竖向前方可用像素（默认 height * 0.44） */
   aheadPixels: number;
-  /** 横向可用半宽（默认 width * 0.36） */
+  /** 竖向后方可用像素（默认 height * 0.44） */
+  behindPixels: number;
+  /** 横向可用半宽（默认 width * 0.42） */
   lateralPixels: number;
 }
 
+/**
+ * 默认布局：**「你」在画面正中间**。
+ *
+ * 为什么不再把「你」放在偏下 86% 处：那样画布上方 3/4 全给前方路径，
+ * 用户自己却挤在下边缘 —— 视线要一直往下找「我在哪」，很像地图没跟随。
+ * 居中之后前后都有余量，视觉重心和手指遮住的区域都更合理。
+ */
 export function defaultLayout(width: number, height: number): FogLayout {
   const layout: FogLayout = {
     width: width,
     height: height,
     centerX: width / 2,
-    centerY: height * 0.86,
-    aheadPixels: height * 0.74,
-    lateralPixels: width * 0.36
+    centerY: height * 0.5,
+    aheadPixels: height * 0.44,
+    behindPixels: height * 0.44,
+    lateralPixels: width * 0.42
   };
   return layout;
 }
@@ -448,6 +458,11 @@ export function fogGeometry(
   empty.compassRotation = -up;
   empty.userRotation = userRotation;
 
+  // 「你」永远钉在画布正中：地图跟着人动，而不是人在地图上跑。
+  // 只有「剩余 < 60m 隐藏」和「正在规划」这两种情况才用 layout 默认值。
+  empty.userX = layout.centerX;
+  empty.userY = layout.centerY;
+
   // 保密：接近终点整段隐藏
   if (window.hidden) {
     empty.hidden = true;
@@ -494,8 +509,9 @@ export function fogGeometry(
     const halfSpan: number = Math.max(12, Math.max(Math.abs(minLateral), Math.abs(maxLateral)) + 8);
     let scaleX: number = layout.lateralPixels / halfSpan;
     if (scaleX > scaleY) scaleX = scaleY;
-    const midLateral: number = (minLateral + maxLateral) / 2;
-    const originX: number = layout.centerX - midLateral * scaleX;
+    // 横向也跟随「你」：把用户的横向偏移抵消掉，让标记始终钉在画布正中，
+    // 路面整体相对他左右移动 —— 这才是「地图随动」。
+    const originX: number = layout.centerX - progress.lateral * scaleX;
 
     const toScreen: (along: number, lateral: number) => FogPoint =
       (along: number, lateral: number): FogPoint => {
@@ -574,9 +590,8 @@ export function fogGeometry(
     }
     empty.chevrons = chevrons;
 
-    // ---------- 「你」的位置（横向偏移） ----------
-    const userX: number = originX + progress.lateral * scaleX;
-    empty.userX = Math.max(16, Math.min(layout.width - 16, userX));
+    // ---------- 「你」的位置：钉在画布正中 ----------
+    empty.userX = layout.centerX;
     empty.userY = layout.centerY;
 
     // ---------- 偏离路径：从吸附点画虚线到「你」 ----------

@@ -17,7 +17,8 @@ import { SourceReport } from './http';
 import { makeRealPlace, realCategoryFromKey, durationStartMeters } from './catalog';
 import { nearby } from './providers';
 import { loadMapKeys } from './mapkeys';
-import { PoiCandidate } from './parity';
+import { MIN_PLACE_DISTANCE_METERS, PoiCandidate } from './parity';
+import { distance as geoDistance } from './geo';
 
 /** 一次「附近兴趣点」检索结果 */
 export interface NearbyDiscovery {
@@ -122,6 +123,14 @@ export async function discoverNearbyPlaces(
       continue;
     }
     if (candidate.name === undefined || candidate.name.length === 0) {
+      continue;
+    }
+    // 300 米以内的点不进「附近的兴趣点」：开门就到的地方没有探索价值
+    // （与抽盒的 MIN_PLACE_DISTANCE_METERS 同一口径，见 parity.md §2）
+    if (geoDistance(origin, {
+      latitude: candidate.latitude,
+      longitude: candidate.longitude
+    }) < MIN_PLACE_DISTANCE_METERS) {
       continue;
     }
     try {

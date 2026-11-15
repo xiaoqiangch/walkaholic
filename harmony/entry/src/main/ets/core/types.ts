@@ -47,7 +47,7 @@ export enum ExploreScope {
 /** 远程漫游下限（米）：低于它就不该用漫游 */
 export const ROAM_MIN_METERS: number = 10000;
 /** 远程漫游上限（米）：再远就不适合一日往返 */
-export const ROAM_MAX_METERS: number = 45000;
+export const ROAM_MAX_METERS: number = 20000;
 /** 停车圈（米）：进入这个半径才开始步行探索，也是线索开始解锁的地方 */
 export const PARKING_RADIUS_METERS: number = 1000;
 /** 手动「已停车」的容忍半径（米）：停车场 GPS 常飘，给到 2.2 公里 */

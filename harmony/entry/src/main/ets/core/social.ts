@@ -152,22 +152,21 @@ export function feedWithMine(mine: FeedPost[], now: number): FeedPost[] {
 }
 
 /** 周榜（含本人；老陈 285，保证 305 分时本人第 4 —— 与 design-system §7 一致） */
+/**
+ * 周榜：**只有本人**。
+ *
+ * 之前这里写死了小满 / 阿岛 / 77 / 老陈 四个虚构用户的分数 ——
+ * 属于「虚构内容」，产品红线禁止。真实好友榜要等账号服务提供，届时再填。
+ */
 export function leaderboard(profile: Profile): LeaderboardEntry[] {
-  const entries: LeaderboardEntry[] = [
-    { id: 'u1', name: '小满', emoji: '🐱', score: 520, isMe: false },
-    { id: 'u2', name: '阿岛', emoji: '🎧', score: 465, isMe: false },
-    { id: 'u3', name: '77', emoji: '🌙', score: 400, isMe: false },
-    { id: 'u4', name: '老陈', emoji: '🍜', score: 285, isMe: false },
-    {
-      id: 'me',
-      name: profile.name,
-      emoji: profile.avatarEmoji,
-      score: profile.weeklySurprise,
-      isMe: true
-    }
-  ];
-  entries.sort((a: LeaderboardEntry, b: LeaderboardEntry): number => b.score - a.score);
-  return entries;
+  const me: LeaderboardEntry = {
+    id: 'me',
+    name: profile.name,
+    emoji: profile.avatarEmoji,
+    score: profile.weeklySurprise,
+    isMe: true
+  };
+  return [me];
 }
 
 /** 深拷贝一条动态（快照用，避免 UI 改内部对象） */

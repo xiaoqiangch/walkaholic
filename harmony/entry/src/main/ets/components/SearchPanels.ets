@@ -5,9 +5,9 @@
  *   标题「没找到真实地点，这次不抽了」
  *   副文案「不会用虚构地点糊弄你」
  *   + 每个源失败原因
- *   三个按钮：扩大范围再找 / 换个位置 / 改成演示模式（虚构地点）
+ *   两个按钮：扩大范围再找 / 换个位置
  *
- * 产品红线：**绝不自动进入虚构地点**。演示模式必须由用户显式点按钮。
+ * 产品红线：**绝不自动进入虚构地点**；也**不提供**任何「演示/虚构地点」入口。
  */
 
 import { SourceReport } from '../core/http';
@@ -28,8 +28,6 @@ export struct WaSearchFailedPanel {
   onSearchWider: () => void = () => {
   };
   onManualLocation: () => void = () => {
-  };
-  onStartDemo: () => void = () => {
   };
 
   private lines(): string[] {
@@ -107,21 +105,6 @@ export struct WaSearchFailedPanel {
         })
       }
       .width('100%')
-
-      // 演示模式：显式选择，且文案明确写了「虚构地点」
-      Button() {
-        Text('改成演示模式（虚构地点）')
-          .fontSize(WAFont.captionSm)
-          .fontColor(WAColor.ink3)
-          .decoration({ type: TextDecorationType.Underline, color: WAColor.ink3 })
-      }
-      .type(ButtonType.Capsule)
-      .height(34)
-      .width('100%')
-      .backgroundColor(Color.Transparent)
-      .onClick(() => {
-        this.onStartDemo();
-      })
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
@@ -144,8 +127,6 @@ export struct WaLocationBlockedPanel {
   onRetryLocation: () => void = () => {
   };
   onManualLocation: () => void = () => {
-  };
-  onStartDemo: () => void = () => {
   };
 
   private reasonText(): string {
@@ -191,20 +172,6 @@ export struct WaLocationBlockedPanel {
         })
       }
       .width('100%')
-
-      Button() {
-        Text('不定位，先看演示（虚构地点）')
-          .fontSize(WAFont.captionSm)
-          .fontColor(WAColor.ink3)
-          .decoration({ type: TextDecorationType.Underline, color: WAColor.ink3 })
-      }
-      .type(ButtonType.Capsule)
-      .height(34)
-      .width('100%')
-      .backgroundColor(Color.Transparent)
-      .onClick(() => {
-        this.onStartDemo();
-      })
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)

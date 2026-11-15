@@ -250,7 +250,7 @@ bash scripts/check-harmony.sh
 | 能力 | 逻辑层 | UI 入口 | 三端同值 |
 |---|---|---|---|
 | 环境性盲盒（时段） | `core/moment.ts` | 抽盒页时段卡 + 首页 hero | 6 档文案 / 偏好 +1.45 / 避开 0.45 |
-| 远程漫游（10–45 公里） | `core/parity.ts` roamRange/roamSearchRadius、`providers.roamNearby` 环带撒点 | 抽盒页「怎么去」、旅程页开车段（导航到附近 / 已停车） | 下限 10km；停车圈 1km；容忍 2.2km；驶离 3.5km 退回开车段 |
+| 远程漫游（10–20 公里） | `core/parity.ts` roamRange/roamSearchRadius、`providers.roamNearby` 环带撒点 | 抽盒页「怎么去」、旅程页开车段（导航到附近 / 已停车） | 下限 10km、上限 20km（再远单程开车近一小时，抽到也不会去）；停车圈 1km；容忍 2.2km；驶离 3.5km 退回开车段 |
 | 个人城市地图 | `core/track.ts`（25m 去抖 / 200m 格子 / 12000 点压缩） | 「我的」→「个人城市地图」（Canvas 手绘） | 天数 / 公里 / 街区 / 平方公里 |
 | 埋惊喜回执 | `core/receipts.ts` + `core/surpriseRemote.ts` `/api/surprises/mine` | 首页惊喜社区红点 + 我的惊喜回执条 | 只同步状态与寻者名，不同步照片与正文 |
 | 到达实拍 | `PlaceCard.photoName / photoRemotePath` + `/api/photos` | 揭晓页「拍一张 / 从相册选」、图鉴详情「你拍的」 | 本机优先，登录后上传，按地点覆盖 |

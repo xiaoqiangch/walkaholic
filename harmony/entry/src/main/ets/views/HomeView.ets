@@ -46,12 +46,6 @@ class FriendInfo {
   }
 }
 
-const FRIENDS: FriendInfo[] = [
-  new FriendInfo('小满', 'person_2', false),
-  new FriendInfo('阿岛', 'headphones_fill', false),
-  new FriendInfo('77', 'sun_max', true),
-  new FriendInfo('老陈', 'leaf_fill', false)
-];
 
 @Component
 export struct HomeView {
@@ -217,23 +211,8 @@ export struct HomeView {
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .layoutWeight(1)
 
-      // parity.md §7：演示模式必须显式标注「演示模式 · 内置地点」
-      if (this.snapshot.demoMode) {
-        Row({ space: 5 }) {
-          Circle()
-            .width(5)
-            .height(5)
-            .fill(WAColor.amberDeep)
-          Text('演示模式 · 内置地点')
-            .fontSize(WAFont.microSm)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(WAColor.amberDeep)
-            .maxLines(1)
-        }
-        .padding({ left: 9, right: 9, top: 4, bottom: 4 })
-        .backgroundColor(WAColor.amberSoft)
-        .borderRadius(WASize.chipRadius)
-      }
+      // 产品红线：app 内不提供也不显示任何「演示 / 虚构地点」标记。
+      // （demoMode 恒为 false，这里不再保留任何演示徽标。）
 
       Row({ space: 4 }) {
         SymbolGlyph($r('sys.symbol.flame'))
@@ -354,36 +333,6 @@ export struct HomeView {
   @Builder
   statsRow() {
     WaStatsRow({ items: this.statsItems(), roomy: !this.isShort() })
-  }
-
-  @Builder
-  friendsRow() {
-    Row({ space: 14 }) {
-      Row({ space: -7 }) {
-        ForEach(FRIENDS, (friend: FriendInfo) => {
-          WaAvatar({
-            iconName: friend.emoji,
-            boxSize: 42,
-            onlineDot: friend.online,
-            name: friend.name
-          })
-        }, (friend: FriendInfo) => friend.name)
-      }
-
-      Column({ space: 1 }) {
-        Text('3 个朋友')
-          .fontSize(WAFont.caption)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(WAColor.ink2)
-        Text('今晚也在散步')
-          .fontSize(WAFont.caption)
-          .fontColor(WAColor.ink3)
-      }
-      .alignItems(HorizontalAlign.Start)
-
-      Blank()
-    }
-    .width('100%')
   }
 
   @Builder
@@ -588,7 +537,6 @@ export struct HomeView {
           this.statsRow()
 
           Column() {
-            this.friendsRow()
           }
           .margin({ top: 22 })
 
@@ -619,7 +567,6 @@ export struct HomeView {
       .margin({ top: 20 })
 
       Column() {
-        this.friendsRow()
       }
       .margin({ top: 22 })
 

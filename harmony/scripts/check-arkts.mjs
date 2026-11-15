@@ -517,22 +517,17 @@ function checkNoFakeFallback() {
   const rawText = fs.readFileSync(setupFile, 'utf8');
   const text = stripComments(rawText);
 
-  // startQuest() 只允许出现在「显式演示模式」函数里（函数名 startDemoExplicitly）
-  const callPattern = /startQuest\s*\(/g;
-  const matches = [];
-  let match;
-  while ((match = callPattern.exec(text)) !== null) {
-    matches.push(match.index);
+  // 红线 1：抽盒页**永远不许**调用 startQuest()（内置虚构地点抽盒）。
+  if (/startQuest\s*\(/.test(text)) {
+    fail('反虚构兜底',
+      'SetupSheet.ets 调用了 startQuest()（内置地点抽盒）。产品红线：app 里不允许任何虚构地点。');
   }
-  if (matches.length === 0) {
-    fail('反虚构兜底', 'SetupSheet.ets 没有 startQuest 调用？演示入口应保留');
-    return;
-  }
-  for (const index of matches) {
-    const before = text.slice(Math.max(0, index - 700), index);
-    if (!before.includes('startDemoExplicitly')) {
-      fail('反虚构兜底',
-        'SetupSheet.ets 在非演示入口调用了 startQuest()（内置地点抽盒），违反 parity.md §2「绝不虚构兜底」');
+
+  // 红线 2：不得出现「演示模式 / 虚构地点」入口（只看代码，注释里说明红线是允许的）
+  const demoWords = ['演示模式', '虚构地点', '内置地点', 'startDemoExplicitly'];
+  for (const word of demoWords) {
+    if (text.includes(word)) {
+      fail('反虚构兜底', 'SetupSheet.ets 代码里出现「' + word + '」——产品红线禁止任何虚构地点入口');
     }
   }
 
@@ -549,7 +544,31 @@ function checkNoFakeFallback() {
   if (!text.includes('WaLocationBlockedPanel')) {
     fail('反虚构兜底', 'SetupSheet.ets 没有定位受阻面板');
   }
-  pass('反虚构兜底', '真实模式只走 startQuestWithPlace；startQuest() 仅限显式演示');
+
+  // 红线 3：整个 UI 层不许出现虚构地点入口 / 假朋友
+  const uiFiles = walkFiles(ETS_ROOT, (file) => file.endsWith('.ets'));
+  for (const file of uiFiles) {
+    const body = stripComments(fs.readFileSync(file, 'utf8'));
+    for (const word of ['演示模式', '虚构地点']) {
+      if (body.replace(/['"][^'"]*['"]/g, '').includes(word)) {
+        fail('反虚构兜底', rel(file) + ' 出现「' + word + '」——红线禁止');
+      }
+    }
+    if (/new FriendInfo\(/.test(body)) {
+      fail('反虚构兜底', rel(file) + ' 出现了写死的「朋友」列表（虚构社交内容）');
+    }
+  }
+
+  // 红线 4：core 里不许残留写死的虚构同频码 / 假排行榜
+  const social = coreText('social.ts');
+  if (social.includes("'K7M2QX'") && !social.includes('export const DEMO_TOGETHER_CODE')) {
+    fail('反虚构兜底', 'core/social.ts 仍写死同频码');
+  }
+  if (/score:\s*5[0-9][0-9]/.test(social)) {
+    fail('反虚构兜底', 'core/social.ts 的排行榜里仍有写死的虚构分数');
+  }
+
+  pass('反虚构兜底', '无虚构地点 / 无演示入口 / 无假朋友；真实入口齐全');
 }
 
 // ============================================================
@@ -640,7 +659,39 @@ function checkSurpriseSecrecy() {
 }
 
 // ============================================================
-// 11) 本轮对齐 iOS：时段 / 漫游 / 轨迹 / 回执 / 到达照片 / 我的惊喜
+// 11) 布局陷阱：build() 根是 Column 时不得直接子级放全高背景
+// ============================================================
+
+/**
+ * 为什么拦它：`Column({space:0}) { Column().height('100%'); Scroll(){...} }`
+ * 会让背景列把 Scroll 整个挤出屏幕 —— 表现就是「点开之后一片空白」。
+ * （鸿蒙探寻面板「附近的惊喜」点开空白，就是这条）
+ * 正确写法：根用 `Stack({alignContent: Alignment.TopStart})`。
+ */
+function checkBlankScreenPattern() {
+  let scanned = 0;
+  for (const file of etsFiles) {
+    const text = stripComments(sourceText.get(file));
+    const match = text.match(/\n  build\(\) \{\n([\s\S]*)\n  \}\n/);
+    if (match === null) continue;
+    scanned += 1;
+    const lines = match[1].split('\n');
+    if (!lines[0].trim().startsWith('Column')) continue;
+    for (let i = 0; i < lines.length; i += 1) {
+      if (lines[i].trim() !== 'Column()') continue;
+      const tail = lines.slice(i + 1, i + 4).join('\n');
+      if (tail.includes("height('100%')")) {
+        fail('布局陷阱',
+          `${rel(file)} 的 build() 根是 Column，却有全高背景 Column 直接子级 → 内容会被挤出屏幕（空白页）；请把根改成 Stack`);
+        break;
+      }
+    }
+  }
+  pass('布局陷阱', `检查 ${scanned} 个 build()，无「Column 里塞全高背景」写法`);
+}
+
+// ============================================================
+// 12) 本轮对齐 iOS：时段 / 漫游 / 轨迹 / 回执 / 到达照片 / 我的惊喜
 // ============================================================
 
 /**
@@ -748,6 +799,7 @@ const sections = [
   ['功能对齐', checkParity],
   ['反虚构兜底', checkNoFakeFallback],
   ['附近惊喜保密', checkSurpriseSecrecy],
+  ['布局陷阱', checkBlankScreenPattern],
   ['iOS 对齐', checkIosParity]
 ];
 

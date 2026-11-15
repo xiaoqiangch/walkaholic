@@ -178,28 +178,26 @@ export async function loadMapKeys(
     }
   }
 
-  // ② 公网 Pages
-  try {
-    const pages: MapKeys = await fetchPagesKeys(client, 5000);
-    if (!keysEmpty(pages)) {
-      writeCachedKeys(kv, pages, 'pages', now);
-      const result: MapKeysResult = { keys: pages, source: 'pages', adminBase: adminBase };
-      return result;
-    }
-  } catch (error) {
-    // 继续
+  // ② + ③ 公网 Pages 与后台端点**并发**尝试。
+  //     以前串行：Pages 挂了要等满 5s 才轮到后台，再来 4s —— 最坏 9s。
+  //     两个源互不依赖，并发后最坏只等 5s，正常情况 1s 内。
+  const pagesPromise: Promise<MapKeys> = fetchPagesKeys(client, 5000)
+    .catch((): MapKeys => emptyKeys());
+  const adminPromise: Promise<MapKeys> = fetchAdminKeys(client, adminBase, 4000)
+    .catch((): MapKeys => emptyKeys());
+
+  const pages: MapKeys = await pagesPromise;
+  if (!keysEmpty(pages)) {
+    writeCachedKeys(kv, pages, 'pages', now);
+    const result: MapKeysResult = { keys: pages, source: 'pages', adminBase: adminBase };
+    return result;
   }
 
-  // ③ 后台端点
-  try {
-    const admin: MapKeys = await fetchAdminKeys(client, adminBase, 4000);
-    if (!keysEmpty(admin)) {
-      writeCachedKeys(kv, admin, 'admin', now);
-      const result: MapKeysResult = { keys: admin, source: 'admin', adminBase: adminBase };
-      return result;
-    }
-  } catch (error) {
-    // 继续
+  const admin: MapKeys = await adminPromise;
+  if (!keysEmpty(admin)) {
+    writeCachedKeys(kv, admin, 'admin', now);
+    const result: MapKeysResult = { keys: admin, source: 'admin', adminBase: adminBase };
+    return result;
   }
 
   // ④ 全失败：只用免费源

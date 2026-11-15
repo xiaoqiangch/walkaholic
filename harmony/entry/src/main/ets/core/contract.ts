@@ -257,6 +257,12 @@ export interface WalkaholicStoreApi {
   // ---------- 定位 ----------
   /** 设置最近已知坐标（抽盒起点用） */
   setLastKnownOrigin(origin: GeoPoint): void;
+
+  /**
+   * 最近一次定位（可限定「多久内算新」）。
+   * 抽盒优先用它，避免每次都重新发起 GPS 请求（室内能拖好几秒）。
+   */
+  freshOrigin(maxAgeMs?: number): GeoPoint | undefined;
   /** 设置是否演示模式 */
   setDemoMode(demo: boolean): void;
   /** 清除本机数据（卡片、成就、动态、惊喜、回执、轨迹） */

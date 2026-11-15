@@ -80,11 +80,11 @@ export const AMAP_MAX_PAGES: number = 3;
 export const BAIDU_PAGE_SIZE: number = 20;
 
 /** 单源超时 */
-export const AMAP_TIMEOUT_MS: number = 8000;
-export const BAIDU_TIMEOUT_MS: number = 8000;
-export const WIKI_TIMEOUT_MS: number = 8000;
-export const OVERPASS_ENDPOINT_TIMEOUT_MS: number = 4500;
-export const OVERPASS_TOTAL_TIMEOUT_MS: number = 8000;
+export const AMAP_TIMEOUT_MS: number = 5000;
+export const BAIDU_TIMEOUT_MS: number = 5000;
+export const WIKI_TIMEOUT_MS: number = 2500;
+export const OVERPASS_ENDPOINT_TIMEOUT_MS: number = 1800;
+export const OVERPASS_TOTAL_TIMEOUT_MS: number = 2500;
 
 /** 地图 Key（由后台下发，不写死、不让用户填；定义在 http.ts，避免循环依赖） */
 
@@ -319,6 +319,30 @@ export function parseAmap(json: Record<string, unknown>): PoiCandidate[] {
   return out;
 }
 
+/** 单个地标关键字查询（失败返回空数组，不抛错 —— 普通搜索还会兜着） */
+async function fetchAmapKeyword(
+  client: HttpClient,
+  latitude: number,
+  longitude: number,
+  radiusMeters: number,
+  keyword: string,
+  key: string
+): Promise<PoiCandidate[]> {
+  try {
+    const body: string = await requestText(client, {
+      url: amapUrl(latitude, longitude, radiusMeters, AMAP_PAGE_SIZE, 1, keyword, key),
+      method: 'GET',
+      headers: defaultHeaders(),
+      timeoutMs: AMAP_TIMEOUT_MS
+    });
+    const json: Record<string, unknown> = parseJson(body);
+    if (readString(json, 'status') !== '1') return [];
+    return parseAmap(json);
+  } catch (error) {
+    return [];
+  }
+}
+
 /** 高德：keywords 一次 + 普通页最多 3 页 */
 export async function fetchAmap(
   client: HttpClient,
@@ -332,7 +356,7 @@ export async function fetchAmap(
   const collected: PoiCandidate[] = [];
   const isLightweight: boolean = lightweight === true;
 
-  // ① 地标关键字查询（公园/博物馆/广场…）——先拿到「值得走」的点
+  // ① 地标关键字查询（风景名胜/博物馆/美食街…）——先拿到「值得走」的点
   //
   // 注意两个实测坑：
   //   a) parity.md 里关键字用 `|` 分隔，那是**规格写法**；把整串丢给高德会返回 count=0（静默空）。
@@ -340,54 +364,43 @@ export async function fetchAmap(
   //   b) 高德有 QPS 上限，短时间连发会返回 CUQPS_HAS_EXCEEDED_THE_LIMIT。
   //      所以只查前几个词，且任何一个失败都直接放弃（普通搜索还兜着）。
   //   远程漫游每次要撒 4 个点 × 多个源，代价更高，所以再收到 1 个词。
+  //
+  // 性能：这几个词**并发**发出去。以前是串行 await，3 个词 × 8s 超时
+  // 最坏能拖 24 秒 —— 抽盒「转很久」的主因之一。
+  // 性能关键：关键字批与翻页批**一次性并发**发出，
+  // 而不是「先等关键字回来、再发翻页」。旧写法是两轮 await，
+  // 最坏 2 × 8s = 16s；合并后只有一轮，最坏 8s（而且通常是 1–2s）。
   const keywords: string[] = landmarkKeywordList();
   const wanted: number = isLightweight ? 1 : LANDMARK_KEYWORD_LIMIT;
   const keywordCount: number = Math.min(keywords.length, wanted);
-  for (let k = 0; k < keywordCount; k += 1) {
-    try {
-      const keywordBody: string = await requestText(client, {
-        url: amapUrl(latitude, longitude, radiusMeters, AMAP_PAGE_SIZE, 1, keywords[k], key),
-        method: 'GET',
-        headers: defaultHeaders(),
-        timeoutMs: AMAP_TIMEOUT_MS
-      });
-      const keywordJson: Record<string, unknown> = parseJson(keywordBody);
-      if (readString(keywordJson, 'status') !== '1') {
-        // 限额 / 无结果都不重试，交给普通搜索
-        break;
-      }
-      const keywordList: PoiCandidate[] = parseAmap(keywordJson);
-      for (let i = 0; i < keywordList.length; i += 1) collected.push(keywordList[i]);
-    } catch (error) {
-      break;
-    }
-  }
 
-  // ② 普通周边搜索，按需翻 1~3 页（密集街区第 1 页常全是「楼下 50 米的店」）
   const pageSize: number = clampNumber(Math.round(limit), 1, AMAP_PAGE_SIZE);
   let pages: number = Math.ceil(limit / pageSize);
   if (pages < 1) pages = 1;
   if (pages > AMAP_MAX_PAGES) pages = AMAP_MAX_PAGES;
 
-  let firstError: string = '';
+  const batches: Promise<PoiCandidate[]>[] = [];
+  const batchIsKeyword: boolean[] = [];
+  for (let k = 0; k < keywordCount; k += 1) {
+    batches.push(fetchAmapKeyword(client, latitude, longitude, radiusMeters, keywords[k], key));
+    batchIsKeyword.push(true);
+  }
   for (let page = 1; page <= pages; page += 1) {
-    try {
-      const body: string = await requestText(client, {
-        url: amapUrl(latitude, longitude, radiusMeters, pageSize, page, '', key),
-        method: 'GET',
-        headers: defaultHeaders(),
-        timeoutMs: AMAP_TIMEOUT_MS
-      });
-      const json: Record<string, unknown> = parseJson(body);
-      if (readString(json, 'status') !== '1') {
-        const info: string = readString(json, 'info');
-        if (page === 1) firstError = '高德返回错误：status=' + readString(json, 'status') + ' info=' + info;
-        continue;
-      }
-      const list: PoiCandidate[] = parseAmap(json);
-      for (let i = 0; i < list.length; i += 1) collected.push(list[i]);
-    } catch (error) {
-      if (page === 1) firstError = '高德请求失败：' + errorText(error);
+    batches.push(fetchAmapPage(client, latitude, longitude, radiusMeters, pageSize, page, key));
+    batchIsKeyword.push(false);
+  }
+
+  const groups: PoiCandidate[][] = await Promise.all(batches);
+  let firstError: string = '';
+  for (let b = 0; b < groups.length; b += 1) {
+    const list: PoiCandidate[] = groups[b];
+    if (list.length === 0 && !batchIsKeyword[b] && firstError.length === 0) {
+      firstError = '高德请求失败：未返回结果';
+    }
+    for (let i = 0; i < list.length; i += 1) {
+      // 打上「地标查询命中」标记：抽盒时加权（名胜/美食街优先于楼下小店）
+      if (batchIsKeyword[b]) list[i].landmark = true;
+      collected.push(list[i]);
     }
   }
 
@@ -395,6 +408,31 @@ export async function fetchAmap(
     throw new Error(firstError.length > 0 ? firstError : '高德没有返回结果');
   }
   return collected;
+}
+
+/** 取高德的某一普通页（失败返回空数组） */
+async function fetchAmapPage(
+  client: HttpClient,
+  latitude: number,
+  longitude: number,
+  radiusMeters: number,
+  pageSize: number,
+  page: number,
+  key: string
+): Promise<PoiCandidate[]> {
+  try {
+    const body: string = await requestText(client, {
+      url: amapUrl(latitude, longitude, radiusMeters, pageSize, page, '', key),
+      method: 'GET',
+      headers: defaultHeaders(),
+      timeoutMs: AMAP_TIMEOUT_MS
+    });
+    const json: Record<string, unknown> = parseJson(body);
+    if (readString(json, 'status') !== '1') return [];
+    return parseAmap(json);
+  } catch (error) {
+    return [];
+  }
 }
 
 // ============================================================
@@ -474,6 +512,30 @@ export function parseBaidu(json: Record<string, unknown>): PoiCandidate[] {
   return out;
 }
 
+/** 单个百度的地标关键字查询（失败返回空数组） */
+async function fetchBaiduKeyword(
+  client: HttpClient,
+  latitude: number,
+  longitude: number,
+  radiusMeters: number,
+  key: string,
+  keyword: string
+): Promise<PoiCandidate[]> {
+  try {
+    const body: string = await requestText(client, {
+      url: baiduUrl(latitude, longitude, radiusMeters, BAIDU_PAGE_SIZE, key, keyword),
+      method: 'GET',
+      headers: defaultHeaders(),
+      timeoutMs: BAIDU_TIMEOUT_MS
+    });
+    const json: Record<string, unknown> = parseJson(body);
+    if (readString(json, 'status') !== '0') return [];
+    return parseBaidu(json);
+  } catch (error) {
+    return [];
+  }
+}
+
 export async function fetchBaidu(
   client: HttpClient,
   latitude: number,
@@ -485,45 +547,28 @@ export async function fetchBaidu(
   const collected: PoiCandidate[] = [];
   let firstError: string = '';
 
-  // ① 地标关键字：逐个词查（整串会导致空结果，同高德的坑）
+  // 关键字批与生活服务查询**一次性并发**（旧写法是两轮 await，最坏 16s）
   const keywords: string[] = landmarkKeywordList();
   const keywordCount: number = Math.min(keywords.length, LANDMARK_KEYWORD_LIMIT);
-  for (let k = 0; k < keywordCount; k += 1) {
-    try {
-      const body: string = await requestText(client, {
-        url: baiduUrl(latitude, longitude, radiusMeters, BAIDU_PAGE_SIZE, key, keywords[k]),
-        method: 'GET',
-        headers: defaultHeaders(),
-        timeoutMs: BAIDU_TIMEOUT_MS
-      });
-      const json: Record<string, unknown> = parseJson(body);
-      if (readString(json, 'status') !== '0') continue;
-      const list: PoiCandidate[] = parseBaidu(json);
-      for (let i = 0; i < list.length; i += 1) collected.push(list[i]);
-    } catch (error) {
-      // 单个词失败不影响其他词
-    }
-  }
 
-  // ② 生活服务（默认查询）
-  try {
-    const body: string = await requestText(client, {
-      url: baiduUrl(latitude, longitude, radiusMeters, limit, key, ''),
-      method: 'GET',
-      headers: defaultHeaders(),
-      timeoutMs: BAIDU_TIMEOUT_MS
-    });
-    const json: Record<string, unknown> = parseJson(body);
-    if (readString(json, 'status') !== '0') {
-      const message: string = readString(json, 'message');
-      firstError = '百度返回错误：status=' + readString(json, 'status') + ' message=' + message;
-    } else {
-      const list: PoiCandidate[] = parseBaidu(json);
-      for (let i = 0; i < list.length; i += 1) collected.push(list[i]);
-    }
-  } catch (error) {
-    if (firstError.length === 0) firstError = '百度请求失败：' + errorText(error);
+  const batches: Promise<PoiCandidate[]>[] = [];
+  const batchIsKeyword: boolean[] = [];
+  for (let k = 0; k < keywordCount; k += 1) {
+    batches.push(fetchBaiduKeyword(client, latitude, longitude, radiusMeters, key, keywords[k]));
+    batchIsKeyword.push(true);
   }
+  batches.push(fetchBaiduKeyword(client, latitude, longitude, radiusMeters, key, ''));
+  batchIsKeyword.push(false);
+
+  const groups: PoiCandidate[][] = await Promise.all(batches);
+  for (let b = 0; b < groups.length; b += 1) {
+    const list: PoiCandidate[] = groups[b];
+    for (let i = 0; i < list.length; i += 1) {
+      if (batchIsKeyword[b]) list[i].landmark = true;
+      collected.push(list[i]);
+    }
+  }
+  if (collected.length === 0) firstError = '百度没有返回结果';
 
   if (collected.length === 0) {
     throw new Error(firstError.length > 0 ? firstError : '百度没有返回结果');
@@ -611,29 +656,52 @@ export async function fetchOSM(
   longitude: number,
   radiusMeters: number
 ): Promise<PoiCandidate[]> {
-  let lastError: string = '';
   const form: string = 'data=' + encodeURIComponent(overpassQuery(latitude, longitude, radiusMeters));
+  // 三个镜像**并发竞速**：谁先给出非空结果就用谁。
+  // 串行重试时，前两个镜像各挂 4.5s，第三个还没发出就已经过去 9 秒 ——
+  // 这是「抽盒转很久」的第三个原因。
+  let settled: number = 0;
+  let lastError: string = 'Overpass 所有端点都失败';
+  const attempted: Promise<PoiCandidate[]>[] = [];
   for (let i = 0; i < OVERPASS_ENDPOINTS.length; i += 1) {
-    try {
-      const body: string = await requestText(client, {
-        url: OVERPASS_ENDPOINTS[i],
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'User-Agent': USER_AGENT,
-          'Accept': 'application/json'
-        },
-        body: form,
-        timeoutMs: OVERPASS_ENDPOINT_TIMEOUT_MS
-      });
-      const list: PoiCandidate[] = parseOverpass(parseJson(body));
-      if (list.length > 0) return list;
-      lastError = 'Overpass 没有返回结果';
-    } catch (error) {
-      lastError = 'Overpass 请求失败：' + errorText(error);
-    }
+    attempted.push(fetchOneOverpass(client, OVERPASS_ENDPOINTS[i], form));
   }
-  throw new Error(lastError.length > 0 ? lastError : 'Overpass 所有端点都失败');
+  return new Promise<PoiCandidate[]>((resolve, reject) => {
+    for (let i = 0; i < attempted.length; i += 1) {
+      attempted[i].then((list: PoiCandidate[]): void => {
+        settled += 1;
+        if (list.length > 0) {
+          resolve(list);
+          return;
+        }
+        if (settled >= attempted.length) reject(new Error(lastError));
+      }).catch((error: Error): void => {
+        settled += 1;
+        lastError = 'Overpass 请求失败：' + errorText(error);
+        if (settled >= attempted.length) reject(new Error(lastError));
+      });
+    }
+  });
+}
+
+/** 请求单个 Overpass 镜像（空结果返回空数组，网络错误抛出） */
+async function fetchOneOverpass(
+  client: HttpClient,
+  endpoint: string,
+  form: string
+): Promise<PoiCandidate[]> {
+  const body: string = await requestText(client, {
+    url: endpoint,
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': USER_AGENT,
+      'Accept': 'application/json'
+    },
+    body: form,
+    timeoutMs: OVERPASS_ENDPOINT_TIMEOUT_MS
+  });
+  return parseOverpass(parseJson(body));
 }
 
 // ============================================================
@@ -825,6 +893,7 @@ export async function nearby(
 
   // 失败面板要能逐条列出「每个源」的原因，所以 4 个源都建报告；
   // 没被本次启用的源标「未配置 Key / 本次未启用」，便于用户判断下一步。
+  const selectedIds: string[] = [];
   for (let i = 0; i < PROVIDER_IDS.length; i += 1) {
     const id: string = PROVIDER_IDS[i];
     const selected: boolean = sources.indexOf(id) >= 0;
@@ -840,33 +909,52 @@ export async function nearby(
         (id === 'baidu' && keys.baidu.length === 0)
         ? '未配置 Key'
         : '本次未启用';
-      reports.push(report);
-      continue;
     }
     reports.push(report);
-    slots.push(reports.length - 1);
-    tasks.push(fetchProvider(client, id, keys, options));
+    if (selected) selectedIds.push(id);
   }
 
+  // 所有源**同时开跑**（不要一个接一个发请求）
+  const taskMap: Map<string, Promise<PoiCandidate[]>> = new Map<string, Promise<PoiCandidate[]>>();
+  for (let i = 0; i < selectedIds.length; i += 1) {
+    taskMap.set(selectedIds[i], fetchProvider(client, selectedIds[i], keys, options));
+  }
+
+  // 关键：**先等快的商业源，够用就不再等慢的免费源**。
+  // 实测高德 0.2 秒返回、OSM 镜像常要 1.8 秒超时、维基 2.5 秒 ——
+  // 以前一律等最慢的，抽盒就白拖两三秒。
+  const FAST_ORDER: string[] = ['amap', 'baidu', 'wiki', 'osm'];
+  const ENOUGH_CANDIDATES: number = 8;
   const results: PoiCandidate[][] = [];
-  for (let i = 0; i < tasks.length; i += 1) {
+  let mergedCount: number = 0;
+  for (let i = 0; i < FAST_ORDER.length; i += 1) {
+    const id: string = FAST_ORDER[i];
+    const task: Promise<PoiCandidate[]> | undefined = taskMap.get(id);
+    if (task === undefined) continue;
+    const reportIndex: number = reportIndexOf(reports, id);
+    if (reportIndex >= 0 && mergedCount >= ENOUGH_CANDIDATES) {
+      // 已经有足够候选：不阻塞，剩下的源放弃等待（面板里说明原因）
+      reports[reportIndex].error = '候选已足够，未等待';
+      continue;
+    }
     try {
-      const list: PoiCandidate[] = await tasks[i];
+      const list: PoiCandidate[] = await task;
       results.push(list);
+      mergedCount += list.length;
+      if (reportIndex >= 0) {
+        reports[reportIndex].ok = list.length > 0;
+        reports[reportIndex].count = list.length;
+        if (list.length === 0) reports[reportIndex].error = '没有返回结果';
+      }
     } catch (error) {
       results.push([]);
-      const reportIndex: number = slots[i];
-      reports[reportIndex].error = errorText(error);
+      if (reportIndex >= 0) reports[reportIndex].error = errorText(error);
     }
   }
 
   const merged: PoiCandidate[] = [];
   for (let i = 0; i < results.length; i += 1) {
     const list: PoiCandidate[] = results[i];
-    const reportIndex: number = slots[i];
-    reports[reportIndex].ok = list.length > 0;
-    reports[reportIndex].count = list.length;
-    if (list.length > 0) reports[reportIndex].error = '';
     for (let j = 0; j < list.length; j += 1) merged.push(list[j]);
   }
 
@@ -875,6 +963,75 @@ export async function nearby(
   const limited: PoiCandidate[] = trimDiverse(sorted, options.limit);
   const result: NearbyResult = { candidates: limited, reports: reports };
   return result;
+}
+
+/** 单个漫游采样点的查询结果（供并发汇总） */
+interface RoamCenterResult {
+  candidates: PoiCandidate[];
+  amapCount: number;
+  baiduCount: number;
+  wikiCount: number;
+  error: string;
+}
+
+/**
+ * 查一个漫游采样点：高德（轻量，只查 1 个地标词）+ 百度 + 维基。
+ * 三源并发，单源失败不影响其他源。
+ *
+ * 维基 geosearch 单次上限 10 公里 —— 采样点本身就在 10 公里外，
+ * 以小半径绕采样点查，等效于查到了远程的地标（还带实景照片）。
+ */
+async function fetchRoamCenter(
+  client: HttpClient,
+  keys: MapKeys,
+  center: GeoPoint
+): Promise<RoamCenterResult> {
+  const outcome: RoamCenterResult = {
+    candidates: [],
+    amapCount: 0,
+    baiduCount: 0,
+    wikiCount: 0,
+    error: ''
+  };
+  const tasks: Promise<void>[] = [];
+  if (keys.amap.length > 0) {
+    tasks.push(fetchAmap(client, center.latitude, center.longitude, 3200, 20, keys.amap, true)
+      .then((list: PoiCandidate[]): void => {
+        outcome.amapCount = list.length;
+        for (let i = 0; i < list.length; i += 1) outcome.candidates.push(list[i]);
+      })
+      .catch((error: Error): void => {
+        if (outcome.error.length === 0) outcome.error = errorText(error);
+      }));
+  }
+  if (keys.baidu.length > 0) {
+    tasks.push(fetchBaidu(client, center.latitude, center.longitude, 3200, 20, keys.baidu)
+      .then((list: PoiCandidate[]): void => {
+        outcome.baiduCount = list.length;
+        for (let i = 0; i < list.length; i += 1) outcome.candidates.push(list[i]);
+      })
+      .catch((error: Error): void => {
+        if (outcome.error.length === 0) outcome.error = errorText(error);
+      }));
+  }
+  tasks.push(fetchWiki(client, center.latitude, center.longitude, 3200, 12)
+    .then((list: PoiCandidate[]): void => {
+      outcome.wikiCount = list.length;
+      for (let i = 0; i < list.length; i += 1) outcome.candidates.push(list[i]);
+    })
+    .catch((error: Error): void => {
+      if (outcome.error.length === 0) outcome.error = errorText(error);
+    }));
+  await Promise.all(tasks);
+  return outcome;
+}
+
+/** 在 reports 里按 id 找到下标（找不到返回 -1） */
+function reportIndexOf(reports: SourceReport[], id: string): number {
+  for (let i = 0; i < reports.length; i += 1) {
+    if (reports[i].id === id) return i;
+  }
+  return -1;
 }
 
 /** 数据源 ID → 中文标签 */
@@ -888,12 +1045,14 @@ export function providerLabel(id: string): string {
 // ============================================================
 
 /**
- * 远程漫游取点：在 10–45 公里（逐档放宽到 55/65）的环带上撒 4 个采样点，
- * 每个点用 3.2 公里的半径查一次（高德/百度/维基）。
+ * 远程漫游取点：在 10–20 公里的环带上撒 4 个采样点，
+ * 每个点用约 3.2 公里的半径查一次（高德/百度/维基）。
  *
- * 为什么不是直接查「半径 30 公里」：高德 around 半径上限 50000，但大半径返回的
+ * 为什么不是直接查「半径 20 公里」：高德 around 半径上限 50000，但大半径返回的
  * 全是城市地标类 POI，稀释严重且很慢。环带撒点等效于「查到了远程的地标」，
  * 还能顺便带出实景照片（维基 geosearch）。
+ *
+ * 为什么封顶 20 公里：再远单程开车就接近一小时，抽到也不会去（见 parity.roamRange）。
  *
  * OSM 不参与：Overpass 不支持这么大的半径，失败面板里如实标注。
  */
@@ -906,8 +1065,8 @@ export async function roamNearby(
   random: number[]
 ): Promise<NearbyResult> {
   const range: number[] = roamRange(relax);
-  const low: number = Math.max(range[0] + 2000, 12000);
-  const high: number = Math.max(low + 1000, Math.min(range[1] - 1200, 43000));
+  const low: number = Math.max(range[0] + 1000, 11000);
+  const high: number = Math.max(low + 800, range[1] - 1200);
   const centers: GeoPoint[] = [];
   for (let index = 0; index < 4; index += 1) {
     const jitter: number = random.length > index ? random[index] : 0.5;
@@ -931,41 +1090,20 @@ export async function roamNearby(
     reports.push({ id: 'baidu', label: providerLabel('baidu'), ok: false, count: 0, error: '未配置 Key' });
   }
 
+  // 4 个采样点**并发**查：串行时 4 点 × 3 源 × 最多 8s，最坏能拖到好几十秒
+  // （这是「抽盒转很久」在漫游模式下最严重的一处）。
+  const centerTasks: Promise<RoamCenterResult>[] = [];
   for (let c = 0; c < centers.length; c += 1) {
-    const center: GeoPoint = centers[c];
-    if (keys.amap.length > 0) {
-      try {
-        const list: PoiCandidate[] = await fetchAmap(
-          client, center.latitude, center.longitude, 3200, 20, keys.amap, true
-        );
-        amapTotal += list.length;
-        for (let i = 0; i < list.length; i += 1) merged.push(list[i]);
-      } catch (error) {
-        lastError = errorText(error);
-      }
-    }
-    if (keys.baidu.length > 0) {
-      try {
-        const list: PoiCandidate[] = await fetchBaidu(
-          client, center.latitude, center.longitude, 3200, 20, keys.baidu
-        );
-        baiduTotal += list.length;
-        for (let i = 0; i < list.length; i += 1) merged.push(list[i]);
-      } catch (error) {
-        if (lastError.length === 0) lastError = errorText(error);
-      }
-    }
-    // 维基 geosearch 单次上限 10 公里 —— 采样点本身就在 10 公里外，
-    // 以小半径绕采样点查，等效于查到了远程的地标（还带实景照片）。
-    try {
-      const list: PoiCandidate[] = await fetchWiki(
-        client, center.latitude, center.longitude, 3200, 12
-      );
-      wikiTotal += list.length;
-      for (let i = 0; i < list.length; i += 1) merged.push(list[i]);
-    } catch (error) {
-      if (lastError.length === 0) lastError = errorText(error);
-    }
+    centerTasks.push(fetchRoamCenter(client, keys, centers[c]));
+  }
+  const centerResults: RoamCenterResult[] = await Promise.all(centerTasks);
+  for (let c = 0; c < centerResults.length; c += 1) {
+    const outcome: RoamCenterResult = centerResults[c];
+    amapTotal += outcome.amapCount;
+    baiduTotal += outcome.baiduCount;
+    wikiTotal += outcome.wikiCount;
+    if (outcome.error.length > 0 && lastError.length === 0) lastError = outcome.error;
+    for (let i = 0; i < outcome.candidates.length; i += 1) merged.push(outcome.candidates[i]);
   }
 
   if (keys.amap.length > 0) {
@@ -1059,6 +1197,7 @@ export function sortCandidates(
     if (candidate.address !== undefined) copy.address = candidate.address;
     if (candidate.photoUrl !== undefined) copy.photoUrl = candidate.photoUrl;
     if (candidate.photoCredit !== undefined) copy.photoCredit = candidate.photoCredit;
+    if (candidate.landmark === true) copy.landmark = true;
     copy.distance = Math.round(distanceMeters(origin, candidate) * 10) / 10;
     out.push(copy);
   }

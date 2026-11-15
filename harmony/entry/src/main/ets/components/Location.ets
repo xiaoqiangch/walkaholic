@@ -3,7 +3,7 @@
  *
  * 位置权限申请走 abilityAccessCtrl.requestPermissionsFromUser（module.json5 已声明
  * ohos.permission.LOCATION / APPROXIMATELY_LOCATION）。
- * 拿不到定位（拒绝 / 关闭 / 超时）时由调用方降级到演示模式，UI 必须显式标「演示」。
+ * 拿不到定位（拒绝 / 关闭 / 超时）时由调用方明确提示失败；**绝不降级到虚构地点**。
  *
  * ⚠️ 待 DevEco 验证：geoLocationManager 的 API 12 写法（getCurrentLocation / on('locationChange')）。
  */
@@ -40,7 +40,7 @@ export async function requestLocationPermission(context: common.UIAbilityContext
   }
 }
 
-/** 单次定位（带超时）；失败时 reject，由调用方降级到演示模式。 */
+/** 单次定位（带超时）；失败时 reject，由调用方明确提示定位不可用。 */
 export function getCurrentLocationOnce(timeoutMs: number): Promise<GeoPoint> {
   return new Promise<GeoPoint>((resolve: (value: GeoPoint) => void, reject: (reason: Error) => void) => {
     try {
@@ -83,6 +83,8 @@ export function getCurrentLocationOnce(timeoutMs: number): Promise<GeoPoint> {
 export class CompassWatcher {
   private active: boolean = false;
   private heading: number = -1;
+  /** 上次回报给 UI 的角度（用于死区判断，避免每 100ms 都抖动一次） */
+  private emitted: number = -1;
   private listener: (data: sensor.OrientationResponse) => void;
   private onHeading: (heading: number) => void;
 
@@ -96,10 +98,31 @@ export class CompassWatcher {
       const raw: number = ((360 - alpha) % 360 + 360) % 360;
       if (this.heading < 0) {
         this.heading = raw;
-      } else {
-        const delta: number = ((raw - this.heading + 540) % 360) - 180;
-        this.heading = (this.heading + delta * 0.35 + 360) % 360;
+        this.emitted = raw;
+        this.onHeading(raw);
+        return;
       }
+      // 角度差归一化到 (-180, 180]
+      const delta: number = ((raw - this.heading + 540) % 360) - 180;
+      // 自适应平滑：
+      //   小抖动（<2°）几乎不动 —— 手机放兜里/手微抖时地图不该一直晃；
+      //   大转向（>60°）快速跟上 —— 用户真的转身时不能拖半秒。
+      const magnitude: number = Math.abs(delta);
+      let factor: number = 0.12;
+      if (magnitude > 60) {
+        factor = 0.65;
+      } else if (magnitude > 20) {
+        factor = 0.38;
+      } else if (magnitude > 6) {
+        factor = 0.22;
+      }
+      this.heading = (this.heading + delta * factor + 360) % 360;
+      // 死区：与上次回报差 < 1.5° 就不打扰 UI（否则每帧都重算整张地图）
+      const sinceEmit: number = Math.abs(((this.heading - this.emitted + 540) % 360) - 180);
+      if (sinceEmit < 1.5) {
+        return;
+      }
+      this.emitted = this.heading;
       this.onHeading(this.heading);
     };
   }

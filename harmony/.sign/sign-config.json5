@@ -4,13 +4,13 @@
       "name": "default",
       "type": "HarmonyOS",
       "material": {
-        "certpath": "/Users/chenxiaoqiang/.ohos/config/default_harmony_WtKZkpDOD6Lmo3B8FzDR5cS95-M_Dv_2q2z2I3hMJsI=.cer",
+        "certpath": "/Users/chenxiaoqiang/.ohos/config/default_harmony_5xT3M7aH6hWVZW991PDn9Qeu_8SB6LXaV0bMaI7Dgl8=.cer",
         "keyAlias": "debugKey",
-        "keyPassword": "0000001B3A99EC038B89AA21D53FCC0B8EEF817BE5154A82015D09E1C7BEC2366AB3D2BD6FC66FD169A0D4",
-        "profile": "/Users/chenxiaoqiang/.ohos/config/default_harmony_WtKZkpDOD6Lmo3B8FzDR5cS95-M_Dv_2q2z2I3hMJsI=.p7b",
+        "keyPassword": "0000001B7B96E76C97254E1621F2594552E2117C8FAA9FFA4371784332F3EF4016B80788181E9FF9993065",
+        "profile": "/Users/chenxiaoqiang/.ohos/config/default_harmony_5xT3M7aH6hWVZW991PDn9Qeu_8SB6LXaV0bMaI7Dgl8=.p7b",
         "signAlg": "SHA256withECDSA",
-        "storeFile": "/Users/chenxiaoqiang/.ohos/config/default_harmony_WtKZkpDOD6Lmo3B8FzDR5cS95-M_Dv_2q2z2I3hMJsI=.p12",
-        "storePassword": "0000001BFA7C61D5EB20D0C53B8C4555BC3DE527E12BBB20154144862B63308408FEED6F1CAC092EC5D4EE"
+        "storeFile": "/Users/chenxiaoqiang/.ohos/config/default_harmony_5xT3M7aH6hWVZW991PDn9Qeu_8SB6LXaV0bMaI7Dgl8=.p12",
+        "storePassword": "0000001B9C6FAC598540BFCABF5F546D21C71F25EC4667F5568B012A44735AD8A0208EF9DFA63E76D1FEA7"
       }
     }
   ]

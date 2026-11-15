@@ -90,6 +90,11 @@ interface CuratedCache {
 
 let curatedCache: CuratedCache | undefined = undefined;
 
+
+/** 落盘缓存的 KV 键（6 小时有效期，与内存缓存一致） */
+export const CURATED_CACHE_KEY: string = 'walkaholic.curated.v1';
+export const CURATED_CACHE_AT_KEY: string = 'walkaholic.curated.at.v1';
+
 /** 测试辅助：清掉策展缓存 */
 export function resetCuratedCache(): void {
   curatedCache = undefined;
@@ -101,10 +106,28 @@ export function resetCuratedCache(): void {
  */
 export async function loadCuratedPois(
   client: HttpClient,
-  now: number
+  now: number,
+  kv?: KeyValueStore
 ): Promise<CuratedPoi[]> {
   if (curatedCache !== undefined && now - curatedCache.at < 6 * 3600 * 1000) {
     return curatedCache.pois;
+  }
+  // 落盘缓存：内存缓存一重启就没了，而这张表 6 小时才变一次。
+  // 以前每次冷启动都要重拉 github.io（国内常年超时 3.5s），抽盒就卡在这儿。
+  if (kv !== undefined) {
+    try {
+      const raw: string | undefined = kv.getString(CURATED_CACHE_KEY);
+      if (raw !== undefined) {
+        const at: number = Number(kv.getString(CURATED_CACHE_AT_KEY));
+        if (isFinite(at) && now - at >= 0 && now - at < 6 * 3600 * 1000) {
+          const cached: CuratedPoi[] = parseCuratedPois(parseJson(raw));
+          curatedCache = { pois: cached, at: at };
+          return cached;
+        }
+      }
+    } catch (error) {
+      // 缓存坏了就重拉
+    }
   }
   try {
     const text: string = await requestText(client, {
@@ -114,6 +137,14 @@ export async function loadCuratedPois(
     });
     const pois: CuratedPoi[] = parseCuratedPois(parseJson(text));
     curatedCache = { pois: pois, at: now };
+    if (kv !== undefined && pois.length > 0) {
+      try {
+        kv.putString(CURATED_CACHE_KEY, text);
+        kv.putString(CURATED_CACHE_AT_KEY, String(now));
+      } catch (error) {
+        // 落盘失败不影响本次
+      }
+    }
     return pois;
   } catch (error) {
     curatedCache = { pois: [], at: now };
@@ -134,13 +165,18 @@ export async function prepareQuest(
 ): Promise<QuestStartResult> {
   const nowValue: number = deps.now();
 
-  // ① 地图 Key（包内 → Pages → 后台 → 免费源）
-  const keyResult: MapKeysResult = await loadMapKeys(
+  // ① 地图 Key 与策展数据**并发**拉取。
+  //    以前是串行：Key 最多等 5s（Pages 超时）+ 4s（后台超时），
+  //    再等策展 3.5s —— 光准备工作就能吃掉十几秒。两者互不依赖，必须并行。
+  const keysPromise: Promise<MapKeysResult> = loadMapKeys(
     deps.http, deps.kv, deps.readBundledKeys, deps.adminBase, nowValue
   );
+  const curatedPromise: Promise<CuratedPoi[]> = loadCuratedPois(deps.http, nowValue, deps.kv);
 
-  // ② 策展数据（人工审核过的最可靠）
-  const curated: CuratedPoi[] = await loadCuratedPois(deps.http, nowValue);
+  const keyResult: MapKeysResult = await keysPromise;
+  // 策展数据只是「锦上添花」：请求本身已限制在短超时内（见 search.CURATED_TIMEOUT_MS），
+  // 拿不到就用空表继续搜，绝不把一次抽盒拖成「等一张可选表」。
+  const curated: CuratedPoi[] = await curatedPromise;
 
   // ③ 三档真实搜索（没有初始档位时从 0 开始）
   const startTier: number = input.startTier === undefined ? 0 : input.startTier;

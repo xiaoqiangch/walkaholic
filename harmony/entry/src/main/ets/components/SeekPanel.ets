@@ -481,7 +481,10 @@ export struct WaSeekPanel {
   }
 
   build() {
-    Column({ space: 0 }) {
+    // 根必须是 Stack：面板底色铺满，Scroll 叠在上面。
+    // 如果写成 Column + 全高背景 Column，背景会把 Scroll 整个挤出屏幕，
+    // 表现就是「点开之后一片空白」（实际是本轮修复过的 bug）。
+    Stack({ alignContent: Alignment.TopStart }) {
       Column()
         .width('100%')
         .height('100%')
@@ -504,7 +507,7 @@ export struct WaSeekPanel {
         })
       }
       .width('100%')
-      .layoutWeight(1)
+      .height('100%')
       .scrollBar(BarState.Off)
       .edgeEffect(EdgeEffect.Spring)
     }

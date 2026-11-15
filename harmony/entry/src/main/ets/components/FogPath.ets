@@ -116,6 +116,11 @@ export struct WaFogPath {
 
     const geometry: FogGeometry = this.geometry;
 
+    // ---------- 0. 底图（街区网格 + 河，随地图朝向旋转） ----------
+    // 之前画布上只有一条细线，剩下全是空白 —— 像地图没加载出来。
+    // 这里补一层淡淡的街区底图，让人一眼看出「这是地图，不是白板」。
+    this.drawBackdrop(ctx, w, h, geometry.compassRotation);
+
     // 剩余 < 60m：整段不画（不露终点）
     if (geometry.hidden || geometry.segments.length === 0) {
       this.drawNearbyMark(ctx, w, h);
@@ -169,15 +174,24 @@ export struct WaFogPath {
       ctx.globalAlpha = 1;
     }
 
-    // ---------- 4. 「你」：白底琥珀圈 + 深色三角箭头 ----------
-    this.drawUserMark(ctx, geometry.userX, geometry.userY);
+    // ---------- 4. 「你」：白底琥珀圈 + 深色三角箭头（按 geometry.userRotation 旋转） ----------
+    this.drawUserMark(ctx, geometry.userX, geometry.userY, geometry.userRotation);
 
     // ---------- 5. 右下角指北针（指针按 -bearing 旋转） ----------
     this.drawCompass(ctx, w - 26, h - 26, geometry.compassRotation);
   }
 
-  /** 「你」：琥珀光晕 + 白底圆 + 深色三角（箭头指向上方 = 行进方向） */
-  private drawUserMark(ctx: CanvasRenderingContext2D, x: number, y: number): void {
+  /**
+   * 「你」：琥珀光晕 + 白底圆 + 深色三角。
+   *
+   * rotation 是**屏幕上的朝向**（0 = 朝上）：
+   * - 跟随模式（画布上方 = 设备朝向）恒为 0，箭头朝上；
+   * - 北朝上模式按 (设备朝向 - 0) 旋转，箭头指向你实际面朝的方向。
+   *
+   * 以前这里无视 rotation 恒定朝上 —— 于是在「北朝上」时，
+   * 指北针和路线都在说「北在上」，箭头却仍然指着北，和实际朝向自相矛盾。
+   */
+  private drawUserMark(ctx: CanvasRenderingContext2D, x: number, y: number, rotation: number): void {
     ctx.fillStyle = 'rgba(232, 155, 76, 0.22)';
     ctx.beginPath();
     ctx.arc(x, y, 17, 0, Math.PI * 2);
@@ -191,15 +205,19 @@ export struct WaFogPath {
     ctx.fill();
     ctx.stroke();
 
-    // 深色三角箭头（朝上）
+    // 深色三角箭头（按 rotation 旋转）
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(rotation * Math.PI / 180);
     ctx.fillStyle = WAColor.ink;
     ctx.beginPath();
-    ctx.moveTo(x, y - 8);
-    ctx.lineTo(x + 6, y + 5);
-    ctx.lineTo(x, y + 2);
-    ctx.lineTo(x - 6, y + 5);
+    ctx.moveTo(0, -8);
+    ctx.lineTo(6, 5);
+    ctx.lineTo(0, 2);
+    ctx.lineTo(-6, 5);
     ctx.closePath();
     ctx.fill();
+    ctx.restore();
   }
 
   /** 指北针：北向指针按 -bearing 旋转（画布上方是行进方向） */
@@ -236,6 +254,59 @@ export struct WaFogPath {
     ctx.restore();
   }
 
+  /**
+   * 底图：淡街区网格 + 一条河。
+   *
+   * 只做氛围，不承载任何信息（不画街道名、不画终点），
+   * 旋转角度与路径一致，这样「地图随动」看起来才是一整张地图在动。
+   */
+  private drawBackdrop(ctx: CanvasRenderingContext2D, w: number, h: number, rotation: number): void {
+    const cx: number = w / 2;
+    const cy: number = h / 2;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(rotation * Math.PI / 180);
+    ctx.translate(-cx, -cy);
+
+    const span: number = Math.max(w, h) * 1.8;
+    const left: number = cx - span / 2;
+    const top: number = cy - span / 2;
+
+    // 街区网格（两组平行线，斜一点，避免死板的正交）
+    ctx.strokeStyle = 'rgba(166, 156, 140, 0.16)';
+    ctx.lineWidth = 1;
+    const step: number = 46;
+    ctx.beginPath();
+    for (let x = left; x <= left + span; x += step) {
+      ctx.moveTo(x, top);
+      ctx.lineTo(x + span * 0.06, top + span);
+    }
+    for (let y = top; y <= top + span; y += step) {
+      ctx.moveTo(left, y);
+      ctx.lineTo(left + span, y + span * 0.05);
+    }
+    ctx.stroke();
+
+    // 主干道（比网格粗、比路径淡）
+    ctx.strokeStyle = 'rgba(232, 222, 204, 0.85)';
+    ctx.lineWidth = 9;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(left, cy + 40);
+    ctx.quadraticCurveTo(cx, cy - 30, left + span, cy - 10);
+    ctx.stroke();
+
+    // 河
+    ctx.strokeStyle = 'rgba(46, 125, 120, 0.10)';
+    ctx.lineWidth = 22;
+    ctx.beginPath();
+    ctx.moveTo(left, cy - span * 0.18);
+    ctx.quadraticCurveTo(cx + span * 0.1, cy + span * 0.10, left + span, cy - span * 0.06);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
   /** 剩余 < 60m：只画一个柔和的光点（不画路径、不画终点） */
   private drawNearbyMark(ctx: CanvasRenderingContext2D, w: number, h: number): void {
     const x: number = w / 2;
@@ -248,7 +319,7 @@ export struct WaFogPath {
     ctx.beginPath();
     ctx.arc(x, y, 26, 0, Math.PI * 2);
     ctx.fill();
-    this.drawUserMark(ctx, x, y);
+    this.drawUserMark(ctx, x, y, 0);
   }
 
   build() {

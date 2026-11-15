@@ -13,10 +13,10 @@
  * 只显示「目的地保密中 · 还有 N 米」、方位箭头、以及不含地名的三阶线索。
  *
  * 真实定位：geoLocationManager.on('locationChange') → store.updateGeoLocation(origin)；
- * 权限被拒 / 超时 / 定位关闭 → 降级 store.setDemoMode(true)，并在 UI 明确标「演示」。
+ * 权限被拒 / 超时 / 定位关闭 → 明确提示定位不可用；**绝不降级成虚构地点**。
  */
 
-import { common } from '@kit.AbilityKit';
+import { common, Want } from '@kit.AbilityKit';
 import { getStore, getStoreInstance } from '../core/store';
 import { AppSnapshot, RoutePolyline } from '../core/contract';
 import {
@@ -177,12 +177,12 @@ export struct JourneyView {
 
   private mapHeight(): number {
     if (this.isShort()) {
-      return 176;
+      return 200;
     }
     if (this.winWidth >= WASize.wideBreakpoint) {
-      return 300;
+      return 340;
     }
-    return 268;
+    return 300;
   }
 
   private elapsedSeconds(): number {
@@ -218,8 +218,8 @@ export struct JourneyView {
     });
     const started: boolean = watcher.start();
     if (!started) {
+      // 定位不可用：**不再降级成虚构地点**，只标注失败，让用户去处理权限/GPS
       this.watchFailed = true;
-      getStore().setDemoMode(true);
       this.onChanged();
       this.load();
       return;
@@ -274,16 +274,6 @@ export struct JourneyView {
     this.load();
     this.onChanged();
     this.handleEvents(events);
-  }
-
-  private switchToDemo(): void {
-    if (this.watcher !== undefined) {
-      this.watcher.stop();
-      this.watcher = undefined;
-    }
-    getStore().setDemoMode(true);
-    this.onChanged();
-    this.load();
   }
 
   // ============================================================
@@ -373,9 +363,26 @@ export struct JourneyView {
       return '→';
     }
     if (this.isRealMode() && session.currentBearing !== undefined) {
-      return bearingArrow(session.currentBearing);
+      return bearingArrow(this.relativeBearing(session.currentBearing));
     }
     return demoBearingArrow(session.remainingMeters);
+  }
+
+  /** 地图「上方」对应的绝对方位：跟随模式 = 设备朝向；北朝上 = 0 */
+  private mapUpBearing(): number {
+    if (!this.mapFollowsHeading) return 0;
+    return this.heading >= 0 ? this.heading : 0;
+  }
+
+  /**
+   * 把绝对方位差换算成「屏幕上的角度」。
+   *
+   * 为什么必须换算：地图是 heading-up 的，屏幕上方 = 我面朝的方向。
+   * 如果箭头直接用绝对方位（东 = →），就会出现「地图指向北、箭头指向东」的自相矛盾 ——
+   * 用户看到的是两个互相打脸的指示。
+   */
+  private relativeBearing(absolute: number): number {
+    return ((absolute - this.mapUpBearing()) % 360 + 360) % 360;
   }
 
   private directionCopy(): string {
@@ -601,7 +608,7 @@ export struct JourneyView {
     try {
       const context = getContext() as common.UIAbilityContext;
       if (context.startAbility !== undefined) {
-        const want = {
+        const want: Want = {
           action: 'ohos.want.action.viewData',
           entities: ['entity.system.browsable'],
           uri: 'geo:' + point.latitude.toFixed(6) + ',' + point.longitude.toFixed(6) +
@@ -710,13 +717,13 @@ export struct JourneyView {
         Circle()
           .width(6)
           .height(6)
-          .fill(this.isRealMode() ? WAColor.teal : WAColor.amberDeep)
-        Text(this.isRealMode() ? '实时定位 · 真实坐标' : '演示模式 · 内置地点')
+          .fill(WAColor.teal)
+        Text('实时定位 · 真实坐标')
           .fontSize(WAFont.micro)
-          .fontColor(this.isRealMode() ? WAColor.teal : WAColor.amberDeep)
+          .fontColor(WAColor.teal)
       }
       .padding({ left: 9, right: 9, top: 4, bottom: 4 })
-      .backgroundColor(this.isRealMode() ? WAColor.tealSoft : WAColor.amberSoft)
+      .backgroundColor(WAColor.tealSoft)
       .borderRadius(WASize.chipRadius)
 
       if (this.isRealMode()) {
@@ -874,29 +881,83 @@ export struct JourneyView {
         .fontColor(WAColor.ink2)
         .width('100%')
 
-      Stack({ alignContent: Alignment.Start }) {
-        Row()
-          .width('100%')
-          .height(5)
-          .backgroundColor(WAColor.line)
-          .borderRadius(3)
+      Progress({ value: this.progressValue() * 100, total: 100, type: ProgressType.Linear })
+        .width('100%')
+        .height(5)
+        .color(WAColor.amber)
+        .backgroundColor(WAColor.line)
+        .margin({ top: 4 })
 
-        Row()
-          .width((this.progressValue() * 100) + '%')
-          .height(5)
-          .backgroundColor(WAColor.amber)
-          .borderRadius(3)
+      // 数据条：把「已走 / 总长 / 预计剩余 / 平均速度」一次说清，
+      // 同时填充导航面板下方原本的大片空白。
+      Row({ space: 0 }) {
+        this.statCell('已走', this.distanceShort(this.walkedMeters()))
+        this.statDivider()
+        this.statCell('全程', this.distanceShort(this.totalMeters()))
+        this.statDivider()
+        this.statCell('预计', String(this.estimateMinutes()) + ' 分钟')
+        this.statDivider()
+        this.statCell('均速', this.paceText())
       }
       .width('100%')
-      .margin({ top: 4 })
-
-      Text('已走 ' + String(this.walkedMeters()) + ' 米 · 共 ' + String(this.totalMeters()) + ' 米')
-        .fontSize(WAFont.micro)
-        .fontColor(WAColor.ink3)
-        .width('100%')
+      .padding({ top: 12, bottom: 4 })
     }
     .width('100%')
     .padding({ left: WASize.pagePadding, right: WASize.pagePadding, top: 18 })
+  }
+
+  /** 数据条的一格 */
+  @Builder
+  statCell(label: string, value: string) {
+    Column({ space: 3 }) {
+      Text(value)
+        .fontSize(WAFont.caption)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(WAColor.ink)
+        .maxLines(1)
+      Text(label)
+        .fontSize(WAFont.micro)
+        .fontColor(WAColor.ink3)
+        .maxLines(1)
+    }
+    .layoutWeight(1)
+    .alignItems(HorizontalAlign.Center)
+  }
+
+  @Builder
+  statDivider() {
+    Column()
+      .width(1)
+      .height(20)
+      .backgroundColor(WAColor.line)
+  }
+
+  /** 距离紧凑写法：<1000 用米，否则用公里 */
+  private distanceShort(meters: number): string {
+    if (meters >= 1000) return (meters / 1000).toFixed(1) + ' km';
+    return String(Math.round(meters)) + ' m';
+  }
+
+  /** 按 75 米/分钟估算剩下的步行时间 */
+  private estimateMinutes(): number {
+    const meters: number = this.remainingMeters();
+    if (this.isDriveSegment()) {
+      // 开车段：按 40km/h 粗估，至少 1 分钟
+      const minutes: number = Math.round(meters / 1000 / 40 * 60);
+      return minutes < 1 ? 1 : minutes;
+    }
+    const minutes: number = Math.round(meters / 75);
+    return minutes < 1 ? 1 : minutes;
+  }
+
+  /** 平均速度（km/h）：用已走里程 ÷ 已用时间；不够 20 秒时显示 — */
+  private paceText(): string {
+    const seconds: number = this.elapsedSeconds();
+    if (seconds < 20) return '—';
+    const km: number = this.walkedMeters() / 1000;
+    const speed: number = km / (seconds / 3600);
+    if (!isFinite(speed) || speed < 0) return '—';
+    return speed.toFixed(1) + ' km/h';
   }
 
   private walkedMeters(): number {
@@ -1045,14 +1106,6 @@ export struct JourneyView {
             this.arriveNow();
           }
         })
-        Text('位置没动？改用演示模式 ›')
-          .fontSize(WAFont.micro)
-          .fontColor(WAColor.ink3)
-          .width('100%')
-          .textAlign(TextAlign.Center)
-          .onClick(() => {
-            this.switchToDemo();
-          })
       }
     }
     .width('100%')

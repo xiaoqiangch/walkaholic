@@ -50,6 +50,7 @@ import {
   rarityColor
 } from '../theme/Theme';
 import { formatShortDate } from '../components/Format';
+import { toImageUri } from '../components/PhotoPick';
 import { categorySymbol } from '../components/WaSymbol';
 
 enum CardFilter {
@@ -293,7 +294,10 @@ export struct CardsView {
   private cardPhotoUri(placeID: string): string {
     const card: PlaceCard | undefined = this.cardFor(placeID);
     if (card === undefined) return '';
-    if (card.photoName !== undefined && card.photoName.length > 0) return card.photoName;
+    // 存档里是裸沙箱路径，Image() 只认 file:// URI（早期版本写过裸路径）
+    if (card.photoName !== undefined && card.photoName.length > 0) {
+      return toImageUri(card.photoName);
+    }
     return this.cardPhotoRemote(placeID);
   }
 
@@ -813,17 +817,40 @@ export struct CardsView {
   @Builder
   collectedCell(place: Place, card: PlaceCard) {
     Column({ space: 0 }) {
-      SymbolGlyph($r('sys.symbol.' + categorySymbol(place.category)))
-        .fontSize(26)
-        .fontColor([WAColor.ink2])
-        .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+      // 到达时拍的照片就是这张卡的脸（产品要求：拍了照，图鉴里就用这张）
+      // 没有照片才退回类别图标。
+      if (this.hasCardPhoto(place.id)) {
+        Stack({ alignContent: Alignment.BottomEnd }) {
+          Image(this.cardPhotoUri(place.id))
+            .width('100%')
+            .height(48)
+            .objectFit(ImageFit.Cover)
+            .borderRadius(WASize.cardRadiusXs)
+            .alt($r('app.media.app_icon'))
+
+          SymbolGlyph($r('sys.symbol.' + categorySymbol(place.category)))
+            .fontSize(12)
+            .fontColor([WAColor.iconOnBrand])
+            .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+            .padding(3)
+            .backgroundColor('#66182431')
+            .borderRadius(6)
+            .margin({ right: 4, bottom: 4 })
+        }
         .width('100%')
+      } else {
+        SymbolGlyph($r('sys.symbol.' + categorySymbol(place.category)))
+          .fontSize(26)
+          .fontColor([WAColor.ink2])
+          .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+          .width('100%')
+      }
 
       Text(place.name)
         .fontSize(WAFont.captionSm)
         .fontWeight(FontWeight.Medium)
         .fontColor(WAColor.ink)
-        .maxLines(2)
+        .maxLines(this.hasCardPhoto(place.id) ? 1 : 2)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .width('100%')
         .margin({ top: 4 })

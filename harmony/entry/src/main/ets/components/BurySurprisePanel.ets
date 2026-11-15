@@ -16,7 +16,7 @@ import { BuriedSurprise, GeoPoint } from '../core/types';
 import { getStore } from '../core/store';
 import { WAColor, WAFont, WASize } from '../theme/Theme';
 import { WaIconButton, WaMicroLabel, WaPrimaryButton, WaQuietButton } from './Common';
-import { PickedPhoto, adoptPhoto, pickPhotoFromAlbum } from './PhotoPick';
+import { PickedPhoto, adoptPhoto, pickPhotoFromAlbum, toImageUri } from './PhotoPick';
 import { getCurrentLocationOnce, requestLocationPermission } from './Location';
 
 const MESSAGE_LIMIT: number = 60;
@@ -319,7 +319,7 @@ export struct BurySurprisePanel {
   photoSection() {
     if (this.picked !== undefined) {
       Column({ space: 10 }) {
-        Image((this.picked as PickedPhoto).uri)
+        Image(toImageUri((this.picked as PickedPhoto).uri))
           .width('100%')
           .height(200)
           .objectFit(ImageFit.Cover)

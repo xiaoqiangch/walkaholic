@@ -10,7 +10,7 @@
  */
 
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
-import { cameraPicker } from '@kit.CameraKit';
+import { camera, cameraPicker } from '@kit.CameraKit';
 import { image } from '@kit.ImageKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { util } from '@kit.ArkTS';
@@ -65,7 +65,7 @@ export async function takePhoto(): Promise<string | undefined> {
   try {
     const context: common.UIAbilityContext = getContext() as common.UIAbilityContext;
     const pickerProfile: cameraPicker.PickerProfile = {
-      cameraPosition: cameraPicker.CameraPosition.BACK
+      cameraPosition: camera.CameraPosition.CAMERA_POSITION_BACK
     };
     const result: cameraPicker.PickerResult = await cameraPicker.pick(
       context, [cameraPicker.PickerMediaType.PHOTO], pickerProfile
@@ -176,6 +176,27 @@ async function readGray(
   return gray;
 }
 
+/**
+ * 沙箱绝对路径 → 可给 `Image()` 用的 URI。
+ *
+ * 为什么必须加 `file://`：ArkUI 的 `Image` 只认「网络 URL / file:// URI / Resource /
+ * PixelMap」，给裸路径（`/data/storage/el2/...`）会静默加载失败 ——
+ * 表现就是「拍完照，图鉴里空空一片」。
+ * 早期版本已经把裸路径写进了本地存档，所以这里做兼容：已经带 scheme 的直接返回。
+ */
+export function toImageUri(pathOrUri: string): string {
+  if (pathOrUri.length === 0) return '';
+  if (pathOrUri.startsWith('file://') || pathOrUri.startsWith('datashare://')) return pathOrUri;
+  if (pathOrUri.startsWith('/')) return 'file://' + pathOrUri;
+  return pathOrUri;
+}
+
+/** URI → 给 `fs.*` 用的裸路径（fileIo 两种都认，但统一一下更稳） */
+export function toFsPath(pathOrUri: string): string {
+  if (pathOrUri.startsWith('file://')) return pathOrUri.substring(7);
+  return pathOrUri;
+}
+
 /** 复制到沙箱 filesDir/surprises/<hash>.jpg，返回绝对路径 */
 function copyToSandbox(
   context: common.UIAbilityContext,
@@ -214,7 +235,7 @@ export function photoExists(uri: string): boolean {
     return false;
   }
   try {
-    return fs.accessSync(uri);
+    return fs.accessSync(toFsPath(uri));
   } catch (err) {
     return false;
   }
@@ -250,13 +271,14 @@ export async function pickAndAdoptPhoto(context: common.UIAbilityContext): Promi
 export function readPhotoAsBase64(uri: string): string {
   if (uri.length === 0) return '';
   try {
-    const file: fs.File = fs.openSync(uri, fs.OpenMode.READ_ONLY);
+    const file: fs.File = fs.openSync(toFsPath(uri), fs.OpenMode.READ_ONLY);
     try {
       const stat: fs.Stat = fs.statSync(file.fd);
       const buffer: ArrayBuffer = new ArrayBuffer(stat.size);
       fs.readSync(file.fd, buffer);
       const bytes: Uint8Array = new Uint8Array(buffer);
-      return util.Base64Helper.encodeToStringSync(bytes);
+      const helper: util.Base64Helper = new util.Base64Helper();
+      return helper.encodeToStringSync(bytes);
     } finally {
       fs.closeSync(file);
     }

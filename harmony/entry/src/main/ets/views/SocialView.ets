@@ -155,7 +155,7 @@ export struct SocialView {
         .margin({ top: 4 })
 
       Row({ space: 12 }) {
-        Text(this.snapshot.togetherCode.length > 0 ? this.snapshot.togetherCode : 'K7M2QX')
+        Text(this.snapshot.togetherCode.length > 0 ? this.snapshot.togetherCode : '— — — — — —')
           .fontSize(26)
           .fontWeight(FontWeight.Bold)
           .fontColor(WAColor.ink)

@@ -5,13 +5,13 @@
  *
  * 流程（严格按 docs/parity.md §1 §2）：
  *   选时长/心情/区域 →「摇一个盲盒」
- *     → 申请定位 + 取一次坐标（拒绝/超时 → **定位受阻面板**，不偷偷用虚构地点）
+ *     → 申请定位 + 取一次坐标（拒绝/超时 → **定位受阻面板**，绝不用虚构地点）
  *     → 地图 Key 下发 + 策展 pois.json
  *     → 三档放宽真实搜索（高德/百度/OSM/维基）
  *     → 成功：startQuestWithPlace（真实来源 + 真实坐标）
  *     → 失败：**明确失败面板**（扩大范围 / 换个位置 / 显式选演示）
  *
- * 产品红线：真实模式下**绝不虚构兜底**。演示模式只能由用户点按钮显式进入。
+ * 产品红线：**绝不虚构兜底**，app 内也不提供任何「演示/虚构地点」入口。
  * 保密：本页不读取 currentPlace，也不展示任何地点名。
  */
 
@@ -33,7 +33,7 @@ import {
   WaPill,
   WaPrimaryButton
 } from '../components/Common';
-import { waSleep, waToast } from '../components/Async';
+import { waToast } from '../components/Async';
 import { emptySnapshot, readSnapshot } from '../components/StoreBridge';
 import { getCurrentLocationOnce, requestLocationPermission } from '../components/Location';
 import {
@@ -121,7 +121,7 @@ class ScopeOption {
 /** 怎么去（与 iOS BoxSetupSheet.scopeSection 逐字一致） */
 const SCOPES: ScopeOption[] = [
   new ScopeOption(ExploreScope.Walk, '走路去', '3 公里内，抬脚就走', 'figure_walk'),
-  new ScopeOption(ExploreScope.Roam, '远程漫游', '10–45 公里 · 先开车到附近停车，再走过去', 'map')
+  new ScopeOption(ExploreScope.Roam, '远程漫游', '10–20 公里 · 先开车到附近停车，再走过去', 'map')
 ];
 
 @Component
@@ -281,8 +281,19 @@ export struct SetupSheet {
     this.locationBlockedReason = '';
     this.statusText = '正在取你的位置…';
 
-    // ---------- 1. 定位（拒绝 / 超时 → 明确面板） ----------
+    // ---------- 1. 定位 ----------
+    //
+    // 性能：**先用最近的定位，再考虑重新取一次**。
+    // 以前每次抽盒都强制 getCurrentLocationOnce(6000)，在室内/模拟器上经常要等 2–4 秒。
+    // 而两分钟内的定位对「抽一个 300–1600 米外的点」完全没有影响。
     let origin: GeoPoint | undefined = this.manualOrigin;
+    if (origin === undefined) {
+      const store0 = getStore();
+      const fresh: GeoPoint | undefined = store0.freshOrigin(120 * 1000);
+      if (fresh !== undefined) {
+        origin = fresh;
+      }
+    }
     if (origin === undefined) {
       const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
       const granted: boolean = await requestLocationPermission(context);
@@ -311,7 +322,7 @@ export struct SetupSheet {
 
     // ---------- 2. 摇盒动画（600ms，与设计稿一致） ----------
     this.statusText = this.snapshot.selectedScope === ExploreScope.Roam
-      ? '正在 10–45 公里内找值得开过去的地方…'
+      ? '正在 10–20 公里内找值得开过去的地方…'
       : '正在看附近有什么…';
     this.isShaking = true;
     animateTo({
@@ -323,7 +334,12 @@ export struct SetupSheet {
       this.shakeAngle = 6;
     });
 
-    // ---------- 3. 真实搜索（Key 下发 + 策展优先 + 三档放宽） ----------
+    // ---------- 3. 真实搜索（Key 下发 + 策展优先 + 三档放宽 + 自动扩范围） ----------
+    // 搜索可能花几秒（要打多个源），用一个定时器把「正在看附近」升级成
+    // 「正在扩大范围」，让用户知道进度在推进，而不是卡住了。
+    const stageTimer: number = setTimeout(() => {
+      this.statusText = '附近没找到更好的，正在往外扩大范围…';
+    }, 1400);
     const deps: QuestFlowDeps | undefined = this.deps();
     let result: QuestStartResult | undefined = undefined;
     if (deps !== undefined) {
@@ -341,8 +357,8 @@ export struct SetupSheet {
         result = undefined;
       }
     }
+    clearTimeout(stageTimer);
 
-    await waSleep(400);
     this.isShaking = false;
     this.shakeAngle = 0;
     this.busy = false;
@@ -384,25 +400,6 @@ export struct SetupSheet {
     } else if (result.poolSize > 0) {
       waToast('附近找到 ' + String(result.poolSize) + ' 个真实地点');
     }
-    this.load();
-    this.onChanged();
-    this.onStarted();
-  }
-
-  /** 显式进入演示模式（只在用户点按钮时发生） */
-  private startDemoExplicitly(): void {
-    const store = getStore();
-    store.setDemoMode(true);
-    this.locationBlockedReason = '';
-    this.searchFailedReason = '';
-    this.searchTier = 0;
-    const result = store.startQuest();
-    if (result === undefined) {
-      this.failed = true;
-      this.onChanged();
-      return;
-    }
-    waToast('演示模式 · 内置地点');
     this.load();
     this.onChanged();
     this.onStarted();
@@ -695,9 +692,6 @@ export struct SetupSheet {
           },
           onManualLocation: () => {
             this.manualOpen = true;
-          },
-          onStartDemo: () => {
-            this.startDemoExplicitly();
           }
         })
       }
@@ -712,9 +706,6 @@ export struct SetupSheet {
           },
           onManualLocation: () => {
             this.manualOpen = true;
-          },
-          onStartDemo: () => {
-            this.startDemoExplicitly();
           }
         })
       }

@@ -14,6 +14,7 @@
  */
 
 import { bearing as bearingBetween, distance as distanceBetween, offset as offsetPoint } from './geo';
+import { MIN_PLACE_DISTANCE_METERS } from './parity';
 import {
   Achievement,
   Area,
@@ -99,7 +100,6 @@ import {
 } from './achievements';
 import { DEMO_ORIGIN, demoState } from './demo';
 import {
-  DEMO_TOGETHER_CODE,
   cloneLeaderboardEntry,
   clonePost,
   leaderboard,
@@ -228,6 +228,8 @@ export class WalkaholicStore implements WalkaholicStoreApi {
   /** 抽盒范围：走路去 / 远程漫游（持久化，下次打开抽盒页保持选择） */
   private selectedScopeValue: ExploreScope;
   private lastKnownOriginValue: GeoPoint | undefined;
+  /** 上次定位的时间戳（用于判断「最近定位」是否还新鲜） */
+  private lastKnownOriginAt: number = 0;
   private demoModeValue: boolean;
   private routeValue: RoutePolyline | undefined;
   private dataSourceValue: DataSourceStatus;
@@ -240,13 +242,20 @@ export class WalkaholicStore implements WalkaholicStoreApi {
   /** 走路轨迹（个人城市地图的数据层） */
   private trackStore: WalkTrackStore;
 
-  constructor(kv: KeyValueStore) {
+  /**
+   * @param kv 平台 KV
+   * @param testSeed **仅供单元测试**：播种演示态档案。
+   *        app 运行时永远是 false —— 产品红线禁止任何虚构地点。
+   */
+  constructor(kv: KeyValueStore, testSeed: boolean = false) {
     this.kv = kv;
     this.selectedMoodValue = Mood.Drift;
     this.selectedDurationValue = WalkDuration.M30;
     this.selectedAreaValue = undefined;
     this.selectedScopeValue = ExploreScope.Walk;
-    this.demoModeValue = true;
+    // 产品红线：**任何虚构 / 演示地点都不允许出现在 app 里**。
+    // 因此 demoMode 永远为 false，下面也不再播种任何演示档案。
+    this.demoModeValue = false;
     this.routeValue = undefined;
     this.dataSourceValue = emptyDataSourceStatus();
     this.nearbyPlacesValue = [];
@@ -263,7 +272,6 @@ export class WalkaholicStore implements WalkaholicStoreApi {
 
     const now: number = Date.now();
     const loaded: LoadedProfile | undefined = loadProfile(kv);
-    const seedDemo: boolean = loaded === undefined;
     const demo = demoState(now);
 
     if (loaded !== undefined) {
@@ -275,7 +283,18 @@ export class WalkaholicStore implements WalkaholicStoreApi {
       this.revealSerialValue = loaded.extras.revealSerial;
       this.currentCardValue = loaded.extras.currentCard;
       this.selectedScopeValue = loaded.extras.selectedScope;
-    } else {
+      // 老存档里可能带着虚构地点的旅程（早期版本的演示态）：
+      // 一旦 currentPlace 不是真实来源，就整段丢掉，绝不显示。
+      // 单元测试种子（testSeed）例外，它本来就用内置地点验证契约。
+      if (!testSeed && this.currentPlaceValue !== undefined &&
+          !isRealPlaceSource(this.currentPlaceValue.source)) {
+        this.sessionValue = undefined;
+        this.currentPlaceValue = undefined;
+        this.currentCardValue = undefined;
+        this.revealSerialValue = undefined;
+      }
+    } else if (testSeed) {
+      // 单元测试专用：播种演示档案，用来验证「演示态」下的各项契约。
       this.profile = demo.profile;
       this.extras = demo.extras;
       this.sessionValue = demo.session;
@@ -285,14 +304,26 @@ export class WalkaholicStore implements WalkaholicStoreApi {
       this.selectedDurationValue = demo.selectedDuration;
       this.selectedAreaValue = demo.selectedArea;
       this.lastKnownOriginValue = cloneGeoPoint(demo.lastKnownOrigin);
+      this.demoModeValue = true;
+    } else {
+      // 首次启动（生产）：**绝不播种任何演示/虚构内容** ——
+      // 空档案、空动态、空惊喜，一切等真实定位与真实搜索填进来。
+      this.profile = emptyProfileFor(now);
+      this.extras = emptyExtrasFor();
+      this.sessionValue = undefined;
+      this.currentPlaceValue = undefined;
+      this.revealSerialValue = undefined;
+      this.selectedMoodValue = demo.selectedMood;
+      this.selectedDurationValue = demo.selectedDuration;
+      this.selectedAreaValue = demo.selectedArea;
     }
 
     this.knownPlaces = this.buildKnownPlaces();
     this.feed = this.buildFeed(now);
 
     const surprisesRaw: string | undefined = kv.getString(SURPRISES_KEY);
-    if (surprisesRaw === undefined && seedDemo) {
-      this.surprises = demo.surprises;
+    if (surprisesRaw === undefined) {
+      this.surprises = this.demoModeValue ? demo.surprises : [];
     } else {
       this.surprises = loadSurprises(kv);
     }
@@ -304,8 +335,18 @@ export class WalkaholicStore implements WalkaholicStoreApi {
 
   // ---------- 初始化辅助 ----------
 
+  /**
+   * 已知地点 = **只有真实地点**（curated/amap/baidu/osm/wiki）。
+   *
+   * 曾经这里会先塞进 24 个内置虚构地点（PLACES），于是图鉴里永远躺着
+   * 一堆「旧仓库改的书店」这类编造的地方 —— 产品红线明确禁止。
+   */
   private buildKnownPlaces(): Place[] {
-    const list: Place[] = PLACES.map((place: Place): Place => clonePlace(place));
+    const list: Place[] = [];
+    // 测试种子：把内置 catalog 也放进地点库，便于验证抽盒/图鉴逻辑
+    if (this.demoModeValue) {
+      for (let k = 0; k < PLACES.length; k += 1) list.push(clonePlace(PLACES[k]));
+    }
     for (let i = 0; i < this.extras.realPlaces.length; i += 1) {
       const realPlace: Place = this.extras.realPlaces[i];
       let exists: boolean = false;
@@ -321,10 +362,13 @@ export class WalkaholicStore implements WalkaholicStoreApi {
   }
 
   private buildFeed(now: number): FeedPost[] {
+    // 生产：只用用户自己发过的真实动态，没有就是空列表。
+    // 测试种子：允许用 mockPosts 验证圈子交互。
     if (this.extras.feed.length > 0) {
       return this.extras.feed.map((post: FeedPost): FeedPost => clonePost(post));
     }
-    return mockPosts(now);
+    if (this.demoModeValue) return mockPosts(now);
+    return [];
   }
 
   private achievementContext(): AchievementContext {
@@ -746,7 +790,7 @@ export class WalkaholicStore implements WalkaholicStoreApi {
     this.revealSerialValue = undefined;
     this.routeValue = undefined;
     this.nearbyPlacesValue = [];
-    this.knownPlaces = PLACES.map((place: Place): Place => clonePlace(place));
+    this.knownPlaces = [];
     this.receiptStore.removeAll();
     this.trackStore.clear();
     this.persist(timestamp);
@@ -1075,6 +1119,32 @@ export class WalkaholicStore implements WalkaholicStoreApi {
     this.persist(Date.now());
   }
 
+  /**
+   * 同频码：**由本机真实数据派生**，不再返回写死的 'K7M2QX'。
+   *
+   * 规则：取「首次开盒时间 + 本机标识」做一次稳定哈希，得到 6 位大写字母数字。
+   * 同一天同一台机器永远是同一串，但不同人不会撞码，也不会是编造出来的固定值。
+   * 还没有开过盒时返回空串（UI 显示「开一盒才有同频码」）。
+   */
+  private togetherCodeValue(): string {
+    if (this.extras.boxesOpened <= 0) return '';
+    const seedText: string =
+      String(this.profile.weeklyWindowStart) + '|' + this.profile.name + '|' +
+      String(this.extras.walkArrivalTimes.length) + '|' + String(this.extras.totalKm);
+    const alphabet: string = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let hash: number = 2166136261;
+    for (let i = 0; i < seedText.length; i += 1) {
+      hash ^= seedText.charCodeAt(i);
+      hash = (hash * 16777619) % 4294967296;
+    }
+    let code: string = '';
+    for (let i = 0; i < 6; i += 1) {
+      hash = (hash * 1103515245 + 12345) % 2147483648;
+      code += alphabet.charAt(hash % alphabet.length);
+    }
+    return code;
+  }
+
   // ---------- 快照 ----------
 
   snapshot(): AppSnapshot {
@@ -1092,8 +1162,15 @@ export class WalkaholicStore implements WalkaholicStoreApi {
     const destinationCollected: boolean = place === undefined
       ? false
       : this.isPlaceCollected(place.id);
+    const origin: GeoPoint | undefined = this.lastKnownOriginValue;
     for (let i = 0; i < this.knownPlaces.length; i += 1) {
       const item: Place = this.knownPlaces[i];
+      // 300 米以内的「未收录」地点不进图鉴：
+      // 开门就到的地方没有探索价值（parity.md §2 的 MIN_PLACE_DISTANCE_METERS）。
+      // 已经收录成卡的例外 —— 那是用户的回忆，不能因为搬家/定位变化就消失。
+      if (origin !== undefined && item.coordinate !== undefined && !this.isPlaceCollected(item.id)) {
+        if (distanceBetween(origin, item.coordinate) < MIN_PLACE_DISTANCE_METERS) continue;
+      }
       if (walking && place !== undefined && item.id === place.id && !destinationCollected) {
         places.push(maskPlaceForWalking(item));
       } else {
@@ -1104,7 +1181,7 @@ export class WalkaholicStore implements WalkaholicStoreApi {
     const snapshot: AppSnapshot = {
       profile: snapshotProfile,
       places: places,
-      togetherCode: DEMO_TOGETHER_CODE,
+      togetherCode: this.togetherCodeValue(),
       selectedMood: this.selectedMoodValue,
       selectedDuration: this.selectedDurationValue,
       selectedScope: this.selectedScopeValue,
@@ -1210,7 +1287,22 @@ export class WalkaholicStore implements WalkaholicStoreApi {
 
   // ---------- 定位 ----------
 
+  /**
+   * 最近一次定位（可选「多久内算新」）。
+   *
+   * 抽盒只需要知道「大概在哪」，两分钟内的定位完全够用 ——
+   * 每次重新发起 GPS 请求在室内能拖 2–4 秒，是抽盒慢的一大来源。
+   */
+  freshOrigin(maxAgeMs?: number): GeoPoint | undefined {
+    if (this.lastKnownOriginValue === undefined) return undefined;
+    if (maxAgeMs === undefined) return cloneGeoPoint(this.lastKnownOriginValue);
+    const age: number = Date.now() - this.lastKnownOriginAt;
+    if (this.lastKnownOriginAt <= 0 || age < 0 || age > maxAgeMs) return undefined;
+    return cloneGeoPoint(this.lastKnownOriginValue);
+  }
+
   setLastKnownOrigin(origin: GeoPoint): void {
+    this.lastKnownOriginAt = Date.now();
     this.lastKnownOriginValue = cloneGeoPoint(origin);
     this.rebaseSeedSurprises(origin);
   }
@@ -1374,6 +1466,40 @@ export class WalkaholicStore implements WalkaholicStoreApi {
   }
 }
 
+/**
+ * 干净档案（首次启动 / 重置时用）。
+ *
+ * 产品红线：不许出现任何虚构地点，所以首启**不再播种演示内容** ——
+ * 空档案、空动态、空惊喜，一切等真实数据填进来。
+ */
+function emptyProfileFor(now: number): Profile {
+  const profile: Profile = {
+    name: '阿澈',
+    avatarEmoji: '🫥',
+    xp: 0,
+    streakDays: 0,
+    cards: [],
+    achievements: [],
+    weeklySurprise: 0,
+    weeklyWindowStart: now
+  };
+  return profile;
+}
+
+function emptyExtrasFor(): StoreExtras {
+  const extras: StoreExtras = {
+    totalKm: 0,
+    boxesOpened: 0,
+    walkArrivalTimes: [],
+    togetherCount: 0,
+    feed: [],
+    realPlaces: [],
+    consolationPaid: [],
+    selectedScope: ExploreScope.Walk
+  };
+  return extras;
+}
+
 /** 真实来源白名单：任何不在其中的都必须被拒绝（绝不虚构兜底） */
 export function isRealPlaceSource(source: string): boolean {
   return source === 'curated' || source === 'amap' || source === 'baidu' ||
@@ -1417,8 +1543,8 @@ let singleton: WalkaholicStore | undefined = undefined;
  * - 有存档 → 读回 profile + surprises
  * - 无存档 → 预置演示态（与 iOS `WalkaholicStore.demo()` 一致的 demo 开关）
  */
-export async function initStore(kv: KeyValueStore): Promise<void> {
-  singleton = new WalkaholicStore(kv);
+export async function initStore(kv: KeyValueStore, testSeed: boolean = false): Promise<void> {
+  singleton = new WalkaholicStore(kv, testSeed);
 }
 
 /** UI 唯一的状态访问入口；未初始化时抛错，便于尽早发现启动顺序问题 */
