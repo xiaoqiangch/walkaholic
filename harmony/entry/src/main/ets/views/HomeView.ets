@@ -10,7 +10,7 @@
 
 import { promptAction } from '@kit.ArkUI';
 import { AppSnapshot } from '../core/contract';
-import { Place, PlaceCard, QuestSession, WalkDuration } from '../core/types';
+import { Place, PlaceCard, QuestSession, ExploreScope, WalkDuration } from '../core/types';
 import {
   WaAvatar,
   WaMicroLabel,
@@ -32,6 +32,7 @@ import {
 } from '../components/StoreBridge';
 import { WAColor, WAFont, WASize } from '../theme/Theme';
 import { greeting, kilometers, relativeDay } from '../components/Format';
+import { currentMoment, momentBoxTitle, momentEmoji, momentLine } from '../core/moment';
 
 class FriendInfo {
   name: string;
@@ -61,8 +62,14 @@ export struct HomeView {
 
   onOpenSetup: () => void = () => {
   };
-  /** 打开埋惊喜面板（首页「埋下一个」/「我的惊喜」） */
+  /** 打开埋惊喜面板（首页「埋下一个」） */
   onOpenBury: () => void = () => {
+  };
+  /** 打开「我的惊喜」（回执 / 我埋的 / 我找到的） */
+  onOpenMySurprises: () => void = () => {
+  };
+  /** 打开探寻面板（从图鉴的「附近的惊喜」进） */
+  onOpenSeek: (surpriseID: string) => void = () => {
   };
   onOpenJourney: () => void = () => {
   };
@@ -151,6 +158,15 @@ export struct HomeView {
     return 1600;
   }
 
+  /** 盲盒卡脚的说明：走路去 = 时长 + 半径；远程漫游 = 环带（与 iOS scopeCaption 一致） */
+  private scopeCaption(): string {
+    if (this.snapshot.selectedScope === ExploreScope.Roam) {
+      return '10–45 公里 · 先开车再走';
+    }
+    return '预计 ' + this.selectedDurationMinutes() + ' 分钟 · ' +
+      kilometers(this.durationRadiusMeters()) + ' 内';
+  }
+
   private statsItems(): StatItem[] {
     const items: StatItem[] = [];
     const weekly: StatItem = {
@@ -174,6 +190,16 @@ export struct HomeView {
   /** 寻宝列表页尚未移植：只有这里还是提示 */
   private showSeekSoon(): void {
     promptAction.showToast({ message: '寻宝列表还在做，先从图鉴的「附近的惊喜」进', duration: 2400 });
+  }
+
+  /** 去寻宝：有附近的惊喜就打开第一个，否则提示去图鉴 */
+  private goSeek(): void {
+    const list = this.snapshot.explorableSurprises;
+    if (list.length === 0) {
+      promptAction.showToast({ message: '附近暂时没有别人埋的惊喜，先埋一个吧', duration: 2400 });
+      return;
+    }
+    this.onOpenSeek(list[0].id);
   }
 
   // ============================================================
@@ -232,19 +258,32 @@ export struct HomeView {
   @Builder
   heroText() {
     Column({ space: 6 }) {
-      Text('今天，想去哪儿？')
-        .fontSize(this.isShort() ? 22 : WAFont.hero)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(WAColor.ink)
-        .maxLines(1)
+      // 环境性盲盒：时段决定文案（与 iOS HomeView.hero 一致）
+      Row({ space: 5 }) {
+        Text(momentEmoji(currentMoment()))
+          .fontSize(WAFont.caption)
+        Text(momentBoxTitle(currentMoment()))
+          .fontSize(WAFont.captionSm)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(WAColor.amber)
+      }
+      .alignItems(VerticalAlign.Center)
 
-      Text('不用选。让城市替你选。')
+      Text(momentLine(currentMoment()))
         .fontSize(WAFont.bodySm)
         .fontColor(WAColor.ink2)
+        .lineHeight(20)
+        .width('100%')
+
+      Text('目的地抽到才知道。走过去的路上，它不显示。')
+        .fontSize(WAFont.microSm)
+        .fontColor(WAColor.ink3)
+        .lineHeight(17)
+        .width('100%')
     }
     .alignItems(HorizontalAlign.Start)
     .width('100%')
-    .margin({ top: 17, bottom: 16 })
+    .margin({ top: 14, bottom: 16 })
   }
 
   @Builder
@@ -297,8 +336,7 @@ export struct HomeView {
 
       Row() {
         Blank()
-        Text('预计 ' + this.selectedDurationMinutes() + ' 分钟 · ' +
-          kilometers(this.durationRadiusMeters()) + ' 内')
+        Text(this.scopeCaption())
           .fontSize(WAFont.micro)
           .fontColor(WAColor.ink3)
       }
@@ -417,7 +455,7 @@ export struct HomeView {
         WaMicroLabel({ text: '惊喜社区' })
         Blank()
         Text('我埋了 ' + mySurpriseCount(this.snapshot) + ' · 被找到 ' +
-          myFoundSurpriseCount(this.snapshot))
+          myFoundSurpriseCount(this.snapshot) + ' · 找到 ' + this.foundByMeCount())
           .fontSize(WAFont.micro)
           .fontColor(WAColor.ink3)
           .maxLines(1)
@@ -463,7 +501,7 @@ export struct HomeView {
         .backgroundColor(WAColor.paper2)
         .border({ width: 1, color: WAColor.line, radius: WASize.chipRadius })
         .onClick(() => {
-          this.showSeekSoon();
+          this.goSeek();
         })
       }
       .width('100%')
@@ -476,11 +514,28 @@ export struct HomeView {
         Text('›')
           .fontSize(WAFont.micro)
           .fontColor(WAColor.ink3)
+        if (this.snapshot.unreadReceiptCount > 0) {
+          Circle()
+            .width(7)
+            .height(7)
+            .fill(WAColor.ember)
+            .margin({ left: 3 })
+        }
       }
       .margin({ top: 10 })
       .onClick(() => {
-        this.onOpenBury();
+        this.onOpenMySurprises();
       })
+
+      // 被找到的回执：入口上的一句话（不显示照片与正文）
+      if (this.latestReceiptLine().length > 0) {
+        Text(this.latestReceiptLine())
+          .fontSize(WAFont.microSm)
+          .fontColor(WAColor.ember)
+          .lineHeight(17)
+          .width('100%')
+          .margin({ top: 8 })
+      }
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
@@ -489,6 +544,22 @@ export struct HomeView {
     .borderRadius(WASize.cardRadius)
     .border({ width: 1, color: WAColor.line, radius: WASize.cardRadius })
     .shadow({ radius: 14, color: WAColor.shadowSoft, offsetX: 0, offsetY: 9 })
+  }
+
+  /** 我找到的别人的惊喜数量 */
+  private foundByMeCount(): number {
+    return this.snapshot.foundSurprises.length;
+  }
+
+  /** 最近一条未读回执的一句话（「小满 找到了你埋在那儿的照片」） */
+  private latestReceiptLine(): string {
+    for (let i = 0; i < this.snapshot.receipts.length; i += 1) {
+      const receipt = this.snapshot.receipts[i];
+      if (receipt.readAt !== undefined) continue;
+      const area: string = receipt.areaLabel.length === 0 ? '那儿的' : '「' + receipt.areaLabel + '」的';
+      return receipt.finderName + ' 找到了你埋在' + area + '照片';
+    }
+    return '';
   }
 
   // ============================================================

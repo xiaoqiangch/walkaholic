@@ -112,6 +112,26 @@ export function passes(a: string, b: string): boolean {
   return similarity(a, b) >= PHOTO_PASS_THRESHOLD;
 }
 
+/**
+ * 演示相似度：用寻者照片哈希里的两段 6 bit 拼成 0.55…0.92。
+ *
+ * 为什么需要它：远端惊喜（别人埋的）本机没有作者原图，服务端也不下发照片。
+ * 数值是真随图变的（重拍会变），但来源不是作者原图，所以 UI 必须标注「演示匹配」。
+ * 与 iOS `PhotoLibraryService.demoSimilarity` 逐值一致。
+ */
+export function demoSimilarity(finderHash: string): number {
+  const normalized: string = normalizeHash(finderHash);
+  let value: number = 0;
+  for (let i = 0; i < HASH_HEX_LENGTH; i += 1) {
+    value = value * 16 + hexValue(normalized.charAt(i));
+  }
+  // 用两个 6 bit 段混合，避免只用低位导致分布集中
+  const low: number = (value % 64) / 63;
+  const high: number = (Math.floor(value / 68719476736) % 64) / 63;
+  const mixed: number = low * 0.65 + high * 0.35;
+  return 0.55 + mixed * 0.37;
+}
+
 /** 判定文案（温柔，不打击人；与苹果版逐字一致） */
 export function verdict(value: number): string {
   if (value >= 0.85) return '几乎一模一样。你找到了 TA 的视角。';
@@ -153,11 +173,26 @@ export function cloneSurprise(surprise: BuriedSurprise): BuriedSurprise {
   };
   if (surprise.myPhotoUri !== undefined) copy.myPhotoUri = surprise.myPhotoUri;
   if (surprise.similarity !== undefined) copy.similarity = surprise.similarity;
+  // 扩展字段（与 iOS BuriedSurprise 对齐）
+  if (surprise.message !== undefined) copy.message = surprise.message;
+  if (surprise.radiusMeters !== undefined) copy.radiusMeters = surprise.radiusMeters;
+  if (surprise.seekerPoints !== undefined) copy.seekerPoints = surprise.seekerPoints;
+  if (surprise.authorPoints !== undefined) copy.authorPoints = surprise.authorPoints;
+  if (surprise.finderName !== undefined) copy.finderName = surprise.finderName;
+  if (surprise.foundAt !== undefined) copy.foundAt = surprise.foundAt;
+  if (surprise.finderPhotoUri !== undefined) copy.finderPhotoUri = surprise.finderPhotoUri;
+  if (surprise.isMine !== undefined) copy.isMine = surprise.isMine;
+  if (surprise.isUploaded !== undefined) copy.isUploaded = surprise.isUploaded;
+  if (surprise.isRemote !== undefined) copy.isRemote = surprise.isRemote;
   return copy;
 }
 
-/** 是否是我埋的（苹果版用 displayName == "阿澈"；这里用当前用户名比较） */
+/**
+ * 是否是我埋的。
+ * 优先看 isMine 标记（改名后也认得出来），没有标记时退回作者名比较（老存档）。
+ */
 export function isMySurprise(surprise: BuriedSurprise, myName: string): boolean {
+  if (surprise.isMine === true) return true;
   return surprise.authorName === myName;
 }
 
