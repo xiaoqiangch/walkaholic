@@ -76,7 +76,9 @@ function rowToSurprise(row) {
   } catch (_) {
     clues = [];
   }
-  const photoData = row.photo_data || '';
+  const photoBytes = row.photo_bytes === undefined
+    ? (row.photo_data || '').length
+    : Number(row.photo_bytes || 0);
   return {
     id: String(row.id),
     authorName: row.author_name || '',
@@ -91,8 +93,8 @@ function rowToSurprise(row) {
     finderName: row.finder_name || null,
     foundAt: row.found_at === null || row.found_at === undefined ? null : Number(row.found_at),
     createdAt: Number(row.created_at || 0),
-    hasPhoto: photoData.length > 0,
-    photoBytes: photoData.length
+    hasPhoto: photoBytes > 0,
+    photoBytes
   };
 }
 
@@ -169,6 +171,7 @@ export class SurpriseAdminService {
       if (SURPRISE_STATUSES.indexOf(status) < 0) {
         throw new SurpriseAdminError('status 只能是 waiting / found / hidden', 'BAD_REQUEST', 400);
       }
+
       where.push('status = ?');
       args.push(status);
     }
@@ -198,11 +201,45 @@ export class SurpriseAdminService {
     };
   }
 
+  /** 统一后台列表使用：筛选所有匹配项后与 POI 合并排序/分页。 */
+  listAll(params = {}) {
+    const db = this.requireDb();
+    const where = [];
+    const args = [];
+    const status = String(params.status || '').trim();
+    if (status) {
+      if (!SURPRISE_STATUSES.includes(status)) return [];
+      where.push('status = ?');
+      args.push(status);
+    }
+    const q = String(params.q || '').trim();
+    if (q) {
+      where.push('(area_label LIKE ? OR message LIKE ? OR author_name LIKE ? OR id LIKE ?)');
+      const like = '%' + q + '%';
+      args.push(like, like, like, like);
+    }
+    if (params.hasPhoto === true) where.push("photo_data IS NOT NULL AND photo_data <> ''");
+    else if (params.hasPhoto === false) where.push("(photo_data IS NULL OR photo_data = '')");
+    const clause = where.length ? ' WHERE ' + where.join(' AND ') : '';
+    const rows = db.prepare(
+      'SELECT id, author_name, author_emoji, area_label, message, clues, lat, lon, ' +
+      'radius_meters, status, finder_name, found_at, created_at, ' +
+      "CASE WHEN photo_data IS NOT NULL AND photo_data <> '' THEN length(photo_data) ELSE 0 END AS photo_bytes " +
+      'FROM surprises' + clause + ' ORDER BY created_at DESC, id ASC'
+    ).all(...args);
+    return rows.map(rowToSurprise);
+  }
+
   get(id) {
+    const surprise = this.find(id);
+    if (!surprise) throw new SurpriseAdminError('惊喜不存在：' + id, 'NOT_FOUND', 404);
+    return surprise;
+  }
+
+  find(id) {
     const db = this.requireDb();
     const row = db.prepare('SELECT * FROM surprises WHERE id = ?').get(String(id));
-    if (!row) throw new SurpriseAdminError('惊喜不存在：' + id, 'NOT_FOUND', 404);
-    return rowToSurprise(row);
+    return row ? rowToSurprise(row) : null;
   }
 
   /** 下架 / 恢复：只允许 waiting ⇄ hidden */
@@ -243,7 +280,10 @@ export class SurpriseAdminService {
     const raw = row.photo_data || '';
     const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(raw);
     if (!match) throw new SurpriseAdminError('这条惊喜没有照片', 'NO_PHOTO', 404);
-    const contentType = match[1] || 'image/jpeg';
+    const contentType = String(match[1] || 'image/jpeg').toLowerCase();
+    if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(contentType)) {
+      throw new SurpriseAdminError('照片格式不受支持', 'BAD_PHOTO', 415);
+    }
     const buffer = match[2]
       ? Buffer.from(match[3], 'base64')
       : Buffer.from(decodeURIComponent(match[3]), 'utf8');

@@ -223,6 +223,7 @@ import {
   seekClueState,
   seekLeadText
 } from '../entry/src/main/ets/core/hints';
+import { projectNearbyPlaces } from '../entry/src/main/ets/core/nearby-list';
 import {
   ROUTE_CACHE_TTL_MS,
   decodePolyline6,
@@ -2446,6 +2447,21 @@ test('账号恢复：profileFromJson / surprisesFromJson 能解回本地存档�
   if (blank !== undefined) assert.equal(blank.profile.xp, 0);
 });
 
+test('旧版地点 JSON 缺少 type 时按 poi 恢复且保留独立 source', (): void => {
+  const legacyPlace: Place = { ...PLACES[0], source: 'baidu' };
+  delete legacyPlace.type;
+  const loaded = profileFromJson(JSON.stringify({
+    extras: {
+      realPlaces: [legacyPlace]
+    }
+  }));
+  assert.ok(loaded !== undefined);
+  if (loaded === undefined) return;
+  assert.equal(loaded.extras.realPlaces.length, 1);
+  assert.equal(loaded.extras.realPlaces[0].type, 'poi');
+  assert.equal(loaded.extras.realPlaces[0].source, 'baidu');
+});
+
 test('账号恢复：applyRemotePayload 覆盖本机（缺字段保留原值）', async (): Promise<void> => {
   // 需要直接拿 instance 的接口
   await initStore(new MemoryKV());
@@ -2866,6 +2882,48 @@ test('保密（铁律）：nearbyHints 整体输出也不含任何剧透', (): v
   assert.equal(json.indexOf('桥洞') < 0, true, '不得出现「桥洞」');
   assert.equal(json.indexOf('石阶') < 0, true, '不得出现「石阶」');
   assert.equal(json.indexOf('洗衣店') < 0, true, '不得出现「洗衣店」');
+});
+
+test('统一附近点投影：按距离合并地图 POI 与安全用户惊喜', (): void => {
+  const origin: GeoPoint = geoPoint(31.2304, 121.4737);
+  const poiNear: Place = {
+    ...PLACES[0],
+    id: 'legacy-map-poi',
+    source: 'amap',
+    coordinate: geoPoint(31.2308, 121.4737)
+  };
+  delete poiNear.type;
+  const poiFar: Place = {
+    ...PLACES[1],
+    id: 'osm-map-poi',
+    source: 'osm',
+    coordinate: geoPoint(31.2326, 121.4737),
+    type: 'poi'
+  };
+  const surprise: BuriedSurprise = spoilerSurprise({
+    id: 'uploaded-surprise',
+    location: geoPoint(31.2312, 121.4737)
+  });
+  const hint: NearHint = makeNearHint(surprise, 0, 89);
+  const projected = projectNearbyPlaces([poiFar, poiNear], [hint], origin);
+
+  assert.deepEqual(projected.map((item) => item.id), [
+    'legacy-map-poi',
+    'uploaded-surprise',
+    'osm-map-poi'
+  ]);
+  assert.equal(projected[0].type, 'poi');
+  assert.equal(projected[0].source, 'amap');
+  assert.equal(projected[1].type, 'userSurprise');
+  assert.equal(projected[1].source, 'userUpload');
+  assert.equal(projected[2].source, 'osm');
+
+  const safeSurpriseProjection: string = JSON.stringify(projected[1]);
+  assert.equal(safeSurpriseProjection.includes(surprise.photoUri), false);
+  assert.equal(safeSurpriseProjection.includes(surprise.photoHash), false);
+  assert.equal(safeSurpriseProjection.includes(surprise.areaWord), false);
+  assert.equal(safeSurpriseProjection.includes(surprise.hints[0]), false);
+  assert.equal(safeSurpriseProjection.includes(String(surprise.location.latitude)), false);
 });
 
 test('提示列表：按距离升序、排除已找到与自己埋的、最多 3 条', (): void => {

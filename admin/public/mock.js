@@ -214,7 +214,7 @@
   };
 
   // 地图 Key（仅 Mock：保存在内存，方便开发界面联调）
-  const mockMapKeys = { amap: '', baidu: '', updatedAt: 0 };
+  const mockMapKeys = { amap: '', amapServer: '', baidu: '', updatedAt: 0 };
 
   function maskMockKey(value) {
     const text = String(value || '');
@@ -225,7 +225,7 @@
 
   function mockMapKeysView() {
     const keys = {};
-    ['amap', 'baidu'].forEach(function (provider) {
+    ['amap', 'amapServer', 'baidu'].forEach(function (provider) {
       if (mockMapKeys[provider]) {
         keys[provider] = {
           configured: true,
@@ -436,8 +436,8 @@
     }
     if (pathname === '/api/mapkeys/test' && method === 'POST') {
       const provider = body && body.provider;
-      if (provider !== 'amap' && provider !== 'baidu') {
-        return fail('provider 必须是 amap 或 baidu', 'BAD_REQUEST', 400);
+      if (provider !== 'amap' && provider !== 'amapServer' && provider !== 'baidu') {
+        return fail('provider 必须是 amap、amapServer 或 baidu', 'BAD_REQUEST', 400);
       }
       if (!mockMapKeys[provider]) {
         return json({ ok: false, provider: provider, count: 0, error: '未配置 Key（Mock）' });

@@ -1,11 +1,11 @@
 /**
- * 步迷 Walkaholic · HarmonyOS ArkUI — 图鉴 Cards（design-system §5.5 + parity: 附近惊喜）
+ * 步迷 Walkaholic · HarmonyOS ArkUI — 图鉴 Cards（design-system §5.5 + 统一附近点位）
  *
  * 视觉基准：prototype/web/app.js cardsHTML（Web v46）+ screenshots/showcase.png（CARDS 屏）
- * 结构：回忆册 header + 筛选图标 → 统计条 → **附近的惊喜（隐晦提示）** → 筛选 chips → 卡片网格
+ * 结构：回忆册 header + 筛选图标 → 统计条 → **附近的点（地图 POI + 用户惊喜）** → 筛选 chips → 卡片网格
  * 点击已解锁卡 → 居中放大查看（卡片 + 小任务 + 关闭）
  *
- * ## 附近的惊喜（对齐 Web v46 / iOS CardsView.nearbyHintsSection）
+ * ## 附近点位
  * 只给「距离分档 + 氛围句 + 作者 emoji」，**绝不**给区域名 / 作者提示 / 照片 / 坐标。
  * 点卡片 → 回调 `onOpenSeek(id)`，由 Index 打开探寻面板（线索要靠走近才解锁）。
  * 保密逻辑全部在 `core/hints.ts`（纯 TS，有单测断言）。
@@ -20,9 +20,9 @@ import {
   HINT_FOOTER,
   HINT_TITLE_SUFFIX,
   NearHint,
-  nearbyHintCountText,
   nearbyHints
 } from '../core/hints';
+import { NearbyPlaceProjection, projectNearbyPlaces } from '../core/nearby-list';
 import {
   WaHairline,
   WaMicroLabel,
@@ -37,8 +37,7 @@ import {
   placeOf,
   rareCardCount,
   readSnapshot,
-  sortedCards,
-  unexploredNearbyCount
+  sortedCards
 } from '../components/StoreBridge';
 import {
   WAColor,
@@ -82,13 +81,13 @@ export struct CardsView {
 
   onChanged: () => void = () => {
   };
-  /** 点「附近的惊喜」卡片 → 由 Index 打开探寻面板 */
+  /** 点用户惊喜 → 由 Index 打开探寻面板 */
   onOpenSeek: (surpriseID: string) => void = () => {
   };
   /** 空状态 CTA：去埋一个（由 Index 决定去哪） */
   onOpenBury: () => void = () => {
   };
-  /** 点击「附近未探索的兴趣点」→ 由 Index 用该地点开始一次旅程 */
+  /** 点击地图 POI → 由 Index 用该地点开始一次旅程 */
   onExplorePlace: (placeID: string) => void = () => {
   };
 
@@ -147,23 +146,13 @@ export struct CardsView {
     return this.snapshot.lastKnownOrigin !== undefined;
   }
 
-  /** 附近兴趣点：未探索在前（按距离升序），已探索在后 */
-  private nearbyPlaceList(): Place[] {
-    const list: Place[] = this.snapshot.nearbyPlaces.slice();
-    list.sort((first: Place, second: Place): number => {
-      const exploredFirst: boolean = isNearbyExplored(this.snapshot, first);
-      const exploredSecond: boolean = isNearbyExplored(this.snapshot, second);
-      if (exploredFirst !== exploredSecond) {
-        return exploredFirst ? 1 : -1;
-      }
-      const metersFirst: number = nearbyDistance(this.snapshot, first);
-      const metersSecond: number = nearbyDistance(this.snapshot, second);
-      if (metersFirst < 0 && metersSecond < 0) return 0;
-      if (metersFirst < 0) return 1;
-      if (metersSecond < 0) return -1;
-      return metersFirst - metersSecond;
-    });
-    return list;
+  /** 用 NearHint 的安全投影和地图 POI 生成一个统一的附近点列表。 */
+  private nearbyItemList(): NearbyPlaceProjection[] {
+    return projectNearbyPlaces(
+      this.snapshot.nearbyPlaces,
+      this.nearbyHintList(),
+      this.snapshot.lastKnownOrigin
+    );
   }
 
   private matchesFilter(place: Place): boolean {
@@ -337,21 +326,16 @@ export struct CardsView {
     .width('100%')
   }
 
-  /**
-   * 附近的惊喜（隐晦提示）
-   * 保密：这里**只**读 core/hints.ts 产出的 NearHint，不碰 BuriedSurprise 的
-   * areaWord / hints / photoUri / location —— 那会让提示变成剧透。
-   */
+  /** 统一附近点列表；用户惊喜只读取 core/hints.ts 产出的安全 NearHint。 */
   @Builder
-  nearbyHintsSection() {
+  nearbySection() {
     Column({ space: 8 }) {
-      // 标题行
       Row({ space: 6 }) {
-        Text('附近的惊喜')
+        Text('附近的点')
           .fontSize(WAFont.caption)
           .fontWeight(FontWeight.Bold)
           .fontColor(WAColor.ink)
-        Text(nearbyHintCountText(this.nearbyHintList().length))
+        Text(this.nearbyCountText())
           .fontSize(WAFont.microSm)
           .fontColor(WAColor.ink3)
           .maxLines(1)
@@ -359,34 +343,58 @@ export struct CardsView {
       }
       .width('100%')
 
-      if (this.nearbyHintList().length === 0) {
-        // 空状态：CTA 去埋一个
-        Button() {
-          Text(HINT_EMPTY_CTA)
-            .fontSize(WAFont.caption)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(WAColor.amberDeep)
-            .textAlign(TextAlign.Center)
-            .width('100%')
+      if (this.nearbyItemList().length === 0) {
+        if (!this.hasLocation()) {
+          Row({ space: 8 }) {
+            Text('需要先定位才能列出附近点位')
+              .fontSize(WAFont.captionSm)
+              .fontColor(WAColor.ink3)
+            Button('埋一个')
+              .type(ButtonType.Normal)
+              .fontSize(WAFont.captionSm)
+              .fontColor(WAColor.amberDeep)
+              .backgroundColor('#0DE89B4C')
+              .onClick(() => {
+                this.onOpenBury();
+              })
+          }
+          .width('100%')
+          .padding({ top: 6, bottom: 6 })
+        } else if (this.snapshot.nearbyPlaces.length === 0) {
+          Row({ space: 8 }) {
+            Text('附近暂时没有点位')
+              .fontSize(WAFont.captionSm)
+              .fontColor(WAColor.ink3)
+            Button(HINT_EMPTY_CTA)
+              .type(ButtonType.Normal)
+              .fontSize(WAFont.captionSm)
+              .fontColor(WAColor.amberDeep)
+              .backgroundColor('#0DE89B4C')
+              .onClick(() => {
+                this.onOpenBury();
+              })
+          }
+          .width('100%')
+          .padding({ top: 6, bottom: 6 })
+        } else {
+          Row({ space: 6 }) {
+            SymbolGlyph($r('sys.symbol.magnifyingglass'))
+              .fontSize(WAFont.caption)
+              .fontColor([WAColor.ink3])
+              .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+            Text('正在搜索地图点位…（可下拉重试）')
+              .fontSize(WAFont.captionSm)
+              .fontColor(WAColor.ink3)
+          }
+          .width('100%')
         }
-        .type(ButtonType.Normal)
-        .height(42)
-        .width('100%')
-        .backgroundColor('#0DE89B4C')
-        .borderRadius(WASize.cardRadiusXs)
-        .border({
-          width: 1,
-          color: '#59E89B4C',
-          radius: WASize.cardRadiusXs,
-          style: BorderStyle.Dashed
-        })
-        .onClick(() => {
-          this.onOpenBury();
-        })
       } else {
-        ForEach(this.nearbyHintList(), (hint: NearHint) => {
-          this.hintCard(hint)
-        }, (hint: NearHint) => hint.id)
+        Column({ space: 8 }) {
+          ForEach(this.nearbyItemList(), (item: NearbyPlaceProjection) => {
+            this.nearbyItem(item)
+          }, (item: NearbyPlaceProjection) => item.type + ':' + item.id)
+        }
+        .width('100%')
       }
     }
     .width('100%')
@@ -396,6 +404,20 @@ export struct CardsView {
     .borderRadius(WASize.cardRadius)
     .border({ width: 1, color: WAColor.line, radius: WASize.cardRadius })
     .shadow({ radius: 12, color: WAColor.shadowSoft, offsetX: 0, offsetY: 6 })
+  }
+
+  private nearbyCountText(): string {
+    return String(this.snapshot.nearbyPlaces.length) + ' 个地图抓取 · ' +
+      String(this.nearbyHintList().length) + ' 个用户上传';
+  }
+
+  @Builder
+  nearbyItem(item: NearbyPlaceProjection) {
+    if (item.type === 'userSurprise' && item.hint !== undefined) {
+      this.hintCard(item.hint)
+    } else if (item.place !== undefined) {
+      this.poiCell(item.place)
+    }
   }
 
   /** 一张隐晦提示卡：emoji + 「距离分档 · 有人留下一张照片」+ 氛围句 + 底部提示 */
@@ -451,114 +473,51 @@ export struct CardsView {
     })
   }
 
-  /**
-   * 附近的兴趣点（真实数据源）。
-   *
-   * 展示规则：
-   *   - 未探索：显示「?」+ 类别 + 距离 + 方向，点击开始探索；
-   *   - 已探索（已收录）：显示类别图标 + 地点名 + 收录日期，点击看详情。
-   * 保密：未探索条目**只给类别与距离**，绝不给地点名。
-   */
-  @Builder
-  nearbyPoiSection() {
-    Column({ space: 8 }) {
-      Row({ space: 6 }) {
-        Text('附近的兴趣点')
-          .fontSize(WAFont.caption)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(WAColor.ink)
-        Text(String(unexploredNearbyCount(this.snapshot)) + ' 个待探索')
-          .fontSize(WAFont.microSm)
-          .fontColor(WAColor.ink3)
-        Blank()
-      }
-      .width('100%')
-
-      if (this.snapshot.nearbyPlaces.length === 0) {
-        Row({ space: 6 }) {
-          SymbolGlyph($r('sys.symbol.magnifyingglass'))
-            .fontSize(WAFont.caption)
-            .fontColor([WAColor.ink3])
-            .renderingStrategy(SymbolRenderingStrategy.SINGLE)
-          Text(this.hasLocation() ? '正在搜附近…（没找到就下拉重试）' : '需要先定位才能列出附近')
-            .fontSize(WAFont.captionSm)
-            .fontColor(WAColor.ink3)
-        }
-        .width('100%')
-        .padding({ top: 6, bottom: 6 })
-      } else {
-        Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
-          ForEach(this.nearbyPlaceList(), (place: Place) => {
-            this.poiCell(place)
-          }, (place: Place) => place.id)
-        }
-        .width('100%')
-      }
-    }
-    .width('100%')
-    .alignItems(HorizontalAlign.Start)
-    .padding(14)
-    .backgroundColor(WAColor.paper)
-    .borderRadius(WASize.cardRadius)
-    .border({ width: 1, color: WAColor.line, radius: WASize.cardRadius })
-  }
-
-  /** 单个兴趣点：未探索显示 ?，已探索显示真实信息 */
+  /** 地图点位：未探索不显示地点名；点击后开始旅程或打开已收录详情。 */
   @Builder
   poiCell(place: Place) {
-    Column({ space: 0 }) {
+    Row({ space: 10 }) {
       if (isNearbyExplored(this.snapshot, place)) {
         SymbolGlyph($r('sys.symbol.' + categorySymbol(place.category)))
           .fontSize(22)
           .fontColor([WAColor.ink2])
           .renderingStrategy(SymbolRenderingStrategy.SINGLE)
-          .width('100%')
+      } else {
+        Text('?')
+          .fontSize(22)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(WAColor.ink3)
+      }
 
-        Text(place.name)
+      Column({ space: 5 }) {
+        Text(isNearbyExplored(this.snapshot, place) ? place.name : place.category)
           .fontSize(WAFont.captionSm)
           .fontWeight(FontWeight.Medium)
           .fontColor(WAColor.ink)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .width('100%')
-          .margin({ top: 4 })
-      } else {
-        // 未探索：问号 + 类别（不含地点名）
-        Text('?')
-          .fontSize(22)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(WAColor.ink3)
-          .width('100%')
 
-        Text(place.category)
-          .fontSize(WAFont.captionSm)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(WAColor.ink2)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .width('100%')
-          .margin({ top: 4 })
+        Row({ space: 3 }) {
+          SymbolGlyph($r('sys.symbol.pin'))
+            .fontSize(WAFont.micro)
+            .fontColor([WAColor.ink3])
+            .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+          Text(this.poiDistanceText(place))
+            .fontSize(WAFont.microSm)
+            .fontColor(WAColor.ink3)
+            .maxLines(1)
+        }
       }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
 
-      Blank()
-
-      Row({ space: 3 }) {
-        SymbolGlyph($r('sys.symbol.pin'))
-          .fontSize(WAFont.micro)
-          .fontColor([WAColor.ink3])
-          .renderingStrategy(SymbolRenderingStrategy.SINGLE)
-
-        Text(this.poiDistanceText(place))
-          .fontSize(WAFont.microSm)
-          .fontColor(WAColor.ink3)
-          .maxLines(1)
-      }
-      .width('100%')
+      Text('›')
+        .fontSize(WAFont.caption)
+        .fontColor(WAColor.ink3)
     }
-    .width(this.cardWidth())
-    .height(this.cardHeight())
-    .padding(10)
-    .margin({ bottom: 10 })
+    .width('100%')
+    .padding({ left: 12, right: 12, top: 12, bottom: 12 })
     .backgroundColor(isNearbyExplored(this.snapshot, place) ? WAColor.paper : WAColor.paper2)
     .borderRadius(WASize.cardRadiusSm)
     .border({
@@ -807,19 +766,14 @@ export struct CardsView {
     .height('100%')
   }
 
-  /** 左栏：统计 + 附近的惊喜 + 附近的兴趣点（折叠屏展开态） */
+  /** 左栏：统计 + 统一附近点列表（折叠屏展开态） */
   @Builder
   wideLeftPane() {
     Column({ space: 0 }) {
       this.statsLine()
 
       Column() {
-        this.nearbyHintsSection()
-      }
-      .margin({ top: 12 })
-
-      Column() {
-        this.nearbyPoiSection()
+        this.nearbySection()
       }
       .margin({ top: 12 })
     }
@@ -879,15 +833,8 @@ export struct CardsView {
               }
               .margin({ top: 8 })
 
-              // 附近的惊喜：隐晦提示（点一下开始探寻）
               Column() {
-                this.nearbyHintsSection()
-              }
-              .margin({ top: 12 })
-
-              // 附近的兴趣点（未探索 = 问号，点击开始探索）
-              Column() {
-                this.nearbyPoiSection()
+                this.nearbySection()
               }
               .margin({ top: 12 })
 

@@ -15,6 +15,7 @@ import {
   GeoPoint,
   MapPoint,
   Place,
+  PlaceType,
   PlaceCard,
   Profile,
   QuestPhase,
@@ -168,6 +169,10 @@ function readArea(value: string, fallback: Area): Area {
   }
 }
 
+function readPlaceType(value: unknown): PlaceType {
+  return value === 'userSurprise' ? 'userSurprise' : 'poi';
+}
+
 function decodeGeoPoint(record: Record<string, unknown>): GeoPoint | undefined {
   const latitude: unknown = record['latitude'];
   const longitude: unknown = record['longitude'];
@@ -304,6 +309,7 @@ function decodePlace(value: unknown): Place | undefined {
   const mapRecord: Record<string, unknown> | undefined = toRecord(record['mapPoint']);
   const place: Place = {
     id: id,
+    type: readPlaceType(record['type']),
     name: name,
     area: readArea(readString(record, 'area', 'near'), Area.Near),
     category: readString(record, 'category', '街角'),

@@ -1,6 +1,6 @@
 # 兴趣点管理后台 · 接口契约
 
-> 版本 v1（2026-11-09）· 由 Lead 定义，**后端与前端都必须按这个契约实现，不得改名**
+> 版本 v2（2026-11-16）· 后端与前端按本契约实现
 
 前端与后端是两条并行工作流。任何一方觉得契约需要改，先告诉 Lead，由 Lead 统一改本文件。
 
@@ -54,7 +54,7 @@
     "mode": "llm"                   // llm | offline（离线规则）
   },
   "status": "draft",                // draft | review | approved | rejected
-  "source": "wikipedia",            // wikipedia | osm | manual
+  "source": "wikipedia",            // wikipedia | osm | amap | manual
   "createdAt": 1731030000000,
   "updatedAt": 1731030000000
 }
@@ -147,10 +147,12 @@ DELETE /api/pois/:id        → { "ok": true }
 ```
 POST /api/ingest
 body: { "lat": 31.2304, "lon": 121.4737, "radius": 1200, "limit": 20 }
-→ { "added": 8, "skipped": 3, "items": [Poi, …], "source": "wikipedia|osm|mixed" }
+→ { "added": 8, "skipped": 3, "items": [Poi, …], "source": "wikipedia|osm|amap|mixed",
+    "warning": "数据源暂不可用（仅在没有新增结果时返回）" }
 ```
-- 抓取顺序：中文维基百科地理搜索（有图优先）→ OpenStreetMap Overpass（备选）
+- 抓取顺序：已配置高德 Key 时优先周边搜索；之后使用中文维基百科地理搜索（有图优先）与 OpenStreetMap Overpass（备选）补齐
 - **无缩略图的维基条目默认跳过**（盲盒揭晓需要图片，见 docs/real-geo.md §5.3）
+- 地图数据源均不可用时返回 `warning`，管理界面显示具体错误；高德备用源使用后台配置的服务端 Key（仅服务端可读，不经公开端点下发）。
 - **去重**：同名或距离 < 30m 的已存在 POI 跳过（计入 skipped）
 - 新建的点 `status = "draft"`、`source = 数据源`
 - 每条抓取结果都要写入 `name/lat/lon/category/photoUrl/summary`
@@ -160,10 +162,11 @@ body: { "lat": 31.2304, "lon": 121.4737, "radius": 1200, "limit": 20 }
 POST /api/llm/normalize   body: { "id": "poi-xxx" }   → { "poi": Poi, "changed": ["why","task","hints"] }
 POST /api/llm/edit        body: { "id": "poi-xxx", "instruction": "把线索写得更口语一点" }
                            → { "poi": Poi, "changed": [...] }
-POST /api/llm/analyze     body: { "ids": ["poi-x", "poi-y"] }   → { "items": [ { "id", "safety", "suggestion", "verdict" } ] }
+POST /api/llm/analyze     body: { "ids": ["poi-x", "surprise-y"] } → { "items": [ { "id", "safety", "suggestion", "verdict" } ] }
 POST /api/llm/analyze-all body: { "status": "draft" }           → { "analyzed": 12, "items": [...] }
 ```
 - `analyze` 的 `verdict`：`"good" | "risky" | "reject"`，并给一句中文 `suggestion`
+- `analyze` 支持地图 POI 和用户惊喜；用户惊喜分析只返回本次结果，不会写入用户提交内容或地图 POI 库。批量 `analyze-all` 仍只处理地图 POI。
 - **响应可带顶层 `mode`**：`"llm" | "offline" | "mixed"`，UI 用它提示「这条是模型产出还是规则产出」
 - **保密校验（两条路径，语义不同）**：
   - **人工写入**（`POST/PUT /api/pois`）的 `hints` 含地名 → **拒绝**，返回 400 `NAME_LEAK`
@@ -234,11 +237,11 @@ GET    /api/surprises?status=waiting|found|hidden|all&q=&limit=50&offset=0
       "hasPhoto": true, "photoBytes": 152340
     } ],
     "total": 1, "counts": { "waiting": 1, "found": 0, "hidden": 0 }, "limit": 50, "offset": 0 }
-  # 注意：这里**会**返回 message 和照片是否存在（审核要看内容），
+  # 注意：这里会返回 message 和照片是否存在（审核要看内容），
   # 与账号服务面向客户端的列表刻意隐藏 message/photo 的约束不同。
 
 GET    /api/surprises/:id       → 同上单条
-GET    /api/surprises/:id/photo → image/jpeg 二进制（作者原图；无图 404 NO_PHOTO）
+GET    /api/surprises/:id/photo → 受登录保护的 image/jpeg|png|webp|gif 二进制（按需读取；无图 404 NO_PHOTO）
 PUT    /api/surprises/:id  { "status": "hidden" | "waiting" }
 → 更新后的单条。`found` 不允许手动改（409 ALREADY_FOUND）。
 DELETE /api/surprises/:id       → { "ok": true }（彻底删除，不可恢复）
@@ -253,17 +256,18 @@ DELETE /api/surprises/:id       → { "ok": true }（彻底删除，不可恢复
 单页应用，由同一个 Node 服务在 `/admin` 提供静态文件（`admin/public/`）。零外部依赖（不引 CDN、不用框架）。
 
 必须包含：
-1. **左侧筛选栏**：状态（草稿/待审/已通过/已拒绝）、类别、关键词搜索、有无图片
-2. **中间列表**：缩略图 + 名称 + 类别 + 状态 + 更新时间；支持多选
-3. **右侧编辑面板**：全字段可编辑（含 hints 三条分开输入、tags、safety）
-4. **顶部操作条**：
-   - 「抓取附近」：输入经纬度+半径 → 调 `/api/ingest`
+1. **左侧筛选栏**：点位类型（全部 / 地图 POI / 用户惊喜）、各类型状态、类别、关键词搜索、有无图片
+2. **中间统一列表**：同一分页中呈现地图 POI 与用户惊喜；每条明确标记 `curated / 地图 POI` 或 `user / surprise`，保留来源和对应状态；地图 POI 可多选
+3. **右侧详情**：地图 POI 全字段可编辑（含 hints 三条分开输入、tags、safety）；用户惊喜只读展示留言/线索/坐标，并使用 waiting ⇄ hidden 审核操作，不进入 POI 编辑或 LLM 流程
+4. **照片隐私**：用户照片不出现在列表/API 数据中；仅管理员在右侧详情明确点击后，经受登录保护的 `/api/surprises/:id/photo` 按需读取
+5. **顶部操作条**：
+   - 「抓取附近」：默认地址为「南京市鼓楼区金银街16号」，先 geocode 到坐标再调 `/api/ingest`；用户也可手工输入经纬度
    - 「AI 整理」「AI 编辑」「AI 分析」「AI 批量分析」
    - 「通过」「拒绝」「删除」
    - 「导出到 App」
-5. **LLM 模式提示**：右上角显示 `大模型已就绪 / 离线规则模式`（调 `/api/llm/status`）
-6. **保密检查**：hints 输入框旁边实时提示「⚠️ 含地名」并拒绝保存
-7. 视觉沿用 App 的设计 token：奶油底 `#F5EEE2`、琥珀 `#E89B4C`、墨色 `#171410`、圆角 14–18px
+6. **LLM 模式提示**：右上角显示 `大模型已就绪 / 离线规则模式`（调 `/api/llm/status`）
+7. **保密检查**：hints 输入框旁边实时提示「⚠️ 含地名」并拒绝保存
+8. 视觉沿用 App 的设计 token：奶油底 `#F5EEE2`、琥珀 `#E89B4C`、墨色 `#171410`、圆角 14–18px
 
 ---
 
@@ -358,3 +362,35 @@ PORT=8802
 - `llm.test` 的失败信息会把 Key 替换成掩码（DeepSeek 的 401 会把 Key 后半段回显）
 - 账号库没有 `settings` 表时返回 503 `SETTINGS_UNAVAILABLE` 并说明「重启一次账号服务」，
   **不会在这个进程里偷偷建表**（避免两处 schema 分叉）
+
+### 4.10 统一后台点位列表
+
+管理界面的主列表与详情统一管理地图 POI 和用户惊喜；底层仍分别存于后台 POI SQLite 与账号库，
+导出流程仍只读 POI 库中 `status = approved` 的地图 POI，不会导出用户惊喜。
+
+```
+GET /api/admin/points?type=all|curated|user&status=&q=&hasPhoto=1&limit=100&offset=0
+→ { "items": [ { …原记录字段, "type": "curated"|"user" } ],
+    "total": 42, "counts": { "draft": 10, "waiting": 5, … },
+    "type": "all", "limit": 100, "offset": 0 }
+```
+
+- `type` 默认 `all`；地图 POI 标记 `curated` 并完整保留原 `source`；用户惊喜标记 `user`、`source: "user"`。
+- `status` 支持两类原生状态：地图 POI 的 `draft|review|approved|rejected` 与用户惊喜的 `waiting|found|hidden`；类型不匹配的状态返回空结果。
+- `q`、`hasPhoto` 对两类记录分别按各自数据字段筛选；`limit` 为 1–200 的整数，`offset` 为 0–1,000,000 的整数。`total` 是过滤后、分页前的跨类型总数，分页在合并排序后执行。
+- `counts` 按 `type`、关键词、类别和图片条件统计各原生状态，不受当前 `status` 条件影响；其中 `counts.total` 是这些条件下的总数。
+- 统一列表绝不返回 `photo_data`、账号 `user_id` 或照片散列等隐私字段；用户照片仍只能通过 §4.8 的受限照片端点按需查看。
+- 用户惊喜的状态与删除操作仍路由至账号库接口；`found` 不可手动更改。地图 POI 状态与删除仍路由至 POI 存储。二者不能互相覆盖或误删。
+
+### 4.11 地址解析与附近抓取
+
+```
+POST /api/geocode
+body: { "address": "南京市鼓楼区金银街16号" }
+→ { "lat": 32.06, "lon": 118.77, "provider": "amap|baidu|nominatim" }
+```
+
+- 端点受后台登录保护；输入须为 1–200 字符，拒绝控制字符；外部请求各自 4.5 秒超时。
+- 优先顺序：当前后台配置的高德 Key → 百度 Key → OpenStreetMap Nominatim；前一服务报错或无匹配时才回退。
+- 输入无效返回 400 `BAD_REQUEST`；服务不可用或未找到地址返回 422 `GEOCODE_FAILED`，包含明确错误，不伪造默认上海坐标。
+- 管理 UI 默认地址是南京市鼓楼区金银街16号；只有成功解析或经纬度显式手填后才可开始抓取。

@@ -71,6 +71,26 @@ svg { display: block; }
 
 .icon { flex: none; }
 
+.point-type-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink-2);
+  font-size: 9px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.point-type-badge.is-curated { background: #F7EEDC; }
+.point-type-badge.is-user { background: #F1EAF8; border-color: #DED2EE; color: #59477B; }
+.poi-source { color: var(--ink-3); font-size: 10px; white-space: nowrap; }
+.row-select-spacer { width: 14px; flex: none; }
+.address-geocode-row { display: flex; gap: 8px; }
+.address-geocode-row .input { min-width: 0; flex: 1; }
+.field__hint.is-error { color: var(--ember); }
+.surprise-detail { padding-bottom: 24px; }
+
 /* 纸张纹理 */
 .grain {
   position: fixed;
@@ -417,6 +437,19 @@ svg { display: block; }
 
 .listpane .pane__head { gap: 10px; }
 .list-head__spacer { flex: 1; }
+
+.unified-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 13px;
+  color: var(--amber-deep);
+  background: var(--amber-soft);
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.unified-warning svg { flex: none; margin-top: 1px; }
 
 .selection-bar {
   display: flex;

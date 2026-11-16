@@ -119,7 +119,7 @@ export function serveStatic(req, res, publicDir, urlPath) {
   const headers = {
     'Content-Type': contentTypeFor(filePath),
     'Content-Length': stat.size,
-    'Cache-Control': filePath.endsWith('.html') ? 'no-store' : 'public, max-age=60'
+    'Cache-Control': 'no-store'
   };
   res.writeHead(200, headers);
   if (method === 'HEAD') {

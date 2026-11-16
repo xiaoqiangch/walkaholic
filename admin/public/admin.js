@@ -18,8 +18,8 @@
   const state = {
     llm: { mode: 'offline', ready: false, model: '', baseUrl: '', error: '' },
     stats: null,
-    filters: { status: 'all', category: '', q: '', photo: 'all' },
-    list: { items: [], total: 0, loading: false, error: '', loadingMore: false },
+    filters: { type: 'all', status: 'all', category: '', q: '', photo: 'all' },
+    list: { items: [], total: 0, counts: {}, loading: false, error: '', warning: '', loadingMore: false },
     selection: new Set(),
     current: null,
     draft: null,
@@ -28,7 +28,7 @@
     statsError: '',
     mock: !!window.__WA_MOCK__,
     mapkeys: { loading: false, data: null, error: '', testResults: {} },
-    surprises: { loading: false, data: null, error: '', status: 'waiting', q: '', photoOf: '', busyId: '' }
+    surprisePhotoId: ''
   };
 
   const els = {
@@ -38,9 +38,7 @@
     listpane: document.getElementById('listpane'),
     editorpane: document.getElementById('editorpane'),
     mapkeysPanel: document.getElementById('mapkeys-panel'),
-    mapkeysBody: document.getElementById('mapkeys-body'),
-    surprisesPanel: document.getElementById('surprises-panel'),
-    surprisesBody: document.getElementById('surprises-body')
+    mapkeysBody: document.getElementById('mapkeys-body')
   };
 
   let drawerScrim = null;
@@ -84,6 +82,10 @@
     }
   }
 
+  function selectPoi(id) {
+    return selectPoint('curated', id);
+  }
+
   function errorText(error) {
     if (!error) return '未知错误';
     const code = error.code && error.code !== 'HTTP_500' ? '（' + error.code + '）' : '';
@@ -118,6 +120,8 @@
     els.topActions.innerHTML =
       '<button type="button" class="btn btn--primary" data-action="ingest" aria-label="抓取附近的兴趣点">' +
         UI.icon('capture') + '<span>抓取附近</span></button>' +
+      '<button type="button" class="btn" data-action="user-points" aria-label="查看用户惊喜">' +
+        '<span aria-hidden="true">🎁</span><span>用户惊喜</span></button>' +
       '<span class="toolbar-sep" aria-hidden="true"></span>' +
       '<button type="button" class="btn" data-action="normalize" title="' + UI.escapeHtml(ruleHint) + '" aria-label="用 AI 整理当前兴趣点">' +
         UI.icon('sparkles') + '<span>AI 整理</span></button>' +
@@ -129,9 +133,6 @@
         UI.icon('chart') + '<span>AI 分析</span></button>' +
       '<button type="button" class="btn" data-action="ai-batch" title="' + UI.escapeHtml(ruleHint) + '" aria-label="批量分析当前筛选状态下的兴趣点">' +
         UI.icon('layers') + '<span>AI 批量分析</span></button>' +
-      '<span class="toolbar-sep" aria-hidden="true"></span>' +
-      '<button type="button" class="btn" data-action="surprises" aria-label="审核用户惊喜">' +
-        UI.icon('image', 14) + '<span>用户惊喜</span></button>' +
       '<span class="toolbar-sep" aria-hidden="true"></span>' +
       '<button type="button" class="btn" data-action="settings" aria-label="服务端设置">' +
         UI.icon('lock', 14) + '<span>设置</span></button>' +
@@ -166,16 +167,18 @@
   // ============================================================
 
   function statusCounts() {
-    const stats = state.stats;
-    const counts = { all: 0, draft: 0, review: 0, approved: 0, rejected: 0 };
-    if (stats && stats.byStatus) {
-      counts.draft = stats.byStatus.draft || 0;
-      counts.review = stats.byStatus.review || 0;
-      counts.approved = stats.byStatus.approved || 0;
-      counts.rejected = stats.byStatus.rejected || 0;
-      counts.all = stats.total || 0;
-    }
+    const counts = { all: state.list.counts.total === undefined
+      ? (state.list.total || 0)
+      : state.list.counts.total };
+    Object.keys(state.list.counts || {}).forEach(function (key) {
+      if (key !== 'total') counts[key] = state.list.counts[key] || 0;
+    });
     return counts;
+  }
+
+  function statusLabel(status) {
+    if (UI.STATUS_META[status]) return UI.STATUS_META[status].label;
+    return ({ waiting: '待寻', found: '已找到', hidden: '已下架' })[status] || status;
   }
 
   function renderFilters() {
@@ -185,7 +188,10 @@
       { id: 'draft', label: '草稿', dot: 'dot--draft' },
       { id: 'review', label: '待审', dot: 'dot--review' },
       { id: 'approved', label: '已通过', dot: 'dot--approved' },
-      { id: 'rejected', label: '已拒绝', dot: 'dot--rejected' }
+      { id: 'rejected', label: '已拒绝', dot: 'dot--rejected' },
+      { id: 'waiting', label: '待寻', dot: 'dot--review' },
+      { id: 'found', label: '已找到', dot: 'dot--approved' },
+      { id: 'hidden', label: '已下架', dot: 'dot--rejected' }
     ];
 
     let statusHtml = '';
@@ -206,6 +212,14 @@
         return '<option value="' + category.id + '"' + selected + '>' + category.emoji + ' ' + UI.escapeHtml(category.label) + '</option>';
       })
     ).join('');
+    const typeOptions = [
+      { id: 'all', label: '全部点位' },
+      { id: 'curated', label: '地图 POI' },
+      { id: 'user', label: '用户惊喜' }
+    ].map(function (item) {
+      return '<option value="' + item.id + '"' +
+        (state.filters.type === item.id ? ' selected' : '') + '>' + item.label + '</option>';
+    }).join('');
 
     const photoButtons = [
       { id: 'all', label: '全部' },
@@ -230,7 +244,11 @@
       '</div>' +
       '<div class="pane__scroll">' +
         '<div class="filter-group">' +
-          '<div class="micro-label"><span>状态</span><span>' + (state.stats ? state.stats.total : '—') + '</span></div>' +
+          '<div class="micro-label"><span>点位类型</span></div>' +
+          '<select class="select" id="filter-type" aria-label="按点位类型筛选">' + typeOptions + '</select>' +
+        '</div>' +
+        '<div class="filter-group">' +
+          '<div class="micro-label"><span>状态</span><span>' + (state.list.total || '0') + '</span></div>' +
           '<div class="status-list">' + statusHtml + '</div>' +
         '</div>' +
         '<div class="filter-group">' +
@@ -252,7 +270,7 @@
           '<div class="micro-label"><span>数据</span></div>' +
           '<div style="font-size:11px;color:var(--ink-3);line-height:1.65">' +
             statLine + '<br>' +
-            '抓取来源：中文维基百科 / OpenStreetMap' +
+            '抓取来源：中文维基百科 / OpenStreetMap / 高德备用源' +
             (state.mock ? '<br><span style="color:var(--amber-deep);font-weight:600">Mock 模式（?mock=1，非真实数据）</span>' : '') +
           '</div>' +
         '</div>' +
@@ -270,6 +288,13 @@
         applyFilter({ status: button.getAttribute('data-filter-status') });
       });
     });
+
+    const typeSelect = $('#filter-type', els.filters);
+    if (typeSelect) {
+      typeSelect.addEventListener('change', function () {
+        applyFilter({ type: typeSelect.value });
+      });
+    }
 
     const categorySelect = $('#filter-category', els.filters);
     if (categorySelect) {
@@ -294,21 +319,23 @@
   }
 
   function applyFilter(patch, fromSearch) {
-    guardDirty().then(function (ok) {
+    return guardDirty().then(async function (ok) {
       if (!ok) {
         renderFilters();
-        return;
+        return false;
       }
       Object.keys(patch).forEach(function (key) { state.filters[key] = patch[key]; });
+      if (patch.type === 'user') state.filters.category = '';
       state.selection.clear();
       state.list.items = [];
       state.list.total = 0;
       renderFilters();
-      fetchList();
       if (!fromSearch) {
         const search = $('#filter-q', els.filters);
         if (search && search.value !== state.filters.q) search.value = state.filters.q;
       }
+      await fetchList();
+      return true;
     });
   }
 
@@ -317,10 +344,7 @@
   // ============================================================
 
   function visibleItems() {
-    const items = state.list.items;
-    if (state.filters.photo === 'with') return items.filter(function (poi) { return !!poi.photoUrl; });
-    if (state.filters.photo === 'without') return items.filter(function (poi) { return !poi.photoUrl; });
-    return items;
+    return state.list.items;
   }
 
   function renderList() {
@@ -356,37 +380,46 @@
         '</div>';
     } else {
       items.forEach(function (poi) {
-        const category = UI.categoryMeta(poi.category);
-        const emoji = poi.emoji || category.emoji;
-        const thumb = poi.photoUrl
+        const isUser = poi.type === 'user';
+        const category = isUser ? { label: '用户惊喜', emoji: '🎁' } : UI.categoryMeta(poi.category);
+        const emoji = isUser ? '🎁' : (poi.emoji || category.emoji);
+        const thumb = !isUser && poi.photoUrl
           ? '<span class="thumb"><img src="' + UI.escapeHtml(poi.photoUrl) + '" alt="" loading="lazy" ' +
             'onerror="this.parentNode.innerHTML=\'' + UI.escapeHtml(emoji) + '\'"></span>'
           : '<span class="thumb" aria-hidden="true">' + UI.escapeHtml(emoji) + '</span>';
-        const checked = state.selection.has(poi.id);
-        const current = state.current && state.current.id === poi.id;
-        const tags = (poi.tags || []).slice(0, 2).map(function (tag) {
+        const checked = !isUser && state.selection.has(poi.id);
+        const current = state.current && state.current.id === poi.id && state.current.type === poi.type;
+        const tags = !isUser ? (poi.tags || []).slice(0, 2).map(function (tag) {
           return '<span class="tag">' + UI.escapeHtml(tag) + '</span>';
-        }).join('');
+        }).join('') : '';
+        const label = poi.name || poi.message || poi.authorName || poi.id;
+        const source = isUser ? '用户上传' : ('地图抓取 · ' + (poi.source || '未知来源'));
+        const status = isUser ? surpriseStatusPill(poi.status) : UI.statusBadge(poi.status);
         rowsHtml +=
           '<div class="poi-row' + (current ? ' is-current' : '') + (checked ? ' is-checked' : '') + '" ' +
-            'data-poi-id="' + UI.escapeHtml(poi.id) + '" role="button" tabindex="0" ' +
-            'aria-label="' + UI.escapeHtml(poi.name) + '，' + UI.STATUS_META[poi.status].label + '">' +
-            '<input type="checkbox" class="checkbox row-checkbox" data-row-check="' + UI.escapeHtml(poi.id) + '" ' +
-              (checked ? 'checked ' : '') + 'aria-label="选择 ' + UI.escapeHtml(poi.name) + '">' +
+            'data-poi-id="' + UI.escapeHtml(poi.id) + '" data-point-type="' + poi.type + '" role="button" tabindex="0" ' +
+            'aria-label="' + UI.escapeHtml(label) + '，' + statusLabel(poi.status) + '">' +
+            (isUser ? '<span class="row-select-spacer" aria-hidden="true"></span>' :
+              '<input type="checkbox" class="checkbox row-checkbox" data-row-check="' + UI.escapeHtml(poi.id) + '" ' +
+                (checked ? 'checked ' : '') + 'aria-label="选择 ' + UI.escapeHtml(label) + '">') +
             thumb +
             '<div class="poi-row__main">' +
-              '<div class="poi-row__name">' + UI.escapeHtml(poi.name) + '</div>' +
+              '<div class="poi-row__name">' + UI.escapeHtml(label) + '</div>' +
               '<div class="poi-row__meta">' +
                 '<span>' + UI.escapeHtml(category.label) + '</span>' +
                 '<span class="dot-sep" aria-hidden="true"></span>' +
-                '<span>' + UI.escapeHtml(UI.AREA_META[poi.area] ? UI.AREA_META[poi.area].label : poi.area) + '</span>' +
+                '<span>' + UI.escapeHtml(isUser ? (poi.areaLabel || '用户上传') :
+                  (UI.AREA_META[poi.area] ? UI.AREA_META[poi.area].label : (poi.area || '未标区域'))) + '</span>' +
                 '<span class="dot-sep" aria-hidden="true"></span>' +
-                UI.rarityBadge(poi.rarity) +
+                '<span class="point-type-badge ' + (isUser ? 'is-user' : 'is-curated') + '">' +
+                  (isUser ? 'user / surprise' : 'curated / 地图 POI') + '</span>' +
+                (isUser ? '' : '<span class="dot-sep" aria-hidden="true"></span>' + UI.rarityBadge(poi.rarity)) +
+                '<span class="poi-source">' + UI.escapeHtml(source) + '</span>' +
                 tags +
               '</div>' +
             '</div>' +
             '<div class="poi-row__side">' +
-              UI.statusBadge(poi.status) +
+              status +
               '<span class="poi-row__time">' + UI.timeAgo(poi.updatedAt) + '</span>' +
             '</div>' +
           '</div>';
@@ -404,6 +437,11 @@
         '<span class="list-head__spacer"></span>' +
         '<button type="button" class="btn btn--icon btn--ghost" data-action="reload" aria-label="刷新列表">' + UI.icon('refresh', 15) + '</button>' +
       '</div>' +
+      (state.list.warning
+        ? '<div class="unified-warning" role="status">' + UI.icon('alert', 14) +
+          '<span>用户惊喜暂不可用：' + UI.escapeHtml(state.list.warning) +
+          '。地图 POI 仍可管理；请检查账号服务数据库配置。</span></div>'
+        : '') +
       '<div class="selection-bar">' +
         '<label class="checkbox-wrap" style="display:inline-flex;align-items:center;gap:6px">' +
           '<input type="checkbox" class="checkbox" id="select-all" ' + (items.length > 0 && selectedCount === items.length ? 'checked ' : '') +
@@ -430,7 +468,7 @@
       '<div class="list-foot">' +
         '<span>' + (photoFiltered ? '图片筛选后 ' + items.length + ' 条 · ' : '') +
           '已加载 ' + loaded + ' / 共 ' + total + ' 条</span>' +
-        '<span>' + (state.filters.status === 'all' ? '全部状态' : UI.STATUS_META[state.filters.status].label) +
+        '<span>' + (state.filters.status === 'all' ? '全部状态' : statusLabel(state.filters.status)) +
           ' · ' + UI.formatTime(Date.now()) + '</span>' +
       '</div>';
 
@@ -440,14 +478,15 @@
   function bindListEvents() {
     $$('.poi-row', els.listpane).forEach(function (row) {
       const id = row.getAttribute('data-poi-id');
+      const type = row.getAttribute('data-point-type');
       row.addEventListener('click', function (event) {
         if (event.target && event.target.getAttribute && event.target.getAttribute('data-row-check')) return;
-        selectPoi(id);
+        selectPoint(type, id);
       });
       row.addEventListener('keydown', function (event) {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
-          selectPoi(id);
+          selectPoint(type, id);
         }
       });
     });
@@ -479,7 +518,7 @@
         if (action === 'reload') refreshAll(true);
         else if (action === 'ingest') openIngestModal();
         else if (action === 'reset-filters') {
-          state.filters = { status: 'all', category: '', q: '', photo: 'all' };
+          state.filters = { type: 'all', status: 'all', category: '', q: '', photo: 'all' };
           renderFilters();
           fetchList();
         } else if (action === 'clear-selection') {
@@ -568,6 +607,10 @@
   function renderEditor() {
     if (!state.current || !state.draft) {
       renderEditorEmpty();
+      return;
+    }
+    if (state.current.type === 'user') {
+      renderSurpriseDetails(state.current);
       return;
     }
     const poi = state.current;
@@ -769,6 +812,74 @@
       '</div>';
 
     bindEditorEvents();
+  }
+
+  function renderSurpriseDetails(item) {
+    const photoOpen = state.surprisePhotoId === item.id;
+    const photo = !item.hasPhoto
+      ? '<p class="surprise__nophoto">没有照片</p>'
+      : (photoOpen
+        ? '<figure class="surprise__photo"><img src="' + API.surprisePhotoUrl(item.id) +
+            '" alt="用户上传的照片" loading="lazy"><figcaption>用户上传照片 · 仅在此管理详情中按需读取</figcaption></figure>' +
+          '<button type="button" class="btn btn--sm" data-surprise-photo-close>收起照片</button>'
+        : '<button type="button" class="btn btn--sm" data-surprise-photo-open>按需查看照片</button>');
+    let statusActions = '';
+    if (item.status === 'waiting') {
+      statusActions = '<button type="button" class="btn btn--sm btn--danger" data-surprise-status="hidden">下架</button>';
+    } else if (item.status === 'hidden') {
+      statusActions = '<button type="button" class="btn btn--sm btn--primary" data-surprise-status="waiting">恢复上架</button>';
+    } else {
+      statusActions = '<span class="field__hint">已找到状态由用户行为产生，不可手动修改。</span>';
+    }
+    els.editorpane.innerHTML =
+      '<div class="editor-head">' +
+        surpriseStatusPill(item.status) +
+        '<span class="point-type-badge is-user">user / surprise</span>' +
+        '<span class="editor-head__spacer"></span>' +
+        '<span class="editor-head__id">' + UI.escapeHtml(item.id) + '</span>' +
+        '<button type="button" class="btn btn--icon btn--ghost" data-action="close-editor" aria-label="关闭详情">' +
+          UI.icon('close', 15) + '</button>' +
+      '</div>' +
+      '<div class="editor-scroll surprise-detail">' +
+        '<section class="editor-section">' +
+          '<div class="editor-section__title">用户惊喜<span class="line"></span></div>' +
+          '<h2>' + UI.escapeHtml(item.authorName || '未知作者') + ' ' + UI.escapeHtml(item.authorEmoji || '🎁') + '</h2>' +
+          '<p class="surprise__meta">' + UI.escapeHtml(item.areaLabel || '未标区域') + ' · 用户上传 · ' +
+            UI.escapeHtml(UI.formatTime(item.createdAt)) + '</p>' +
+          '<blockquote class="surprise__message">' + UI.escapeHtml(item.message || '（没写留言）') + '</blockquote>' +
+          ((item.clues && item.clues.length)
+            ? '<ol class="surprise__clues">' + item.clues.map((clue) => '<li>' + UI.escapeHtml(clue) + '</li>').join('') + '</ol>'
+            : '') +
+          '<dl class="surprise__facts">' +
+            '<div><dt>坐标</dt><dd>' + Number(item.lat).toFixed(5) + ', ' + Number(item.lon).toFixed(5) + '</dd></div>' +
+            '<div><dt>半径</dt><dd>' + Math.round(Number(item.radiusMeters) || 0) + ' m</dd></div>' +
+            '<div><dt>来源</dt><dd>user / 用户上传</dd></div>' +
+            (item.finderName ? '<div><dt>找到者</dt><dd>' + UI.escapeHtml(item.finderName) + '</dd></div>' : '') +
+          '</dl>' +
+          photo +
+          '<div class="surprise__actions">' + statusActions +
+            '<button type="button" class="btn btn--sm btn--danger btn--ghost" data-surprise-delete>彻底删除</button>' +
+          '</div>' +
+        '</section>' +
+      '</div>';
+    const openPhoto = $('[data-surprise-photo-open]', els.editorpane);
+    if (openPhoto) openPhoto.addEventListener('click', function () {
+      state.surprisePhotoId = item.id;
+      renderEditor();
+    });
+    const closePhoto = $('[data-surprise-photo-close]', els.editorpane);
+    if (closePhoto) closePhoto.addEventListener('click', function () {
+      state.surprisePhotoId = '';
+      renderEditor();
+    });
+    const statusButton = $('[data-surprise-status]', els.editorpane);
+    if (statusButton) statusButton.addEventListener('click', function () {
+      setUserSurpriseStatus(item.id, statusButton.getAttribute('data-surprise-status'), statusButton);
+    });
+    const deleteButton = $('[data-surprise-delete]', els.editorpane);
+    if (deleteButton) deleteButton.addEventListener('click', function () { deleteUserSurprise(item); });
+    const closeButton = $('[data-action="close-editor"]', els.editorpane);
+    if (closeButton) closeButton.addEventListener('click', closeEditor);
     updateSummaryCounter();
     refreshValidationUI();
   }
@@ -987,9 +1098,11 @@
     renderList();
     try {
       const result = await API.list({
+        type: state.filters.type,
         status: state.filters.status,
         category: state.filters.category,
         q: state.filters.q,
+        hasPhoto: state.filters.photo === 'all' ? '' : (state.filters.photo === 'with' ? 1 : 0),
         limit: PAGE_LIMIT,
         offset: opts.append ? state.list.items.length : 0
       });
@@ -1000,6 +1113,8 @@
         state.selection.clear();
       }
       state.list.total = result.total || 0;
+      state.list.counts = result.counts || {};
+      state.list.warning = result.warning || '';
       state.list.loading = false;
       state.list.loadingMore = false;
       state.list.error = '';
@@ -1007,6 +1122,7 @@
       state.list.loading = false;
       state.list.loadingMore = false;
       state.list.error = errorText(error);
+      state.list.warning = '';
       UI.toast((opts.append ? '加载更多失败：' : '列表读取失败：') + errorText(error), 'error', 4600);
     }
     renderList();
@@ -1031,8 +1147,8 @@
     });
   }
 
-  async function selectPoi(id) {
-    if (state.current && state.current.id === id) {
+  async function selectPoint(type, id) {
+    if (state.current && state.current.id === id && state.current.type === type) {
       if (isSmallScreen()) setEditorOpen(true);
       return;
     }
@@ -1043,15 +1159,18 @@
     }
     let poi;
     try {
-      poi = await API.poi(id);
+      poi = type === 'user' ? await API.surprise(id) : await API.poi(id);
+      poi.type = type;
     } catch (error) {
-      toastError('读取兴趣点失败', error);
+      toastError(type === 'user' ? '读取用户惊喜失败' : '读取兴趣点失败', error);
       return;
     }
     state.current = poi;
     state.draft = deepCopy(poi);
+    state.surprisePhotoId = '';
     state.dirty = false;
-    state.selection.delete(id);
+    if (type === 'user') state.selection.clear();
+    else state.selection.delete(id);
     renderList();
     renderEditor();
     setEditorOpen(true);
@@ -1062,6 +1181,10 @@
 
   function closeEditor() {
     if (isSmallScreen()) {
+      if (state.current && state.current.type === 'user' && state.surprisePhotoId) {
+        state.surprisePhotoId = '';
+        renderEditor();
+      }
       setEditorOpen(false);
       return;
     }
@@ -1070,6 +1193,7 @@
       state.current = null;
       state.draft = null;
       state.dirty = false;
+      state.surprisePhotoId = '';
       renderEditor();
     });
   }
@@ -1097,7 +1221,7 @@
   }
 
   async function saveCurrent(button) {
-    if (!state.current || !state.draft) return;
+    if (!state.current || !state.draft || state.current.type === 'user') return;
     const result = refreshValidationUI();
     if (!result.ok) {
       let message = '还没保存：';
@@ -1124,6 +1248,10 @@
   async function deleteCurrent(button) {
     if (!state.current) return;
     const poi = state.current;
+    if (poi.type === 'user') {
+      await deleteUserSurprise(poi);
+      return;
+    }
     const ok = await UI.confirmDialog({
       title: '删除兴趣点',
       subtitle: poi.name,
@@ -1244,9 +1372,9 @@
         break;
       }
     }
-    if (state.current && state.current.id === poi.id) {
-      state.current = poi;
-      state.draft = deepCopy(poi);
+    if (state.current && state.current.id === poi.id && state.current.type !== 'user') {
+      state.current = Object.assign({ type: 'curated' }, poi);
+      state.draft = deepCopy(state.current);
       state.dirty = false;
       renderEditor();
     }
@@ -1266,9 +1394,13 @@
         else if (action === 'ai-edit') openAiEditModal();
         else if (action === 'ai-analyze') runAnalyze(button);
         else if (action === 'ai-batch') runBatchAnalyze(button);
+        else if (action === 'user-points') {
+          applyFilter({ type: 'user', status: 'all', category: '' }).then(function (changed) {
+            if (changed) UI.toast('已切换到用户惊喜列表', 'info', 2000);
+          });
+        }
         else if (action === 'settings') { if (window.WASettings) window.WASettings.open(); }
         else if (action === 'mapkeys') openMapKeysPanel();
-        else if (action === 'surprises') openSurprisesPanel();
         else if (action === 'export') runExport(button);
       });
     });
@@ -1279,7 +1411,8 @@
   // ============================================================
 
   const MAPKEY_PROVIDERS = [
-    { id: 'amap', label: '高德 Web 服务 Key', help: 'Web 服务 Key（restapi.amap.com，注意不是 JS API Key）' },
+    { id: 'amap', label: '高德 Web 服务 Key（客户端地图）', help: '客户端地图使用，会通过公开端点下发；请使用独立限额 Key。' },
+    { id: 'amapServer', label: '高德服务端 Key（后台抓取）', help: '仅服务器用于地址解析和附近抓取，不会下发到客户端。' },
     { id: 'baidu', label: '百度地图服务端 AK', help: '服务端 AK（api.map.baidu.com）' }
   ];
 
@@ -1381,8 +1514,8 @@
     const versionText = data && data.version ? ' · 版本 ' + UI.escapeHtml(data.version) : '';
     els.mapkeysBody.innerHTML =
       '<div class="mapkeys__note">' + UI.icon('alert', 14) +
-        '<span>Key 只存服务器数据库，客户端通过 <code>/api/public/mapkeys</code> 自动获取；' +
-        '<strong>注意 Web 服务 Key 在前端必然可见</strong>，请用独立限额 Key 并定期轮换。</span>' +
+        '<span>Key 只存服务器数据库。只有客户端地图 Key 会通过 <code>/api/public/mapkeys</code> 下发；' +
+          '<strong>服务端抓取 Key 不会公开</strong>。</span>' +
       '</div>' +
       loading + error +
       '<div class="mapkeys__rows">' + rows + '</div>' +
@@ -1425,7 +1558,9 @@
     const ok = await UI.confirmDialog({
       title: '清除地图 Key',
       subtitle: provider.label,
-      message: '清除后公开端点不再下发这个 Key，客户端对应的地图能力会不可用。',
+      message: providerId === 'amapServer'
+        ? '清除后服务器将无法使用该 Key 进行地址解析和附近抓取。'
+        : '清除后公开端点不再下发这个 Key，客户端对应的地图能力会不可用。',
       confirmText: '清除',
       cancelText: '取消',
       danger: true
@@ -1491,8 +1626,54 @@
 
   function targetIds() {
     if (state.selection.size > 0) return Array.from(state.selection);
-    if (state.current) return [state.current.id];
+    if (state.current && state.current.type !== 'user') return [state.current.id];
     return [];
+  }
+
+  function analyzeTargetIds() {
+    if (state.selection.size > 0) return Array.from(state.selection);
+    return state.current ? [state.current.id] : [];
+  }
+
+  async function setUserSurpriseStatus(id, status, button) {
+    await withBusy(button, '处理中…', async function () {
+      try {
+        const updated = await API.setSurpriseStatus(id, status);
+        updated.type = 'user';
+        state.current = updated;
+        state.draft = deepCopy(updated);
+        state.surprisePhotoId = '';
+        renderEditor();
+        await fetchList();
+        UI.toast(status === 'hidden' ? '已下架用户惊喜' : '已恢复用户惊喜', 'success', 2600);
+      } catch (error) {
+        toastError('用户惊喜状态更新失败', error);
+      }
+    });
+  }
+
+  async function deleteUserSurprise(item) {
+    const ok = await UI.confirmDialog({
+      title: '彻底删除这条用户惊喜',
+      subtitle: item.id,
+      message: '会从账号数据库中删除留言与照片，且不可恢复。若只需从附近下架，请使用「下架」。',
+      confirmText: '彻底删除',
+      cancelText: '取消',
+      danger: true
+    });
+    if (!ok) return;
+    try {
+      await API.removeSurprise(item.id);
+      state.current = null;
+      state.draft = null;
+      state.surprisePhotoId = '';
+      state.dirty = false;
+      renderEditor();
+      await fetchList();
+      UI.toast('用户惊喜已删除', 'success', 2400);
+    } catch (error) {
+      toastError('删除用户惊喜失败', error);
+    }
   }
 
   // ============================================================
@@ -1735,11 +1916,19 @@
       title: '抓取附近',
       subtitle: '从中文维基百科 / OpenStreetMap 拉一批公开数据，落成草稿。',
       bodyHTML:
-        '<div class="field-row">' +
+        '<div class="field">' +
+          '<label class="field__label" for="ing-address">地址</label>' +
+          '<div class="address-geocode-row">' +
+            '<input class="input" id="ing-address" type="text" maxlength="200" value="南京市鼓楼区金银街16号" aria-label="抓取中心地址">' +
+            '<button type="button" class="btn" data-act="geocode">解析地址</button>' +
+          '</div>' +
+          '<div id="ing-geocode-status" class="field__hint" role="status">可解析地址到坐标；也可以手动填写经纬度。</div>' +
+        '</div>' +
+        '<div class="field-row" style="margin-top:9px">' +
           '<div class="field"><label class="field__label" for="ing-lat">纬度</label>' +
-            '<input class="input input--mono" id="ing-lat" type="text" inputmode="decimal" value="31.2304" aria-label="抓取中心纬度"></div>' +
+            '<input class="input input--mono" id="ing-lat" type="text" inputmode="decimal" placeholder="解析地址或手动输入" aria-label="抓取中心纬度"></div>' +
           '<div class="field"><label class="field__label" for="ing-lon">经度</label>' +
-            '<input class="input input--mono" id="ing-lon" type="text" inputmode="decimal" value="121.4737" aria-label="抓取中心经度"></div>' +
+            '<input class="input input--mono" id="ing-lon" type="text" inputmode="decimal" placeholder="解析地址或手动输入" aria-label="抓取中心经度"></div>' +
         '</div>' +
         '<div class="field-row" style="margin-top:9px">' +
           '<div class="field"><label class="field__label" for="ing-radius">半径（米）</label>' +
@@ -1748,7 +1937,7 @@
             '<input class="input" id="ing-limit" type="number" min="1" max="50" value="20" aria-label="最多抓取条数"></div>' +
         '</div>' +
         '<div class="modal__note">' + UI.icon('info', 13) +
-          '<span>去重规则：同名或距离 &lt; 30m 的已存在兴趣点会跳过；新点状态为「草稿」。</span></div>',
+          '<span>地址解析优先使用已配置的高德 / 百度 Key，失败后回退 OpenStreetMap；解析失败不会使用默认坐标。去重：同名或距离 &lt; 30m 会跳过。</span></div>',
       footerHTML:
         '<div class="spacer"></div>' +
         '<button type="button" class="btn" data-act="cancel">取消</button>' +
@@ -1756,23 +1945,68 @@
     });
 
     handle.foot.querySelector('[data-act="cancel"]').addEventListener('click', function () { handle.close(); });
+    const addressField = $('#ing-address', handle.body);
+    const latField = $('#ing-lat', handle.body);
+    const lonField = $('#ing-lon', handle.body);
+    const statusField = $('#ing-geocode-status', handle.body);
+    const geocodeButton = $('[data-act="geocode"]', handle.body);
+    addressField.addEventListener('input', function () {
+      latField.value = '';
+      lonField.value = '';
+      statusField.textContent = '地址已修改，请重新解析；也可以手动填写经纬度。';
+      statusField.classList.remove('is-error');
+    });
+    async function geocodeFormAddress(button) {
+      latField.value = '';
+      lonField.value = '';
+      try {
+        const result = await API.geocode(addressField.value.trim());
+        latField.value = String(result.lat);
+        lonField.value = String(result.lon);
+        statusField.textContent = '已通过 ' + (result.provider || '地址服务') +
+          ' 解析为 ' + result.lat + ', ' + result.lon;
+        statusField.classList.remove('is-error');
+      } catch (error) {
+        statusField.textContent = '地址解析失败：' + error.message;
+        statusField.classList.add('is-error');
+        throw error;
+      }
+    }
+    if (geocodeButton) geocodeButton.addEventListener('click', function () {
+      withBusy(geocodeButton, '解析中…', function () {
+        return geocodeFormAddress(geocodeButton);
+      }).catch(function (error) { toastError('地址解析失败', error); });
+    });
     const submit = handle.foot.querySelector('[data-act="ingest"]');
     submit.addEventListener('click', function () {
-      const lat = num($('#ing-lat', handle.body).value, 31.2304);
-      const lon = num($('#ing-lon', handle.body).value, 121.4737);
       const radius = num($('#ing-radius', handle.body).value, 1200);
       const limit = num($('#ing-limit', handle.body).value, 20);
       withBusy(submit, '抓取中…', async function () {
         try {
+          if (!latField.value.trim() && !lonField.value.trim()) {
+            await geocodeFormAddress(submit);
+          } else if (!latField.value.trim() || !lonField.value.trim()) {
+            throw new Error('纬度和经度需要同时填写，或都留空后解析地址');
+          }
+          const lat = Number(latField.value);
+          const lon = Number(lonField.value);
+          if (!Number.isFinite(lat) || lat < -90 || lat > 90 ||
+              !Number.isFinite(lon) || lon < -180 || lon > 180) {
+            throw new Error('地址解析失败或经纬度无效，请检查地址后重试');
+          }
           const result = await API.ingest({ lat: lat, lon: lon, radius: radius, limit: limit });
           handle.close();
-          UI.toast('新增 ' + (result.added || 0) + ' 条，跳过 ' + (result.skipped || 0) + ' 条', 'success', 3600);
+          if (result.added === 0 && result.warning) {
+            UI.toast('抓取无结果：' + result.warning, 'error', 6000);
+          } else {
+            UI.toast('新增 ' + (result.added || 0) + ' 条，跳过 ' + (result.skipped || 0) + ' 条', 'success', 3600);
+          }
           state.filters.status = 'draft';
           renderFilters();
           fetchList();
           fetchStats();
         } catch (error) {
-          toastError('抓取失败', error);
+          toastError(error.code === 'GEOCODE_FAILED' ? '地址解析失败' : '抓取失败', error);
         }
       });
     });
@@ -1817,8 +2051,8 @@
       UI.toast('AI 编辑不可用：没有配置 WA_LLM_API_KEY，当前为离线规则模式', 'error', 5200);
       return;
     }
-    if (!state.current) {
-      UI.toast('先在列表里选一条兴趣点', 'info');
+    if (!state.current || state.current.type === 'user') {
+      UI.toast('先在地图 POI 列表里选一条兴趣点', 'info');
       return;
     }
     const handle = UI.openModal({
@@ -1901,7 +2135,10 @@
   }
 
   function runAnalyze(button) {
-    const ids = targetIds();
+    const ids = analyzeTargetIds();
+    const includesUserSurprise = ids.some(function (id) {
+      return state.current && state.current.id === id && state.current.type === 'user';
+    });
     if (ids.length === 0) {
       UI.toast('先选一条（或勾选多条）再分析', 'info');
       return;
@@ -1926,11 +2163,15 @@
             ? '<div class="modal__note" style="margin-top:0;margin-bottom:12px">' + UI.icon('info', 13) +
               '<span>离线规则模式：以下是规则打分，不是模型输出。配置 WA_LLM_API_KEY 后可调用真实模型。</span></div>'
             : '') +
+          (includesUserSurprise
+            ? '<div class="modal__note" style="margin-top:0;margin-bottom:12px">' + UI.icon('info', 13) +
+              '<span>用户惊喜的分析结果仅供本次查看，不会写入用户提交的内容。</span></div>'
+            : '') +
           analyzeResultsHTML(items);
-        if (state.current) {
-          const refreshed = await safeFetchPoi(state.current.id);
-          if (refreshed) applyServerPoi(refreshed);
-        }
+          if (state.current && state.current.type !== 'user') {
+            const refreshed = await safeFetchPoi(state.current.id);
+            if (refreshed) applyServerPoi(refreshed);
+          }
         fetchStats();
         UI.toast('已分析 ' + items.length + ' 条 · ' + (usedOffline ? '离线规则' : '模型输出'), 'success', 3200);
       } catch (error) {
@@ -1942,6 +2183,11 @@
   }
 
   async function runBatchAnalyze(button) {
+    if (state.filters.type === 'user' ||
+        ['waiting', 'found', 'hidden'].includes(state.filters.status)) {
+      UI.toast('AI 批量分析只适用于地图 POI', 'info');
+      return;
+    }
     const status = state.filters.status === 'all' ? 'draft' : state.filters.status;
     const offline = state.llm.mode !== 'llm' || !state.llm.ready;
     await withBusy(button, '批量分析中…', async function () {
@@ -2047,7 +2293,6 @@
     renderTopActions();
     bindTopActions();
     bindMapKeysPanel();
-    bindSurprisesPanel();
     if (window.WASettings) window.WASettings.bind();
     renderLlmBadge();
     renderFilters();

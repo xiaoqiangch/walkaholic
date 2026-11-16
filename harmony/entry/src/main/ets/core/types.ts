@@ -71,6 +71,9 @@ export interface MapPoint {
   y: number;
 }
 
+/** 点位用途；数据来源仍由 Place.source 独立标记。 */
+export type PlaceType = 'poi' | 'userSurprise';
+
 // ============================================================
 // 地点
 // ============================================================
@@ -81,6 +84,8 @@ export interface MapPoint {
  */
 export interface Place {
   id: string;
+  /** 旧版 JSON 不含此字段；读取时按 poi 兼容。 */
+  type?: PlaceType;
   name: string;
   area: Area;
   category: string;

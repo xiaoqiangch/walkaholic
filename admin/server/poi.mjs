@@ -36,7 +36,7 @@ export const CATEGORY_KEYS = Object.keys(CATEGORIES);
 export const STATUSES = ['draft', 'review', 'approved', 'rejected'];
 export const RARITIES = ['common', 'rare', 'epic', 'hidden'];
 export const AREAS = ['near', 'river', 'oldtown'];
-export const SOURCES = ['wikipedia', 'osm', 'manual'];
+export const SOURCES = ['wikipedia', 'osm', 'amap', 'manual'];
 
 /** 类别任务模板（离线 normalize 用） */
 const CATEGORY_TASKS = {
