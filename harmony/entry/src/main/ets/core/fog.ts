@@ -11,7 +11,7 @@
  * - 两端各 46 米渐隐（按 3 米插值逐段降透明度）
  * - 已走部分冷灰蓝 #AEB8D6 / 线宽 7；前方靛蓝 #5B6CFF / 线宽 9
  * - 每 55 米一个行进箭头
- * - 「你」白底琥珀圈 + 深色三角；偏离路径 >18m 画红色虚线并提示
+ * - 「你」白底琥珀圈 + 深色三角；偏离超过定位误差门槛才画红色虚线
  * - 右下角指北针（指针按 -bearing 旋转）
  * - 剩余 < 60 米：整段隐藏，只显示「就在附近 · 抬头看看周围」
  * - 绝对不画终点、不画街道名
@@ -57,6 +57,8 @@ export const CHEVRON_TAIL_MARGIN: number = 10;
 export const OFF_ROUTE_THRESHOLD_METERS: number = 18;
 /** 偏离路径提示的上升阈值（带滞回，避免来回闪） */
 export const OFF_ROUTE_HYSTERESIS_METERS: number = 4;
+/** GPS uncertainty may widen the off-route threshold, but never beyond 45m. */
+export const OFF_ROUTE_MAX_THRESHOLD_METERS: number = 45;
 
 /** 剩余多少米时整段隐藏（保密 + 不再需要导航） */
 export const FOG_HIDE_REMAINING_METERS: number = 60;
@@ -156,6 +158,10 @@ export interface RouteProgress {
 export function routeProgressOf(line: RouteLine, here: GeoPoint): RouteProgress | undefined {
   const cumulative: RouteCumulative | undefined = buildCumulative(line);
   if (cumulative === undefined) return undefined;
+  return routeProgressOnCumulative(cumulative, here);
+}
+
+function routeProgressOnCumulative(cumulative: RouteCumulative, here: GeoPoint): RouteProgress | undefined {
   if (!isFinite(here.latitude) || !isFinite(here.longitude)) return undefined;
 
   const points: number[][] = cumulative.points;
@@ -408,7 +414,8 @@ export function fogGeometry(
   here: GeoPoint,
   layout: FogLayout,
   upBearing?: number,
-  deviceHeading?: number
+  deviceHeading?: number,
+  locationAccuracyMeters?: number
 ): FogGeometry {
   const empty: FogGeometry = {
     segments: [],
@@ -432,7 +439,7 @@ export function fogGeometry(
     ? line.distanceMeters
     : cumulative.total;
 
-  const progress: RouteProgress | undefined = routeProgressOf(line, here);
+  const progress: RouteProgress | undefined = routeProgressOnCumulative(cumulative, here);
   if (progress === undefined) {
     empty.caption = '正在规划路径…';
     return empty;
@@ -580,7 +587,8 @@ export function fogGeometry(
     empty.userY = layout.centerY;
 
     // ---------- 偏离路径：从吸附点画虚线到「你」 ----------
-    const deviated: boolean = Math.abs(progress.offRoute) > OFF_ROUTE_THRESHOLD_METERS;
+    const deviated: boolean = Math.abs(progress.offRoute) >
+      offRouteThreshold(locationAccuracyMeters);
     if (deviated) {
       const snappedScreen: FogPoint = toScreen(0, 0);
       const deviation: FogPoint = {
@@ -607,12 +615,25 @@ export function fogGeometry(
 /** 是否应该画「偏离路径」提示（带滞回，避免 GPS 抖动来回闪） */
 export function shouldShowOffRoute(
   offRoute: number,
-  previousVisible: boolean
+  previousVisible: boolean,
+  locationAccuracyMeters?: number
 ): boolean {
+  const threshold: number = offRouteThreshold(locationAccuracyMeters);
   if (previousVisible) {
-    return offRoute > OFF_ROUTE_THRESHOLD_METERS - OFF_ROUTE_HYSTERESIS_METERS;
+    return offRoute > threshold - OFF_ROUTE_HYSTERESIS_METERS;
   }
-  return offRoute > OFF_ROUTE_THRESHOLD_METERS;
+  return offRoute > threshold;
+}
+
+function offRouteThreshold(locationAccuracyMeters?: number): number {
+  if (locationAccuracyMeters === undefined || !isFinite(locationAccuracyMeters) ||
+    locationAccuracyMeters <= 0) {
+    return OFF_ROUTE_THRESHOLD_METERS;
+  }
+  return Math.max(
+    OFF_ROUTE_THRESHOLD_METERS,
+    Math.min(OFF_ROUTE_MAX_THRESHOLD_METERS, locationAccuracyMeters * 1.5)
+  );
 }
 
 /** 剩余时间估算：按 75 米/分钟 */

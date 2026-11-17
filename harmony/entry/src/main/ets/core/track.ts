@@ -27,6 +27,8 @@ export const MAX_TRACK_POINTS: number = 12000;
 export const MIN_SPACING_METERS: number = 25;
 /** 探索格子边长（米）：用于算「走过多少块地方」 */
 export const CELL_METERS: number = 200;
+/** Do not draw straight connectors across long gaps or GPS relocations. */
+export const MAX_TRACK_SEGMENT_GAP_METERS: number = 250;
 
 const DAY_MS: number = 86400000;
 
@@ -42,11 +44,25 @@ export interface TrackDay {
   points: WalkPoint[];
 }
 
+/** Canvas projection for a compact city-scale map. */
+export interface GeoProjection {
+  centerLatitude: number;
+  centerLongitude: number;
+  scale: number;
+  offsetX: number;
+  offsetY: number;
+}
+
+export interface PixelCoordinate {
+  x: number;
+  y: number;
+}
+
 /** 轨迹统计（城市地图顶部卡片） */
 export interface TrackStats {
   /** 走过多少天 */
   walkedDayCount: number;
-  /** 轨迹总长（米，断开 >3km 不计） */
+  /** 轨迹总长（米，断开 >250m 不计） */
   totalMeters: number;
   /** 走过的格子数（200 米一格） */
   exploredCellCount: number;
@@ -159,8 +175,8 @@ export class WalkTrackStore {
           { latitude: previous.latitude, longitude: previous.longitude },
           { latitude: point.latitude, longitude: point.longitude }
         );
-        // 断开超过 3 公里视为「换了地点」，不计入里程（否则开车里程会被算进散步）
-        if (gap < 3000) total += gap;
+        // 缺失或跳点之间不计直线距离，避免把定位漂移当成步行里程。
+        if (gap <= MAX_TRACK_SEGMENT_GAP_METERS) total += gap;
       }
     }
     const stats: TrackStats = {
@@ -299,6 +315,83 @@ export function simplifyPoints(points: GeoPoint[], limit: number): GeoPoint[] {
   const tail: GeoPoint = out[out.length - 1];
   if (tail.latitude !== last.latitude || tail.longitude !== last.longitude) out.push(last);
   return out;
+}
+
+/** Split a trace where a straight connector would misrepresent a missing path. */
+export function splitTrackSegments(
+  points: WalkPoint[],
+  maxGapMeters: number = MAX_TRACK_SEGMENT_GAP_METERS
+): WalkPoint[][] {
+  const segments: WalkPoint[][] = [];
+  let segment: WalkPoint[] = [];
+  for (let i = 0; i < points.length; i += 1) {
+    const point: WalkPoint = points[i];
+    const previous: WalkPoint | undefined = segment.length === 0 ? undefined : segment[segment.length - 1];
+    if (previous !== undefined && distance(previous, point) > maxGapMeters) {
+      if (segment.length > 0) segments.push(segment);
+      segment = [];
+    }
+    segment.push(point);
+  }
+  if (segment.length > 0) segments.push(segment);
+  return segments;
+}
+
+/** Fit a local equirectangular projection while preserving real-world aspect ratio. */
+export function fitGeoProjection(
+  points: GeoPoint[],
+  width: number,
+  height: number,
+  padding: number = 18,
+  minimumSpanMeters: number = 1200
+): GeoProjection | undefined {
+  if (points.length === 0 || width <= padding * 2 || height <= padding * 2) return undefined;
+  const first: GeoPoint = points[0];
+  if (!isFinite(first.latitude) || !isFinite(first.longitude)) return undefined;
+
+  let minLat: number = first.latitude;
+  let maxLat: number = first.latitude;
+  let minLon: number = first.longitude;
+  let maxLon: number = first.longitude;
+  for (let i = 1; i < points.length; i += 1) {
+    const point: GeoPoint = points[i];
+    if (!isFinite(point.latitude) || !isFinite(point.longitude)) continue;
+    minLat = Math.min(minLat, point.latitude);
+    maxLat = Math.max(maxLat, point.latitude);
+    minLon = Math.min(minLon, point.longitude);
+    maxLon = Math.max(maxLon, point.longitude);
+  }
+
+  const centerLatitude: number = (minLat + maxLat) / 2;
+  const centerLongitude: number = (minLon + maxLon) / 2;
+  const metersPerLongitude: number = 111320 * Math.max(0.2, Math.cos(centerLatitude * Math.PI / 180));
+  const minX: number = (minLon - centerLongitude) * metersPerLongitude;
+  const maxX: number = (maxLon - centerLongitude) * metersPerLongitude;
+  const minY: number = (minLat - centerLatitude) * 110540;
+  const maxY: number = (maxLat - centerLatitude) * 110540;
+  const spanX: number = Math.max(minimumSpanMeters, (maxX - minX) * 1.35);
+  const spanY: number = Math.max(minimumSpanMeters, (maxY - minY) * 1.35);
+  const scale: number = Math.min((width - padding * 2) / spanX, (height - padding * 2) / spanY);
+
+  return {
+    centerLatitude: centerLatitude,
+    centerLongitude: centerLongitude,
+    scale: scale,
+    offsetX: width / 2 - (minX + maxX) / 2 * scale,
+    offsetY: height / 2 + (minY + maxY) / 2 * scale
+  };
+}
+
+/** Project a WGS-84 coordinate into the fitted city-map canvas. */
+export function projectGeoPoint(point: GeoPoint, projection: GeoProjection): PixelCoordinate {
+  const metersPerLongitude: number =
+    111320 * Math.max(0.2, Math.cos(projection.centerLatitude * Math.PI / 180));
+  return {
+    x: projection.offsetX +
+      (point.longitude - projection.centerLongitude) * metersPerLongitude * projection.scale,
+    y: projection.offsetY -
+      (point.latitude - projection.centerLatitude) * 110540 * projection.scale
+  };
 }
 
 /** 越新的轨迹越亮；最多衰减到 0.22，保证旧轨迹还看得见（与 iOS CityMapView 一致） */

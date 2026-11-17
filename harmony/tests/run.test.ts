@@ -99,12 +99,17 @@ import {
   momentTitle
 } from '../entry/src/main/ets/core/moment';
 import {
+  MAX_TRACK_SEGMENT_GAP_METERS,
   MAX_TRACK_POINTS,
   MIN_SPACING_METERS,
   WalkTrackStore,
+  fitGeoProjection,
+  projectGeoPoint,
   simplifyPoints,
+  splitTrackSegments,
   trackOpacity
 } from '../entry/src/main/ets/core/track';
+import { MAX_WALKING_FIX_ACCURACY_METERS, WalkingFixFilter } from '../entry/src/main/ets/core/location';
 import { RECEIPTS_KEY, SurpriseReceiptStore } from '../entry/src/main/ets/core/receipts';
 import {
   claimSurprise,
@@ -2180,6 +2185,15 @@ test('迷雾：偏离 > 18m 才提示，且带滞回', (): void => {
   assert.equal(shouldShowOffRoute(20, true), true);
   assert.equal(shouldShowOffRoute(15, true), true, '滞回：已显示时 15m 仍显示');
   assert.equal(shouldShowOffRoute(13, true), false, '滞回：13m 才收起');
+  assert.equal(shouldShowOffRoute(24, false, 20), false, '精度 20m 时不因常见漂移误报');
+  assert.equal(shouldShowOffRoute(31, false, 20), true, '明显偏离仍提示');
+  assert.equal(shouldShowOffRoute(27, true, 20), true, '精度门槛也应保留滞回');
+  assert.equal(shouldShowOffRoute(25, true, 20), false, '回到精度门槛内后收起');
+  const line: RouteLine = straightRoute();
+  const onRoute: GeoPoint = pointAlongPath(buildCumulative(line)!, 100);
+  const noisyFix: GeoPoint = offset(onRoute, 24, 90);
+  const noisyGeometry = fogGeometry(line, noisyFix, defaultLayout(320, 196), undefined, undefined, 20);
+  assert.equal(noisyGeometry.deviateTo, undefined, '定位误差范围内不画红色虚线');
   assert.equal(estimatedMinutes(150), 2);
   assert.equal(estimatedMinutes(10), 1, '至少 1 分钟');
 });
@@ -3292,6 +3306,68 @@ test('轨迹：抽稀保留首尾，亮度按新旧衰减到 0.22 下限', (): v
   assert.equal(simplified[simplified.length - 1].latitude, points[points.length - 1].latitude);
   assert.equal(trackOpacity(0), 0.9);
   assert.equal(trackOpacity(100), 0.22);
+});
+
+test('轨迹：长距离 GPS 跳跃拆成独立线段，不画虚假连接线', (): void => {
+  const start: GeoPoint = geoPoint(31.2304, 121.4737);
+  const points = [
+    { ...start, time: 1000 },
+    { ...offset(start, 80, 90), time: 2000 },
+    { ...offset(start, 900, 90), time: 3000 },
+    { ...offset(start, 980, 90), time: 4000 }
+  ];
+  assert.equal(MAX_TRACK_SEGMENT_GAP_METERS, 250);
+  const segments = splitTrackSegments(points);
+  assert.equal(segments.length, 2);
+  assert.deepEqual(segments.map((segment) => segment.length), [2, 2]);
+
+  const kv: MemoryKV = new MemoryKV();
+  const track: WalkTrackStore = new WalkTrackStore(kv);
+  track.append(start, 1000);
+  track.append(offset(start, 500, 90), 2000);
+  assert.equal(track.stats().totalMeters, 0, '断轨的直线距离不计入步行里程');
+});
+
+test('个人地图：本地投影保持经纬方向的真实比例', (): void => {
+  const origin: GeoPoint = geoPoint(31.2304, 121.4737);
+  const east: GeoPoint = offset(origin, 100, 90);
+  const north: GeoPoint = offset(origin, 100, 0);
+  const projection = fitGeoProjection([origin, east, north], 320, 380);
+  assert.ok(projection !== undefined);
+  if (projection === undefined) return;
+  const originPixel = projectGeoPoint(origin, projection);
+  const eastPixel = projectGeoPoint(east, projection);
+  const northPixel = projectGeoPoint(north, projection);
+  const eastPixels: number = Math.abs(eastPixel.x - originPixel.x);
+  const northPixels: number = Math.abs(northPixel.y - originPixel.y);
+  assert.ok(Math.abs(eastPixels - northPixels) / Math.max(eastPixels, northPixels) < 0.03);
+  assert.ok(eastPixel.x > originPixel.x);
+  assert.ok(northPixel.y < originPixel.y);
+});
+
+test('定位：丢弃低精度与单次跳点，稳定后快速恢复并平滑更新', (): void => {
+  const filter: WalkingFixFilter = new WalkingFixFilter();
+  const origin: GeoPoint = geoPoint(31.2304, 121.4737);
+  assert.equal(MAX_WALKING_FIX_ACCURACY_METERS, 50);
+  assert.equal(filter.accept(origin, 65, 1000), undefined, '低精度定位不进入导航');
+  assert.deepEqual(filter.accept(origin, 8, 2000), origin);
+  assert.equal(filter.accept(offset(origin, 1200, 90), 8, 3000), undefined, '单次跳点被拒绝');
+  const recovered: GeoPoint | undefined =
+    filter.accept(offset(origin, 1202, 90), 8, 4000);
+  assert.ok(recovered !== undefined, '连续一致的新定位用于恢复');
+  if (recovered !== undefined) {
+    assert.ok(distance(origin, recovered) > 1100, '恢复后不能永久卡在旧位置');
+  }
+
+  const smoothingFilter: WalkingFixFilter = new WalkingFixFilter();
+  smoothingFilter.accept(origin, 5, 1000);
+  const measured: GeoPoint = offset(origin, 10, 90);
+  const smoothed: GeoPoint | undefined = smoothingFilter.accept(measured, 5, 3000);
+  assert.ok(smoothed !== undefined);
+  if (smoothed !== undefined) {
+    const smoothedMeters: number = distance(origin, smoothed);
+    assert.ok(smoothedMeters > 7 && smoothedMeters < 10, '平滑要降噪但不明显拖慢位置响应');
+  }
 });
 
 test('回执：合并保留本地已读、新条目才算 hasNew、标记已读后清零', (): void => {

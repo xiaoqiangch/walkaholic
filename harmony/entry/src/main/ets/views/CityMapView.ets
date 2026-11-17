@@ -18,8 +18,17 @@
  */
 
 import { AppSnapshot } from '../core/contract';
-import { GeoPoint, Place, PlaceCard } from '../core/types';
-import { TrackDay, simplifyPoints, trackOpacity } from '../core/track';
+import { GeoPoint, Place, PlaceCard, WalkPoint } from '../core/types';
+import {
+  GeoProjection,
+  PixelCoordinate,
+  TrackDay,
+  fitGeoProjection,
+  projectGeoPoint,
+  simplifyPoints,
+  splitTrackSegments,
+  trackOpacity
+} from '../core/track';
 import { WaMicroLabel, WaStatsRow, StatItem } from '../components/Common';
 import { emptySnapshot, readSnapshot } from '../components/StoreBridge';
 import { WAColor, WAFont, WASize } from '../theme/Theme';
@@ -51,22 +60,13 @@ class VisitedPlace {
 /** 一天的轨迹（已抽稀） */
 class DayLine {
   day: number;
+  rank: number;
   points: GeoPoint[];
 
-  constructor(day: number, points: GeoPoint[]) {
+  constructor(day: number, rank: number, points: GeoPoint[]) {
     this.day = day;
+    this.rank = rank;
     this.points = points;
-  }
-}
-
-/** 归一化后的画布点 */
-class PixelPoint {
-  x: number;
-  y: number;
-
-  constructor(x: number, y: number) {
-    this.x = x;
-    this.y = y;
   }
 }
 
@@ -120,11 +120,30 @@ export struct CityMapView {
     const limit: number = Math.min(days.length, MAX_DAYS);
     for (let i = 0; i < limit; i += 1) {
       const entry: TrackDay = days[i];
-      const coordinates: GeoPoint[] = [];
-      for (let j = 0; j < entry.points.length; j += 1) {
-        coordinates.push({ latitude: entry.points[j].latitude, longitude: entry.points[j].longitude });
+      const segments: WalkPoint[][] = splitTrackSegments(entry.points);
+      const visibleSegments: WalkPoint[][] = [];
+      for (let j = 0; j < segments.length; j += 1) {
+        if (segments[j].length >= 2) visibleSegments.push(segments[j]);
       }
-      lines.push(new DayLine(entry.day, simplifyPoints(coordinates, MAX_POINTS_PER_DAY)));
+      const segmentLimit: number = Math.min(visibleSegments.length, Math.floor(MAX_POINTS_PER_DAY / 2));
+      const pointsPerSegment: number = segmentLimit > 0
+        ? Math.max(2, Math.floor(MAX_POINTS_PER_DAY / segmentLimit))
+        : 0;
+      for (let j = 0; j < segmentLimit; j += 1) {
+        const segmentIndex: number = Math.floor(j * visibleSegments.length / segmentLimit);
+        const coordinates: GeoPoint[] = [];
+        for (let k = 0; k < visibleSegments[segmentIndex].length; k += 1) {
+          coordinates.push({
+            latitude: visibleSegments[segmentIndex][k].latitude,
+            longitude: visibleSegments[segmentIndex][k].longitude
+          });
+        }
+        lines.push(new DayLine(
+          entry.day,
+          i,
+          simplifyPoints(coordinates, pointsPerSegment)
+        ));
+      }
     }
     return lines;
   }
@@ -179,67 +198,16 @@ export struct CityMapView {
   // 绘制（Canvas 手绘：包围盒归一化 + 按天分线）
   // ============================================================
 
-  private computeBox(): number[] {
+  private projection(lines: DayLine[], visited: VisitedPlace[]): GeoProjection | undefined {
     const all: GeoPoint[] = [];
-    const lines: DayLine[] = this.dayLines();
     for (let i = 0; i < lines.length; i += 1) {
       for (let j = 0; j < lines[i].points.length; j += 1) all.push(lines[i].points[j]);
     }
-    const visited: VisitedPlace[] = this.visited();
     for (let i = 0; i < visited.length; i += 1) {
       const coordinate: GeoPoint | undefined = visited[i].place.coordinate;
       if (coordinate !== undefined) all.push(coordinate);
     }
-    if (all.length === 0) {
-      const empty: number[] = [0, 0, 0, 0];
-      return empty;
-    }
-    let minLat: number = all[0].latitude;
-    let maxLat: number = all[0].latitude;
-    let minLon: number = all[0].longitude;
-    let maxLon: number = all[0].longitude;
-    for (let i = 1; i < all.length; i += 1) {
-      if (all[i].latitude < minLat) minLat = all[i].latitude;
-      if (all[i].latitude > maxLat) maxLat = all[i].latitude;
-      if (all[i].longitude < minLon) minLon = all[i].longitude;
-      if (all[i].longitude > maxLon) maxLon = all[i].longitude;
-    }
-    // 最小视野约 1.2 公里，避免单点被放大到街道级
-    const minSpan: number = 0.012;
-    let latSpan: number = (maxLat - minLat) * 1.35;
-    let lonSpan: number = (maxLon - minLon) * 1.35;
-    if (latSpan < minSpan) latSpan = minSpan;
-    if (lonSpan < minSpan) lonSpan = minSpan;
-    const centerLat: number = (minLat + maxLat) / 2;
-    const centerLon: number = (minLon + maxLon) / 2;
-    const box: number[] = [
-      centerLat - latSpan / 2,
-      centerLat + latSpan / 2,
-      centerLon - lonSpan / 2,
-      centerLon + lonSpan / 2
-    ];
-    return box;
-  }
-
-  private toPixel(point: GeoPoint, box: number[], width: number, height: number): PixelPoint {
-    const minLat: number = box[0];
-    const maxLat: number = box[1];
-    const minLon: number = box[2];
-    const maxLon: number = box[3];
-    const spanLat: number = maxLat - minLat <= 0 ? 1 : maxLat - minLat;
-    const spanLon: number = maxLon - minLon <= 0 ? 1 : maxLon - minLon;
-    const padding: number = 18;
-    const usableWidth: number = width - padding * 2;
-    const usableHeight: number = height - padding * 2;
-    const ratio: number = Math.min(usableWidth / spanLon, usableHeight / spanLat);
-    const drawWidth: number = spanLon * ratio;
-    const drawHeight: number = spanLat * ratio;
-    const offsetX: number = (width - drawWidth) / 2;
-    const offsetY: number = (height - drawHeight) / 2;
-    const x: number = offsetX + (point.longitude - minLon) * ratio;
-    // 纬度越大越靠上
-    const y: number = offsetY + (maxLat - point.latitude) * ratio;
-    return new PixelPoint(x, y);
+    return fitGeoProjection(all, this.canvasWidth, MAP_HEIGHT);
   }
 
   private draw(): void {
@@ -252,21 +220,22 @@ export struct CityMapView {
     ctx.fillStyle = WAColor.cream;
     ctx.fillRect(0, 0, width, height);
 
-    const box: number[] = this.computeBox();
-    if (box[1] - box[0] <= 0 && box[3] - box[2] <= 0) return;
-
-    // ---------- 轨迹（按天；越新越亮） ----------
     const lines: DayLine[] = this.dayLines();
+    const visited: VisitedPlace[] = this.visited();
+    const projection: GeoProjection | undefined = this.projection(lines, visited);
+    if (projection === undefined) return;
+
+    // ---------- 轨迹（按天分段；越新越亮） ----------
     ctx.lineCap = 'round';
     for (let i = 0; i < lines.length; i += 1) {
       const points: GeoPoint[] = lines[i].points;
       if (points.length < 2) continue;
-      ctx.globalAlpha = trackOpacity(i);
+      ctx.globalAlpha = trackOpacity(lines[i].rank);
       ctx.strokeStyle = WAColor.amber;
       ctx.lineWidth = 3.4;
       ctx.beginPath();
       for (let j = 0; j < points.length; j += 1) {
-        const pixel: PixelPoint = this.toPixel(points[j], box, width, height);
+        const pixel: PixelCoordinate = projectGeoPoint(points[j], projection);
         if (j === 0) {
           ctx.moveTo(pixel.x, pixel.y);
         } else {
@@ -278,11 +247,10 @@ export struct CityMapView {
     ctx.globalAlpha = 1;
 
     // ---------- 收下的地点（圆点） ----------
-    const visited: VisitedPlace[] = this.visited();
     for (let i = 0; i < visited.length; i += 1) {
       const coordinate: GeoPoint | undefined = visited[i].place.coordinate;
       if (coordinate === undefined) continue;
-      const pixel: PixelPoint = this.toPixel(coordinate, box, width, height);
+      const pixel: PixelCoordinate = projectGeoPoint(coordinate, projection);
       ctx.fillStyle = WAColor.paper;
       ctx.strokeStyle = '#730A59F7';
       ctx.lineWidth = 1.4;
@@ -523,4 +491,3 @@ export struct CityMapView {
     .height('100%')
   }
 }
-

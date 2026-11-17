@@ -13,6 +13,8 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { geoLocationManager } from '@kit.LocationKit';
 import { sensor } from '@kit.SensorServiceKit';
 import { GeoPoint } from '../core/types';
+import { bearing, distance } from '../core/geo';
+import { MAX_WALKING_FIX_ACCURACY_METERS, WalkingFixFilter } from '../core/location';
 
 const LOCATION_PERMISSIONS: Permissions[] = [
   'ohos.permission.APPROXIMATELY_LOCATION',
@@ -83,6 +85,7 @@ export function getCurrentLocationOnce(timeoutMs: number): Promise<GeoPoint> {
 export class CompassWatcher {
   private active: boolean = false;
   private heading: number = -1;
+  private lastEmittedHeading: number = -1;
   private listener: (data: sensor.OrientationResponse) => void;
   private onHeading: (heading: number) => void;
 
@@ -97,10 +100,16 @@ export class CompassWatcher {
       if (this.heading < 0) {
         this.heading = raw;
       } else {
-        const delta: number = ((raw - this.heading + 540) % 360) - 180;
-        this.heading = (this.heading + delta * 0.35 + 360) % 360;
+        const change: number = ((raw - this.heading + 540) % 360) - 180;
+        this.heading = (this.heading + change * 0.2 + 360) % 360;
       }
-      this.onHeading(this.heading);
+      const emittedDelta: number = this.lastEmittedHeading < 0
+        ? 360
+        : ((this.heading - this.lastEmittedHeading + 540) % 360) - 180;
+      if (Math.abs(emittedDelta) >= 2 || this.lastEmittedHeading < 0) {
+        this.lastEmittedHeading = this.heading;
+        this.onHeading(this.heading);
+      }
     };
   }
 
@@ -136,7 +145,8 @@ export class GeoWatcher {
   private listener: (location: geoLocationManager.Location) => void;
   private request: geoLocationManager.LocationRequest;
 
-  private onPollPoint: (point: GeoPoint) => void;
+  private onLocation: (point: GeoPoint, accuracyMeters: number) => void;
+  private fixFilter: WalkingFixFilter = new WalkingFixFilter();
 
   /** 最近一次定位成功的时间戳（ms）；0 表示还没拿到过 */
   private lastFixAt: number = 0;
@@ -147,22 +157,16 @@ export class GeoWatcher {
   /** 兜底轮询定时器句柄，-1 表示未启动 */
   private pollTimer: number = -1;
 
-  constructor(onPoint: (point: GeoPoint) => void) {
-    this.onPollPoint = onPoint;
+  constructor(onLocation: (point: GeoPoint, accuracyMeters: number) => void) {
+    this.onLocation = onLocation;
     this.request = {
-      priority: geoLocationManager.LocationRequestPriority.FIRST_FIX,
-      scenario: geoLocationManager.LocationRequestScenario.UNSET,
-      timeInterval: 1,
-      distanceInterval: 2
+      priority: geoLocationManager.LocationRequestPriority.ACCURACY,
+      scenario: geoLocationManager.LocationRequestScenario.NAVIGATION,
+      timeInterval: 2,
+      distanceInterval: 3
     };
     this.listener = (location: geoLocationManager.Location) => {
-      const point: GeoPoint = {
-        latitude: location.latitude,
-        longitude: location.longitude
-      };
-      this.lastFixAt = Date.now();
-      this.updateMoveHeading(point);
-      onPoint(point);
+      this.deliverFix(location);
     };
   }
 
@@ -203,26 +207,36 @@ export class GeoWatcher {
     return this.moveHeading;
   }
 
-  /** 用相邻两次定位点推算移动方向，写入 moveHeading */
-  private updateMoveHeading(point: GeoPoint): void {
-    const now: number = Date.now();
-    if (this.prevPoint === undefined) {
-      this.prevPoint = point;
-      this.lastFixAt = now;
+  private deliverFix(location: geoLocationManager.Location): void {
+    const accuracy: number = location.accuracy;
+    if (!isFinite(accuracy) || accuracy > MAX_WALKING_FIX_ACCURACY_METERS) {
       return;
     }
-    const dLat: number = point.latitude - this.prevPoint.latitude;
-    const dLon: number = point.longitude - this.prevPoint.longitude;
-    const meters: number = Math.abs(dLat) + Math.abs(dLon);
-    // 位移太小时方向不可靠，保留上一次结果
-    if (meters > 0.00002) {
-      this.moveHeading = Math.atan2(dLon, dLat) * 180 / Math.PI;
-      if (this.moveHeading < 0) {
-        this.moveHeading += 360;
-      }
+    const now: number = Date.now();
+    this.lastFixAt = now;
+    const point: GeoPoint = {
+      latitude: location.latitude,
+      longitude: location.longitude
+    };
+    const filtered: GeoPoint | undefined = this.fixFilter.accept(point, accuracy, now);
+    if (filtered === undefined) {
+      return;
+    }
+    this.updateMoveHeading(filtered);
+    this.onLocation(filtered, accuracy);
+  }
+
+  /** 用相邻两次定位点推算移动方向，写入 moveHeading */
+  private updateMoveHeading(point: GeoPoint): void {
+    if (this.prevPoint === undefined) {
+      this.prevPoint = point;
+      return;
+    }
+    const meters: number = distance(this.prevPoint, point);
+    if (meters >= 8) {
+      this.moveHeading = bearing(this.prevPoint, point);
       this.prevPoint = point;
     }
-    this.lastFixAt = now;
   }
 
   /** 兜底轮询：订阅式定位迟迟不来时，用单次定位补点 */
@@ -240,9 +254,9 @@ export class GeoWatcher {
       }
       try {
         geoLocationManager.getCurrentLocation({
-          priority: geoLocationManager.LocationRequestPriority.FIRST_FIX,
-          scenario: geoLocationManager.LocationRequestScenario.UNSET,
-          maxAccuracy: 0
+          priority: geoLocationManager.LocationRequestPriority.ACCURACY,
+          scenario: geoLocationManager.LocationRequestScenario.NAVIGATION,
+          maxAccuracy: MAX_WALKING_FIX_ACCURACY_METERS
         }, (err: BusinessError, location: geoLocationManager.Location) => {
           if (err) {
             return;
@@ -250,12 +264,7 @@ export class GeoWatcher {
           if (location === undefined || location === null) {
             return;
           }
-          const point: GeoPoint = {
-            latitude: location.latitude,
-            longitude: location.longitude
-          };
-          this.updateMoveHeading(point);
-          this.onPollPoint(point);
+          this.deliverFix(location);
         });
       } catch (err) {
         const error = err as BusinessError;
