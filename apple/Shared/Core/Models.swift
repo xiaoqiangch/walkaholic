@@ -202,8 +202,15 @@ public struct MapPoint: Codable, Hashable, Sendable {
 
 // MARK: - 地点
 
+public enum PlaceType: String, Codable, Sendable {
+    case poi
+    case userSurprise
+}
+
 public struct Place: Codable, Identifiable, Hashable, Sendable {
     public let id: String
+    /// 点位业务类型，与数据来源 `source` 分开记录。
+    public let type: PlaceType
     public let name: String
     public let area: Area
     public let category: String
@@ -221,11 +228,12 @@ public struct Place: Codable, Identifiable, Hashable, Sendable {
     public var coordinate: GeoPoint?
     /// 真实地址（到达后展示）
     public var address: String?
-    /// 数据来源标记：catalog = 内置虚构 / osm = 真实 OSM / apple = MapKit
+    /// 数据来源标记：catalog = 内置目录 / osm = OSM / apple = MapKit / user-upload = 用户惊喜
     public var source: String
 
     public init(
         id: String,
+        type: PlaceType = .poi,
         name: String,
         area: Area,
         category: String,
@@ -241,6 +249,7 @@ public struct Place: Codable, Identifiable, Hashable, Sendable {
         source: String = "catalog"
     ) {
         self.id = id
+        self.type = type
         self.name = name
         self.area = area
         self.category = category
@@ -254,6 +263,68 @@ public struct Place: Codable, Identifiable, Hashable, Sendable {
         self.coordinate = coordinate
         self.address = address
         self.source = source
+    }
+
+    /// 用于附近列表的用户惊喜安全展示投影。只保留列表需要的信息，不带坐标、照片或作者正文。
+    public static func userSurpriseProjection(id: String, authorEmoji: String) -> Place {
+        Place(
+            id: "surprise-\(id)",
+            type: .userSurprise,
+            name: "附近的用户惊喜",
+            area: .near,
+            category: "用户留下的惊喜",
+            emoji: authorEmoji,
+            rarity: .common,
+            why: "有人在附近留下了一份惊喜。",
+            task: "去寻找并复刻现场",
+            hints: [],
+            mapPoint: MapPoint(x: 0.5, y: 0.5),
+            radiusMeters: 60,
+            source: "user-upload"
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, type, name, area, category, emoji, rarity, why, task, hints
+        case mapPoint, radiusMeters, coordinate, address, source
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        type = try container.decodeIfPresent(PlaceType.self, forKey: .type) ?? .poi
+        name = try container.decode(String.self, forKey: .name)
+        area = try container.decode(Area.self, forKey: .area)
+        category = try container.decode(String.self, forKey: .category)
+        emoji = try container.decode(String.self, forKey: .emoji)
+        rarity = try container.decode(Rarity.self, forKey: .rarity)
+        why = try container.decode(String.self, forKey: .why)
+        task = try container.decode(String.self, forKey: .task)
+        hints = try container.decode([String].self, forKey: .hints)
+        mapPoint = try container.decode(MapPoint.self, forKey: .mapPoint)
+        radiusMeters = try container.decode(Int.self, forKey: .radiusMeters)
+        coordinate = try container.decodeIfPresent(GeoPoint.self, forKey: .coordinate)
+        address = try container.decodeIfPresent(String.self, forKey: .address)
+        source = try container.decodeIfPresent(String.self, forKey: .source) ?? "catalog"
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(type, forKey: .type)
+        try container.encode(name, forKey: .name)
+        try container.encode(area, forKey: .area)
+        try container.encode(category, forKey: .category)
+        try container.encode(emoji, forKey: .emoji)
+        try container.encode(rarity, forKey: .rarity)
+        try container.encode(why, forKey: .why)
+        try container.encode(task, forKey: .task)
+        try container.encode(hints, forKey: .hints)
+        try container.encode(mapPoint, forKey: .mapPoint)
+        try container.encode(radiusMeters, forKey: .radiusMeters)
+        try container.encodeIfPresent(coordinate, forKey: .coordinate)
+        try container.encodeIfPresent(address, forKey: .address)
+        try container.encode(source, forKey: .source)
     }
 }
 

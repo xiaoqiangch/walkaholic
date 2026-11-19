@@ -2,8 +2,9 @@
  * 步迷 Walkaholic · 兴趣点管理后台 — 公开数据抓取
  *
  * 数据源（均无需 API Key）：
- * 1. 中文维基百科 geosearch：地标名 + 真实坐标 + 简介 + 代表图片（首选）
- * 2. OpenStreetMap Overpass：街边小店 / 长椅等没有维基条目的 POI（备选，3 个镜像容错）
+ * 1. 已配置时使用高德周边搜索（中国大陆服务端稳定可用）
+ * 2. 中文维基百科 geosearch：地标名 + 真实坐标 + 简介 + 代表图片
+ * 3. OpenStreetMap Overpass：街边小店 / 长椅等没有维基条目的 POI（备选）
  *
  * 纯解析函数（parseWikipediaResponse / parseOverpassResponse）与网络分离，
  * 测试用固定 fixture 即可覆盖，不依赖网络。
@@ -22,7 +23,9 @@ const OVERPASS_ENDPOINTS = [
 const USER_AGENT = 'WalkaholicAdmin/0.1 (POI curator; local prototype)';
 const WIKI_TIMEOUT_MS = 8000;
 const OVERPASS_TIMEOUT_MS = 7000;
+const AMAP_TIMEOUT_MS = 8000;
 const DEDUPE_METERS = 30;
+const AMAP_AROUND_ENDPOINT = 'https://restapi.amap.com/v3/place/around';
 
 // ============================================================
 // 标题过滤 / 清洗 / 类别推断
@@ -230,14 +233,18 @@ export function parseOverpassResponse(json, origin) {
     if (!isUsableWikiTitle(name)) continue;
     const category = osmCategoryForTags(tags);
     if (!category) continue;
-    if (typeof element.lat !== 'number' || typeof element.lon !== 'number') continue;
+    const lat = typeof element.lat === 'number' ? element.lat
+      : element.center && typeof element.center.lat === 'number' ? element.center.lat : NaN;
+    const lon = typeof element.lon === 'number' ? element.lon
+      : element.center && typeof element.center.lon === 'number' ? element.center.lon : NaN;
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
     const street = tags['addr:street'] || '';
     const district = tags['addr:district'] || tags['addr:suburb'] || tags['addr:city'] || '';
     const address = [district, street].filter(Boolean).join(' · ') || null;
     candidates.push({
       name,
-      lat: element.lat,
-      lon: element.lon,
+      lat,
+      lon,
       category,
       photoUrl: null,
       photoCredit: null,
@@ -299,7 +306,17 @@ export function buildWikipediaUrl(lat, lon, radiusMeters) {
 }
 
 /** 抓维基候选；失败返回空数组（不抛给调用方） */
-export async function fetchWikipediaCandidates(lat, lon, radius, fetchImpl) {
+function recordFailure(failures, source, error) {
+  if (!failures) return;
+  const detail = error && error.name === 'AbortError'
+    ? '请求超时'
+    : error && /^HTTP \d+$/.test(error.message || '')
+      ? error.message
+      : '网络连接失败';
+  failures.push(source + '：' + detail);
+}
+
+export async function fetchWikipediaCandidates(lat, lon, radius, fetchImpl, failures) {
   try {
     const url = buildWikipediaUrl(lat, lon, radius);
     const json = await fetchJson(
@@ -310,21 +327,26 @@ export async function fetchWikipediaCandidates(lat, lon, radius, fetchImpl) {
     );
     return parseWikipediaResponse(json, { lat, lon });
   } catch (error) {
+    recordFailure(failures, '中文维基百科', error);
     return [];
   }
 }
 
 /** 生成 Overpass QL */
 export function buildOverpassQuery(lat, lon, radiusMeters) {
-  const clauses = TAG_RULES.map((rule) =>
-    'node["' + rule.key + '"="' + rule.value + '"](around:' + radiusMeters + ',' + lat + ',' + lon + ');'
+  const clauses = TAG_RULES.flatMap((rule) => [
+    'node["' + rule.key + '"="' + rule.value + '"](around:' + radiusMeters + ',' + lat + ',' + lon + ');',
+    'way["' + rule.key + '"="' + rule.value + '"](around:' + radiusMeters + ',' + lat + ',' + lon + ');'
+  ]);
+  clauses.push(
+    'node["historic"](around:' + radiusMeters + ',' + lat + ',' + lon + ');',
+    'way["historic"](around:' + radiusMeters + ',' + lat + ',' + lon + ');'
   );
-  clauses.push('node["historic"](around:' + radiusMeters + ',' + lat + ',' + lon + ');');
-  return '[out:json][timeout:18];(' + clauses.join('') + ');out body 120;';
+  return '[out:json][timeout:25];(' + clauses.join('') + ');out center tags;';
 }
 
 /** 抓 OSM 候选：3 个镜像依次尝试 */
-export async function fetchOverpassCandidates(lat, lon, radius, fetchImpl) {
+export async function fetchOverpassCandidates(lat, lon, radius, fetchImpl, failures) {
   const query = buildOverpassQuery(lat, lon, radius);
   for (const endpoint of OVERPASS_ENDPOINTS) {
     try {
@@ -344,15 +366,66 @@ export async function fetchOverpassCandidates(lat, lon, radius, fetchImpl) {
       const parsed = parseOverpassResponse(json, { lat, lon });
       if (parsed.length > 0) return parsed;
     } catch (error) {
-      // 换下一个镜像
+      recordFailure(failures, new URL(endpoint).hostname, error);
     }
   }
   return [];
 }
 
+/** 高德 Web 服务周边搜索作为中国大陆可用的备用数据源。 */
+export async function fetchAmapCandidates(lat, lon, radius, limit, key, fetchImpl, failures) {
+  if (!key) return [];
+  try {
+    const url = new URL(AMAP_AROUND_ENDPOINT);
+    url.searchParams.set('key', key);
+    url.searchParams.set('location', lon + ',' + lat);
+    url.searchParams.set('radius', String(Math.round(radius)));
+    url.searchParams.set('sortrule', 'distance');
+    url.searchParams.set('offset', String(Math.min(50, Math.max(1, limit))));
+    url.searchParams.set('page', '1');
+    url.searchParams.set('extensions', 'base');
+    const payload = await fetchJson(
+      fetchImpl,
+      url.toString(),
+      { headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' } },
+      AMAP_TIMEOUT_MS
+    );
+    if (String(payload.status) !== '1') {
+      throw new Error('高德周边搜索失败：' + String(payload.info || payload.infocode || '未知错误'));
+    }
+
+    const candidates = [];
+    for (const poi of Array.isArray(payload.pois) ? payload.pois : []) {
+      const location = String(poi.location || '').split(',');
+      if (location.length !== 2) continue;
+      const itemLat = Number(location[1]);
+      const itemLon = Number(location[0]);
+      const name = String(poi.name || '').trim();
+      if (!name || !Number.isFinite(itemLat) || !Number.isFinite(itemLon) || !isUsableWikiTitle(name)) continue;
+      candidates.push({
+        name,
+        lat: itemLat,
+        lon: itemLon,
+        category: guessCategoryFromTitle(name, poi.type || ''),
+        photoUrl: null,
+        photoCredit: null,
+        summary: cleanExtract(poi.type || ''),
+        address: String(poi.address || '').trim() || null,
+        tags: [],
+        source: 'amap'
+      });
+    }
+    return dedupeCandidates(candidates)
+      .sort((a, b) => candidateDistance({ lat, lon }, a) - candidateDistance({ lat, lon }, b));
+  } catch (error) {
+    recordFailure(failures, '高德周边搜索', error);
+    return [];
+  }
+}
+
 /**
- * 抓取入口：维基优先，不够再用 Overpass 补齐。
- * @returns {{ items: object[], source: 'wikipedia'|'osm'|'mixed' }}
+ * 抓取入口：高德（已配置时）→ 维基百科 → Overpass。
+ * @returns {{ items: object[], source: 'wikipedia'|'osm'|'amap'|'mixed', warning?: string }}
  */
 export async function fetchCandidates(options) {
   const lat = Number(options.lat);
@@ -361,16 +434,36 @@ export async function fetchCandidates(options) {
   const limit = Math.max(1, Math.min(50, Math.round(Number(options.limit) || 20)));
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   if (typeof fetchImpl !== 'function') throw new Error('当前 Node 没有可用的 fetch');
+  const failures = [];
 
-  const wiki = await fetchWikipediaCandidates(lat, lon, radius, fetchImpl);
-  if (wiki.length >= Math.min(limit, 5)) {
-    return { items: dedupeCandidates(wiki).slice(0, limit), source: 'wikipedia' };
+  const amapKey = typeof options.getMapKey === 'function' ? options.getMapKey('amap') : '';
+  const amap = await fetchAmapCandidates(lat, lon, radius, limit, amapKey, fetchImpl, failures);
+  if (amap.length >= Math.min(limit, 5)) {
+    return { items: amap.slice(0, limit), source: 'amap' };
   }
 
-  const osm = await fetchOverpassCandidates(lat, lon, radius, fetchImpl);
-  const merged = dedupeCandidates(wiki.concat(osm)).slice(0, limit);
-  let source = 'wikipedia';
-  if (wiki.length > 0 && osm.length > 0) source = 'mixed';
-  else if (wiki.length === 0 && osm.length > 0) source = 'osm';
-  return { items: merged, source };
+  const wiki = await fetchWikipediaCandidates(lat, lon, radius, fetchImpl, failures);
+  const wikiAndAmap = dedupeCandidates(amap.concat(wiki));
+  if (wikiAndAmap.length >= Math.min(limit, 5)) {
+    const sources = new Set(wikiAndAmap.map((item) => item.source));
+    return {
+      items: wikiAndAmap.slice(0, limit),
+      source: sources.size > 1 ? 'mixed' : sources.values().next().value
+    };
+  }
+
+  const osm = await fetchOverpassCandidates(lat, lon, radius, fetchImpl, failures);
+  const merged = dedupeCandidates(wiki.concat(amap, osm)).slice(0, limit);
+  const sources = new Set(merged.map((item) => item.source));
+  const source = sources.size > 1 ? 'mixed' : (sources.values().next().value || 'wikipedia');
+  return {
+    items: merged,
+    source,
+    warning: merged.length === 0
+      ? (failures.length
+        ? '数据源暂不可用：' + Array.from(new Set(failures)).join('；') +
+          (amapKey ? '' : '。可配置高德 Web 服务 Key 作为备用来源。')
+        : '当前范围没有找到可导入的地点。请扩大抓取半径后重试。')
+      : undefined
+  };
 }

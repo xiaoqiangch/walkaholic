@@ -148,6 +148,7 @@ function catalogPlace(
   const point: MapPoint = { x: x, y: y };
   const place: Place = {
     id: id,
+    type: 'poi',
     name: name,
     area: area,
     category: category,
@@ -494,6 +495,7 @@ export function clonePlace(place: Place): Place {
     : { latitude: place.coordinate.latitude, longitude: place.coordinate.longitude };
   const copy: Place = {
     id: place.id,
+    type: place.type === undefined ? 'poi' : place.type,
     name: place.name,
     area: place.area,
     category: place.category,
@@ -790,6 +792,7 @@ export function makeRealPlace(
   const coordinate: GeoPoint = { latitude: poi.coordinate.latitude, longitude: poi.coordinate.longitude };
   const place: Place = {
     id: 'real-' + poi.id,
+    type: 'poi',
     name: poi.name,
     area: realCategoryArea(poi.category),
     category: realCategoryLabel(poi.category),

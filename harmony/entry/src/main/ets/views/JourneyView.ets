@@ -98,6 +98,7 @@ export struct JourneyView {
   @State private fogCaption: string = '正在规划路径…';
   @State private fixLat: number = 0;
   @State private fixLon: number = 0;
+  @State private fixAccuracyMeters: number = 0;
   /** 用户手动确认「已停车」：GPS 在停车场里经常漂几百米，不能只靠距离自动切换 */
   @State private parkedOverride: boolean = false;
   /** 还离很远就点「已停车」→ 先确认一次 */
@@ -223,8 +224,8 @@ export struct JourneyView {
     if (this.watcher !== undefined) {
       return;
     }
-    const watcher: GeoWatcher = new GeoWatcher((point: GeoPoint) => {
-      this.onGeoPoint(point);
+    const watcher: GeoWatcher = new GeoWatcher((point: GeoPoint, accuracyMeters: number) => {
+      this.onGeoPoint(point, accuracyMeters);
     });
     const started: boolean = watcher.start();
     if (!started) {
@@ -260,9 +261,10 @@ export struct JourneyView {
     }
   }
 
-  private onGeoPoint(point: GeoPoint): void {
+  private onGeoPoint(point: GeoPoint, accuracyMeters: number): void {
     this.fixLat = point.latitude;
     this.fixLon = point.longitude;
+    this.fixAccuracyMeters = accuracyMeters;
     // 没罗盘（或罗盘还没就绪）时，用移动方向让地图跟着转
     if (this.compassHeading < 0 && this.watcher !== undefined) {
       const move = this.watcher.heading();
@@ -878,6 +880,7 @@ export struct JourneyView {
           routeDistance: this.routeDistance(),
           hereLat: this.fixLat,
           hereLon: this.fixLon,
+          locationAccuracyMeters: this.fixAccuracyMeters,
           viewHeight: this.mapHeight(),
           heading: this.heading,
           northUp: !this.mapFollowsHeading,

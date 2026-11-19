@@ -100,12 +100,17 @@ import {
   momentTitle
 } from '../entry/src/main/ets/core/moment';
 import {
+  MAX_TRACK_SEGMENT_GAP_METERS,
   MAX_TRACK_POINTS,
   MIN_SPACING_METERS,
   WalkTrackStore,
+  fitGeoProjection,
+  projectGeoPoint,
   simplifyPoints,
+  splitTrackSegments,
   trackOpacity
 } from '../entry/src/main/ets/core/track';
+import { MAX_WALKING_FIX_ACCURACY_METERS, WalkingFixFilter } from '../entry/src/main/ets/core/location';
 import { RECEIPTS_KEY, SurpriseReceiptStore } from '../entry/src/main/ets/core/receipts';
 import {
   claimSurprise,
@@ -261,6 +266,7 @@ import {
   seekClueState,
   seekLeadText
 } from '../entry/src/main/ets/core/hints';
+import { projectNearbyPlaces } from '../entry/src/main/ets/core/nearby-list';
 import {
   ROUTE_CACHE_TTL_MS,
   decodePolyline6,
@@ -2318,6 +2324,15 @@ test('迷雾：偏离 > 18m 才提示，且带滞回', (): void => {
   assert.equal(shouldShowOffRoute(20, true), true);
   assert.equal(shouldShowOffRoute(15, true), true, '滞回：已显示时 15m 仍显示');
   assert.equal(shouldShowOffRoute(13, true), false, '滞回：13m 才收起');
+  assert.equal(shouldShowOffRoute(24, false, 20), false, '精度 20m 时不因常见漂移误报');
+  assert.equal(shouldShowOffRoute(31, false, 20), true, '明显偏离仍提示');
+  assert.equal(shouldShowOffRoute(27, true, 20), true, '精度门槛也应保留滞回');
+  assert.equal(shouldShowOffRoute(25, true, 20), false, '回到精度门槛内后收起');
+  const line: RouteLine = straightRoute();
+  const onRoute: GeoPoint = pointAlongPath(buildCumulative(line)!, 100);
+  const noisyFix: GeoPoint = offset(onRoute, 24, 90);
+  const noisyGeometry = fogGeometry(line, noisyFix, defaultLayout(320, 196), undefined, undefined, 20);
+  assert.equal(noisyGeometry.deviateTo, undefined, '定位误差范围内不画红色虚线');
   assert.equal(estimatedMinutes(150), 2);
   assert.equal(estimatedMinutes(10), 1, '至少 1 分钟');
 });
@@ -2629,6 +2644,21 @@ test('账号恢复：profileFromJson / surprisesFromJson 能解回本地存档�
   const blank = profileFromJson('{}');
   assert.ok(blank !== undefined);
   if (blank !== undefined) assert.equal(blank.profile.xp, 0);
+});
+
+test('旧版地点 JSON 缺少 type 时按 poi 恢复且保留独立 source', (): void => {
+  const legacyPlace: Place = { ...PLACES[0], source: 'baidu' };
+  delete legacyPlace.type;
+  const loaded = profileFromJson(JSON.stringify({
+    extras: {
+      realPlaces: [legacyPlace]
+    }
+  }));
+  assert.ok(loaded !== undefined);
+  if (loaded === undefined) return;
+  assert.equal(loaded.extras.realPlaces.length, 1);
+  assert.equal(loaded.extras.realPlaces[0].type, 'poi');
+  assert.equal(loaded.extras.realPlaces[0].source, 'baidu');
 });
 
 test('账号恢复：applyRemotePayload 覆盖本机（缺字段保留原值）', async (): Promise<void> => {
@@ -3056,6 +3086,48 @@ test('保密（铁律）：nearbyHints 整体输出也不含任何剧透', (): v
   assert.equal(json.indexOf('洗衣店') < 0, true, '不得出现「洗衣店」');
 });
 
+test('统一附近点投影：按距离合并地图 POI 与安全用户惊喜', (): void => {
+  const origin: GeoPoint = geoPoint(31.2304, 121.4737);
+  const poiNear: Place = {
+    ...PLACES[0],
+    id: 'legacy-map-poi',
+    source: 'amap',
+    coordinate: geoPoint(31.2308, 121.4737)
+  };
+  delete poiNear.type;
+  const poiFar: Place = {
+    ...PLACES[1],
+    id: 'osm-map-poi',
+    source: 'osm',
+    coordinate: geoPoint(31.2326, 121.4737),
+    type: 'poi'
+  };
+  const surprise: BuriedSurprise = spoilerSurprise({
+    id: 'uploaded-surprise',
+    location: geoPoint(31.2312, 121.4737)
+  });
+  const hint: NearHint = makeNearHint(surprise, 0, 89);
+  const projected = projectNearbyPlaces([poiFar, poiNear], [hint], origin);
+
+  assert.deepEqual(projected.map((item) => item.id), [
+    'legacy-map-poi',
+    'uploaded-surprise',
+    'osm-map-poi'
+  ]);
+  assert.equal(projected[0].type, 'poi');
+  assert.equal(projected[0].source, 'amap');
+  assert.equal(projected[1].type, 'userSurprise');
+  assert.equal(projected[1].source, 'userUpload');
+  assert.equal(projected[2].source, 'osm');
+
+  const safeSurpriseProjection: string = JSON.stringify(projected[1]);
+  assert.equal(safeSurpriseProjection.includes(surprise.photoUri), false);
+  assert.equal(safeSurpriseProjection.includes(surprise.photoHash), false);
+  assert.equal(safeSurpriseProjection.includes(surprise.areaWord), false);
+  assert.equal(safeSurpriseProjection.includes(surprise.hints[0]), false);
+  assert.equal(safeSurpriseProjection.includes(String(surprise.location.latitude)), false);
+});
+
 test('提示列表：按距离升序、排除已找到与自己埋的、最多 3 条', (): void => {
   const origin: GeoPoint = geoPoint(31.2304, 121.4737);
   // 纬度每 +0.001 ≈ 111 米
@@ -3394,6 +3466,68 @@ test('轨迹：抽稀保留首尾，亮度按新旧衰减到 0.22 下限', (): v
   assert.equal(simplified[simplified.length - 1].latitude, points[points.length - 1].latitude);
   assert.equal(trackOpacity(0), 0.9);
   assert.equal(trackOpacity(100), 0.22);
+});
+
+test('轨迹：长距离 GPS 跳跃拆成独立线段，不画虚假连接线', (): void => {
+  const start: GeoPoint = geoPoint(31.2304, 121.4737);
+  const points = [
+    { ...start, time: 1000 },
+    { ...offset(start, 80, 90), time: 2000 },
+    { ...offset(start, 900, 90), time: 3000 },
+    { ...offset(start, 980, 90), time: 4000 }
+  ];
+  assert.equal(MAX_TRACK_SEGMENT_GAP_METERS, 250);
+  const segments = splitTrackSegments(points);
+  assert.equal(segments.length, 2);
+  assert.deepEqual(segments.map((segment) => segment.length), [2, 2]);
+
+  const kv: MemoryKV = new MemoryKV();
+  const track: WalkTrackStore = new WalkTrackStore(kv);
+  track.append(start, 1000);
+  track.append(offset(start, 500, 90), 2000);
+  assert.equal(track.stats().totalMeters, 0, '断轨的直线距离不计入步行里程');
+});
+
+test('个人地图：本地投影保持经纬方向的真实比例', (): void => {
+  const origin: GeoPoint = geoPoint(31.2304, 121.4737);
+  const east: GeoPoint = offset(origin, 100, 90);
+  const north: GeoPoint = offset(origin, 100, 0);
+  const projection = fitGeoProjection([origin, east, north], 320, 380);
+  assert.ok(projection !== undefined);
+  if (projection === undefined) return;
+  const originPixel = projectGeoPoint(origin, projection);
+  const eastPixel = projectGeoPoint(east, projection);
+  const northPixel = projectGeoPoint(north, projection);
+  const eastPixels: number = Math.abs(eastPixel.x - originPixel.x);
+  const northPixels: number = Math.abs(northPixel.y - originPixel.y);
+  assert.ok(Math.abs(eastPixels - northPixels) / Math.max(eastPixels, northPixels) < 0.03);
+  assert.ok(eastPixel.x > originPixel.x);
+  assert.ok(northPixel.y < originPixel.y);
+});
+
+test('定位：丢弃低精度与单次跳点，稳定后快速恢复并平滑更新', (): void => {
+  const filter: WalkingFixFilter = new WalkingFixFilter();
+  const origin: GeoPoint = geoPoint(31.2304, 121.4737);
+  assert.equal(MAX_WALKING_FIX_ACCURACY_METERS, 50);
+  assert.equal(filter.accept(origin, 65, 1000), undefined, '低精度定位不进入导航');
+  assert.deepEqual(filter.accept(origin, 8, 2000), origin);
+  assert.equal(filter.accept(offset(origin, 1200, 90), 8, 3000), undefined, '单次跳点被拒绝');
+  const recovered: GeoPoint | undefined =
+    filter.accept(offset(origin, 1202, 90), 8, 4000);
+  assert.ok(recovered !== undefined, '连续一致的新定位用于恢复');
+  if (recovered !== undefined) {
+    assert.ok(distance(origin, recovered) > 1100, '恢复后不能永久卡在旧位置');
+  }
+
+  const smoothingFilter: WalkingFixFilter = new WalkingFixFilter();
+  smoothingFilter.accept(origin, 5, 1000);
+  const measured: GeoPoint = offset(origin, 10, 90);
+  const smoothed: GeoPoint | undefined = smoothingFilter.accept(measured, 5, 3000);
+  assert.ok(smoothed !== undefined);
+  if (smoothed !== undefined) {
+    const smoothedMeters: number = distance(origin, smoothed);
+    assert.ok(smoothedMeters > 7 && smoothedMeters < 10, '平滑要降噪但不明显拖慢位置响应');
+  }
 });
 
 test('回执：合并保留本地已读、新条目才算 hasNew、标记已读后清零', (): void => {

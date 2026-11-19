@@ -15,8 +15,13 @@
 
 import { PoiError } from './poi.mjs';
 
-export const PROVIDERS = ['amap', 'baidu'];
-const PROVIDER_LABELS = { amap: '高德 Web 服务 Key', baidu: '百度地图服务端 AK' };
+export const PROVIDERS = ['amap', 'amapServer', 'baidu'];
+const PUBLIC_PROVIDERS = ['amap', 'baidu'];
+const PROVIDER_LABELS = {
+  amap: '高德 Web 服务 Key（客户端地图）',
+  amapServer: '高德服务端 Key（后台抓取）',
+  baidu: '百度地图服务端 AK'
+};
 const MAX_KEY_LENGTH = 512;
 const TEST_TIMEOUT_MS = 8000;
 
@@ -149,7 +154,7 @@ export class MapKeysService {
     }
     const keys = body.keys;
     if (!keys || typeof keys !== 'object' || Array.isArray(keys)) {
-      throw new PoiError('keys 必须是对象（含 amap / baidu）', 'BAD_REQUEST', 400);
+      throw new PoiError('keys 必须是对象（含 amap / amapServer / baidu）', 'BAD_REQUEST', 400);
     }
     const updates = [];
     for (const provider of PROVIDERS) {
@@ -165,7 +170,7 @@ export class MapKeysService {
       updates.push({ provider: provider, value: trimmed });
     }
     if (updates.length === 0) {
-      throw new PoiError('没有可更新的 Key（可用 keys.amap / keys.baidu）', 'BAD_REQUEST', 400);
+      throw new PoiError('没有可更新的 Key（可用 keys.amap / keys.amapServer / keys.baidu）', 'BAD_REQUEST', 400);
     }
     const now = this.now();
     this.db.exec('BEGIN');
@@ -188,10 +193,10 @@ export class MapKeysService {
     return this.originPatterns.some((pattern) => pattern.test(origin));
   }
 
-  /** 公开视图：给 PWA 的明文 Key（空串表示未配置） */
+  /** 公开视图：仅给 PWA 下发客户端地图 Key，服务端 Key 永不公开 */
   publicView() {
     const keys = {};
-    for (const provider of PROVIDERS) {
+    for (const provider of PUBLIC_PROVIDERS) {
       keys[provider] = this.getRaw(provider);
     }
     return { ok: true, keys: keys, version: this.version() };
@@ -200,7 +205,7 @@ export class MapKeysService {
   // ---------- 测试连接 ----------
 
   buildTestUrl(provider, key) {
-    if (provider === 'amap') {
+    if (provider === 'amap' || provider === 'amapServer') {
       return AMAP_TEST_BASE + '?key=' + encodeURIComponent(key) +
         '&location=116.397,39.909&radius=500&offset=1';
     }
@@ -212,7 +217,7 @@ export class MapKeysService {
     if (!json || typeof json !== 'object') {
       return { ok: false, count: 0, error: '返回不是 JSON 对象' };
     }
-    if (provider === 'amap') {
+    if (provider === 'amap' || provider === 'amapServer') {
       if (String(json.status) !== '1') {
         return {
           ok: false,
@@ -251,7 +256,7 @@ export class MapKeysService {
    */
   async testProvider(provider) {
     if (!PROVIDERS.includes(provider)) {
-      throw new PoiError('provider 必须是 amap 或 baidu', 'BAD_REQUEST', 400);
+      throw new PoiError('provider 必须是 amap、amapServer 或 baidu', 'BAD_REQUEST', 400);
     }
     const row = this.getRow(provider);
     if (row === null) {

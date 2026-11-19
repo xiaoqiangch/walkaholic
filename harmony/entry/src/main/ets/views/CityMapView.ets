@@ -18,8 +18,8 @@
  */
 
 import { AppSnapshot } from '../core/contract';
-import { GeoPoint, Place, PlaceCard } from '../core/types';
-import { TrackDay, simplifyPoints, trackOpacity } from '../core/track';
+import { GeoPoint, Place, PlaceCard, WalkPoint } from '../core/types';
+import { TrackDay, simplifyPoints, splitTrackSegments, trackOpacity } from '../core/track';
 import { HttpClient } from '../core/http';
 import { KeyValueStore } from '../core/contract';
 import { WaMicroLabel, WaStatsRow, StatItem } from '../components/Common';
@@ -69,10 +69,13 @@ class VisitedPlace {
 /** 一天的轨迹（已抽稀） */
 class DayLine {
   day: number;
+  /** 距今天数排名（0 = 最近），用于透明度；同一天拆成多段时共用 */
+  rank: number;
   points: GeoPoint[];
 
-  constructor(day: number, points: GeoPoint[]) {
+  constructor(day: number, rank: number, points: GeoPoint[]) {
     this.day = day;
+    this.rank = rank;
     this.points = points;
   }
 }
@@ -195,11 +198,24 @@ export struct CityMapView {
     const limit: number = Math.min(days.length, MAX_DAYS);
     for (let i = 0; i < limit; i += 1) {
       const entry: TrackDay = days[i];
-      const coordinates: GeoPoint[] = [];
-      for (let j = 0; j < entry.points.length; j += 1) {
-        coordinates.push({ latitude: entry.points[j].latitude, longitude: entry.points[j].longitude });
+      // 走路断成几段（停车/信号中断）时分别抽稀、分别成线，
+      // 否则跨段的直线会把两段路连成一条根本不存在的轨迹。
+      const segments: WalkPoint[][] = splitTrackSegments(entry.points);
+      const visible: WalkPoint[][] = [];
+      for (let j = 0; j < segments.length; j += 1) {
+        if (segments[j].length >= 2) visible.push(segments[j]);
       }
-      lines.push(new DayLine(entry.day, simplifyPoints(coordinates, MAX_POINTS_PER_DAY)));
+      const segmentLimit: number = Math.min(visible.length, Math.floor(MAX_POINTS_PER_DAY / 2));
+      if (segmentLimit === 0) continue;
+      const perSegment: number = Math.max(2, Math.floor(MAX_POINTS_PER_DAY / segmentLimit));
+      for (let j = 0; j < segmentLimit; j += 1) {
+        const source: WalkPoint[] = visible[Math.floor(j * visible.length / segmentLimit)];
+        const coordinates: GeoPoint[] = [];
+        for (let k = 0; k < source.length; k += 1) {
+          coordinates.push({ latitude: source[k].latitude, longitude: source[k].longitude });
+        }
+        lines.push(new DayLine(entry.day, i, simplifyPoints(coordinates, perSegment)));
+      }
     }
     return lines;
   }
@@ -480,7 +496,7 @@ export struct CityMapView {
     for (let i = 0; i < lines.length; i += 1) {
       const points: GeoPoint[] = lines[i].points;
       if (points.length < 2) continue;
-      ctx.globalAlpha = trackOpacity(i);
+      ctx.globalAlpha = trackOpacity(lines[i].rank);
       ctx.strokeStyle = WAColor.amber;
       ctx.lineWidth = 4;
       ctx.beginPath();

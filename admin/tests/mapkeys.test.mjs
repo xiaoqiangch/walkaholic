@@ -108,10 +108,11 @@ test('地图 Key：PUT 后 GET 只回显掩码，绝不回显明文', async () =
   try {
     const auth = await loginAdmin(base);
     const fakeAmap = 'test-key-1234';
+    const fakeAmapServer = 'server-key-4321';
     const fakeBaidu = 'baidu-key-5678';
 
     const put = await request(base, 'PUT', '/api/mapkeys', {
-      keys: { amap: fakeAmap, baidu: fakeBaidu }
+      keys: { amap: fakeAmap, amapServer: fakeAmapServer, baidu: fakeBaidu }
     }, auth);
     assert.equal(put.status, 200);
     assert.equal(put.json.ok, true);
@@ -119,16 +120,20 @@ test('地图 Key：PUT 后 GET 只回显掩码，绝不回显明文', async () =
     assert.equal(put.json.keys.amap.configured, true);
     assert.equal(put.json.keys.amap.hint, 'test…1234');
     assert.equal(typeof put.json.keys.amap.updatedAt, 'number');
+    assert.equal(put.json.keys.amapServer.configured, true);
+    assert.equal(put.json.keys.amapServer.hint, 'serv…4321');
     assert.equal(put.json.keys.baidu.configured, true);
     assert.equal(put.json.keys.baidu.hint, 'baid…5678');
 
     const get = await request(base, 'GET', '/api/mapkeys', undefined, auth);
     assert.equal(get.status, 200);
     assert.equal(get.json.keys.amap.hint, 'test…1234');
+    assert.equal(get.json.keys.amapServer.hint, 'serv…4321');
     assert.equal(get.json.keys.baidu.hint, 'baid…5678');
 
     // 管理端响应里不能出现完整 Key
     assert.equal(get.text.includes(fakeAmap), false, '管理端 GET 不能回显完整 amap key');
+    assert.equal(get.text.includes(fakeAmapServer), false, '管理端 GET 不能回显完整服务端 key');
     assert.equal(get.text.includes(fakeBaidu), false, '管理端 GET 不能回显完整 baidu key');
     assert.equal(put.text.includes(fakeAmap), false);
 
@@ -147,7 +152,7 @@ test('公开端点：白名单来源回显 Origin + 明文 + no-store；非白�
   try {
     const auth = await loginAdmin(base);
     await request(base, 'PUT', '/api/mapkeys', {
-      keys: { amap: 'test-key-1234', baidu: 'baidu-key-5678' }
+      keys: { amap: 'test-key-1234', amapServer: 'server-key-4321', baidu: 'baidu-key-5678' }
     }, auth);
 
     for (const origin of [ALLOWED_GITHUB, ALLOWED_LOCAL, 'http://localhost:5173']) {
@@ -155,6 +160,7 @@ test('公开端点：白名单来源回显 Origin + 明文 + no-store；非白�
       assert.equal(result.status, 200, origin + ' 应允许');
       assert.equal(result.json.ok, true);
       assert.equal(result.json.keys.amap, 'test-key-1234');
+      assert.equal(Object.hasOwn(result.json.keys, 'amapServer'), false, '服务端 Key 不能下发到客户端');
       assert.equal(result.json.keys.baidu, 'baidu-key-5678');
       assert.equal(result.headers.get('cache-control'), 'no-store');
       assert.equal(result.headers.get('access-control-allow-origin'), origin);
@@ -299,7 +305,7 @@ test('地图 Key：test 端点用注入的 fetch 验证（不碰外网）', asyn
     const auth = await loginAdmin(base);
     const fakeKey = 'test-key-1234';
     await request(base, 'PUT', '/api/mapkeys', {
-      keys: { amap: fakeKey, baidu: 'baidu-key-5678' }
+      keys: { amap: fakeKey, amapServer: 'server-key-1234', baidu: 'baidu-key-5678' }
     }, auth);
 
     const amap = await request(base, 'POST', '/api/mapkeys/test', { provider: 'amap' }, auth);
@@ -310,6 +316,11 @@ test('地图 Key：test 端点用注入的 fetch 验证（不碰外网）', asyn
     assert.ok(calls.length >= 1);
     assert.ok(calls[calls.length - 1].includes('restapi.amap.com'));
     assert.ok(calls[calls.length - 1].includes('location=116.397'));
+
+    const amapServer = await request(base, 'POST', '/api/mapkeys/test', { provider: 'amapServer' }, auth);
+    assert.equal(amapServer.status, 200);
+    assert.equal(amapServer.json.ok, true);
+    assert.ok(calls[calls.length - 1].includes('restapi.amap.com'));
 
     const baidu = await request(base, 'POST', '/api/mapkeys/test', { provider: 'baidu' }, auth);
     assert.equal(baidu.status, 200);

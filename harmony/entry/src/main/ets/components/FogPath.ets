@@ -33,6 +33,7 @@ export struct WaFogPath {
   /** 当前位置 */
   @Prop @Watch('onDataChanged') hereLat: number = 0;
   @Prop @Watch('onDataChanged') hereLon: number = 0;
+  @Prop @Watch('onDataChanged') locationAccuracyMeters: number = 0;
   /** 画布高度 */
   @Prop viewHeight: number = 240;
   /** 设备朝向（0–360）。<0 表示没有罗盘 */
@@ -84,7 +85,8 @@ export struct WaFogPath {
       { latitude: this.hereLat, longitude: this.hereLon },
       layout,
       up,
-      deviceHeading
+      deviceHeading,
+      this.locationAccuracyMeters
     );
     this.geometry = geometry;
     this.emitCaption(geometry.caption);

@@ -229,6 +229,7 @@ public enum RealPlaceFactory {
 
         return Place(
             id: "real-\(poi.id)",
+            type: .poi,
             name: poi.name,
             area: area(for: poi.category),
             category: poi.category.label,
@@ -262,7 +263,7 @@ public enum RealPlaceFactory {
         }
         guard cleaned != place.hints else { return place }
         return Place(
-            id: place.id, name: place.name, area: place.area, category: place.category,
+            id: place.id, type: place.type, name: place.name, area: place.area, category: place.category,
             emoji: place.emoji, rarity: place.rarity, why: place.why, task: place.task,
             hints: cleaned, mapPoint: place.mapPoint, radiusMeters: place.radiusMeters,
             coordinate: place.coordinate, address: place.address, source: place.source

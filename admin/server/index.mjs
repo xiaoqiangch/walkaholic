@@ -38,6 +38,8 @@ import { SurpriseAdminService, SurpriseAdminError } from './surprises.mjs';
 import { LlmSettings } from './llmsettings.mjs';
 import { AccountSettingsAdmin, AccountSettingsError } from './accountsettings.mjs';
 import { resolveAccountDbPath } from './surprises.mjs';
+import { SURPRISE_STATUSES } from './surprises.mjs';
+import { geocodeAddress as resolveAddress, GeocodeError } from './geocode.mjs';
 import {
   AuthManager,
   SESSION_TTL_MS,
@@ -98,6 +100,10 @@ function redirect(res, location) {
 }
 
 function sendError(res, error) {
+  if (error instanceof GeocodeError) {
+    sendJson(res, error.status, { error: error.message, code: error.code });
+    return;
+  }
   if (error instanceof PoiError) {
     const payload = { error: error.message, code: error.code };
     if (error.details !== undefined) payload.details = error.details;
@@ -172,6 +178,7 @@ function parseListQuery(searchParams) {
     if (!STATUSES.includes(status)) throw new PoiError('status 不合法', 'BAD_REQUEST');
     query.status = status;
   }
+
   const category = searchParams.get('category');
   if (category !== null && category !== '') {
     if (!CATEGORY_KEYS.includes(category)) throw new PoiError('category 不合法', 'BAD_REQUEST');
@@ -187,6 +194,46 @@ function parseListQuery(searchParams) {
   const offset = searchParams.get('offset');
   if (offset !== null && offset !== '') query.offset = requireNumber(offset, 'offset', 0, 1000000);
   return query;
+}
+
+function parseUnifiedListQuery(searchParams) {
+  const type = searchParams.get('type') || 'all';
+  if (!['all', 'curated', 'user'].includes(type)) {
+    throw new PoiError('type 只能是 all | curated | user', 'BAD_REQUEST');
+  }
+  const status = searchParams.get('status') || '';
+  if (status && !STATUSES.includes(status) && !SURPRISE_STATUSES.includes(status)) {
+    throw new PoiError('status 不合法', 'BAD_REQUEST');
+  }
+  const q = searchParams.get('q') || '';
+  if (q.length > 200) throw new PoiError('q 最多 200 个字符', 'BAD_REQUEST');
+  const category = searchParams.get('category') || '';
+  if (category && !CATEGORY_KEYS.includes(category)) {
+    throw new PoiError('category 不合法', 'BAD_REQUEST');
+  }
+  let hasPhoto;
+  const photo = searchParams.get('hasPhoto');
+  if (photo === '1' || photo === 'true') hasPhoto = true;
+  else if (photo === '0' || photo === 'false') hasPhoto = false;
+  else if (photo !== null && photo !== '') throw new PoiError('hasPhoto 只能是 1 | 0', 'BAD_REQUEST');
+
+  const parseInteger = (key, fallback, min, max) => {
+    const raw = searchParams.get(key);
+    if (raw === null || raw === '') return fallback;
+    if (!/^\d+$/.test(raw)) throw new PoiError(key + ' 必须是整数', 'BAD_REQUEST');
+    const value = Number(raw);
+    if (value < min || value > max) throw new PoiError(key + ' 超出允许范围', 'BAD_REQUEST');
+    return value;
+  };
+  return {
+    type,
+    status,
+    category,
+    q: q.trim(),
+    hasPhoto,
+    limit: parseInteger('limit', 100, 1, 200),
+    offset: parseInteger('offset', 0, 0, 1000000)
+  };
 }
 
 /** 原子写文件：tmp + rename */
@@ -277,6 +324,12 @@ export function createServer(options = {}) {
     dbPath: options.accountDbPath,
     adminDataDir: dataDir
   });
+  const geocode = options.geocodeAddress || ((address) => resolveAddress(address, {
+    fetchImpl: options.geocodeFetch || fetchImpl,
+    getKey: (provider) => provider === 'amap'
+      ? mapKeys.getRaw('amapServer') || mapKeys.getRaw(provider)
+      : mapKeys.getRaw(provider)
+  }));
 
   // ---------- 公开端点：地图 Key（无鉴权，但限制来源） ----------
   function sendPublicJson(req, res, status, payload) {
@@ -336,6 +389,72 @@ export function createServer(options = {}) {
     }
 
     // ---------- 状态 / 统计 ----------
+    if (pathname === '/api/admin/points' && method === 'GET') {
+      const query = parseUnifiedListQuery(searchParams);
+      const q = query.q.toLowerCase();
+      const includeCurated = query.type !== 'user';
+      const includeUser = query.type !== 'curated';
+      let curated = [];
+      let user = [];
+      let warning = '';
+
+      if (includeCurated) {
+        curated = store.all()
+          .filter((poi) => !query.category || poi.category === query.category)
+          .filter((poi) => query.hasPhoto === undefined ||
+            (query.hasPhoto ? !!poi.photoUrl : !poi.photoUrl))
+          .filter((poi) => !q || [poi.id, poi.name, poi.summary, poi.source, ...(poi.tags || [])]
+            .some((value) => String(value || '').toLowerCase().includes(q)))
+          .map((poi) => ({ ...poi, type: 'curated' }));
+      }
+      if (includeUser) {
+        if (!query.category) {
+          if (!surprises.available && query.type === 'all') {
+            warning = surprises.status().error;
+          } else {
+            user = surprises.listAll({
+              q: query.q,
+              hasPhoto: query.hasPhoto
+            }).map((item) => ({
+              ...item,
+              type: 'user',
+              source: 'user',
+              name: item.message || item.authorName || '用户惊喜',
+              updatedAt: item.createdAt
+            }));
+          }
+        }
+      }
+
+      const byStatus = [...curated, ...user].sort((a, b) =>
+        Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0) ||
+        String(a.type).localeCompare(String(b.type)) || String(a.id).localeCompare(String(b.id))
+      );
+      const counts = {};
+      byStatus.forEach((item) => { counts[item.status] = (counts[item.status] || 0) + 1; });
+      counts.total = byStatus.length;
+      const filtered = query.status
+        ? byStatus.filter((item) => item.status === query.status)
+        : byStatus;
+      sendJson(res, 200, {
+        items: filtered.slice(query.offset, query.offset + query.limit),
+        total: filtered.length,
+        counts,
+        type: query.type,
+        warning,
+        limit: query.limit,
+        offset: query.offset
+      });
+      return;
+    }
+
+    if (pathname === '/api/geocode' && method === 'POST') {
+      const body = await readBody(req);
+      const result = await geocode(body.address);
+      sendJson(res, 200, result);
+      return;
+    }
+
     if (pathname === '/api/llm/status' && method === 'GET') {
       sendJson(res, 200, llmStatus(currentLlmEnv()));
       return;
@@ -387,13 +506,23 @@ export function createServer(options = {}) {
       const lon = requireNumber(body.lon, 'lon', -180, 180);
       const radius = body.radius === undefined ? 1200 : requireNumber(body.radius, 'radius', 100, 10000);
       const limit = body.limit === undefined ? 20 : requireNumber(body.limit, 'limit', 1, 50);
-      const result = await ingestCandidates({ lat, lon, radius, limit, fetchImpl });
+      const result = await ingestCandidates({
+        lat,
+        lon,
+        radius,
+        limit,
+        fetchImpl,
+        getMapKey: (provider) => provider === 'amap'
+          ? mapKeys.getRaw('amapServer') || mapKeys.getRaw(provider)
+          : mapKeys.getRaw(provider)
+      });
       const added = store.addCandidates(result.items || []);
       sendJson(res, 200, {
         added: added.added,
         skipped: added.skipped,
         items: added.items,
-        source: result.source || 'wikipedia'
+        source: result.source || 'wikipedia',
+        warning: added.added === 0 ? result.warning : undefined
       });
       return;
     }
@@ -440,17 +569,39 @@ export function createServer(options = {}) {
         throw new PoiError('ids 必须是非空数组', 'BAD_REQUEST');
       }
       const pois = [];
+      const surpriseIds = new Set();
       for (const rawId of body.ids) {
         const id = requireString(rawId, 'ids[]');
-        const poi = store.get(id);
-        if (!poi) throw new PoiError('POI 不存在：' + id, 'NOT_FOUND', 404);
+        let poi = store.get(id);
+        if (!poi && id.startsWith('surprise-')) {
+          const surprise = surprises.find(id);
+          if (surprise) {
+            surpriseIds.add(id);
+            poi = {
+              id: surprise.id,
+              name: surprise.message || '用户惊喜地点',
+              category: 'plaza',
+              summary: [surprise.areaLabel, surprise.message, ...surprise.clues]
+                .filter(Boolean)
+                .join('；'),
+              address: surprise.areaLabel,
+              tags: surprise.clues,
+              why: '',
+              task: '',
+              hints: [],
+              safety: {},
+              llm: {}
+            };
+          }
+        }
+        if (!poi) throw new PoiError('POI 或用户惊喜不存在：' + id, 'NOT_FOUND', 404);
         pois.push(poi);
       }
       const result = await analyzePois(pois, {
         env: currentLlmEnv(),
         fetchImpl,
         onApplied: (id, patch) => {
-          store.update(id, { safety: patch.safety, llm: patch.llm });
+          if (!surpriseIds.has(id)) store.update(id, { safety: patch.safety, llm: patch.llm });
         }
       });
       sendJson(res, 200, { items: result.items, mode: result.mode });
@@ -559,7 +710,9 @@ export function createServer(options = {}) {
       res.writeHead(200, {
         'Content-Type': photo.contentType,
         'Content-Length': photo.buffer.length,
-        'Cache-Control': 'no-store'
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'; sandbox"
       });
       res.end(photo.buffer);
       return;
@@ -680,9 +833,11 @@ export function createServer(options = {}) {
   server.store = store;
   server.auth = auth;
   server.mapKeys = mapKeys;
+  server.llmSettings = llmSettings;
   server.paths = { dataDir, dbPath: store.dbPath, publicDir, exportPath, backupPath };
   server.on('close', () => {
     auth.stopPruneTimer();
+    surprises.close();
     store.close();
   });
   return server;
@@ -697,7 +852,7 @@ export function startServer(options = {}) {
   const host = options.host || process.env.HOST || '127.0.0.1';
   const server = createServer(options);
   server.listen(port, host, () => {
-    const status = llmStatus(process.env);
+    const status = llmStatus(server.llmSettings.asEnv());
     console.log('步迷 Walkaholic · 兴趣点管理后台 v2（SQLite + 登录）');
     console.log('  管理界面  http://' + host + ':' + port + '/admin');
     console.log('  登录入口  http://' + host + ':' + port + '/admin/login');

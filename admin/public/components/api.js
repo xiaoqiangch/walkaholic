@@ -68,14 +68,18 @@
     // 4.1 列表与查询（只使用契约声明的参数）
     list: function (params) {
       const query = buildQuery({
+        type: params.type || 'all',
         status: params.status === 'all' ? '' : params.status,
         q: params.q,
         category: params.category,
-        limit: params.limit || 100,
-        offset: params.offset || 0
+        hasPhoto: params.hasPhoto,
+        limit: params.limit === undefined ? 100 : params.limit,
+        offset: params.offset === undefined ? 0 : params.offset
       });
-      return request('GET', '/api/pois' + query);
+      return request('GET', '/api/admin/points' + query);
     },
+    surprise: function (id) { return request('GET', '/api/surprises/' + encodeURIComponent(id)); },
+    geocode: function (address) { return request('POST', '/api/geocode', { address: address }); },
 
     // 4.2 单条
     poi: function (id) { return request('GET', '/api/pois/' + encodeURIComponent(id)); },

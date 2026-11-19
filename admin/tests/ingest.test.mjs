@@ -6,6 +6,7 @@ import {
   buildWikipediaUrl,
   cleanWikiTitle,
   dedupeCandidates,
+  fetchAmapCandidates,
   fetchCandidates,
   fetchOverpassCandidates,
   fetchWikipediaCandidates,
@@ -108,7 +109,11 @@ const overpassFixture = {
     { type: 'node', id: 4, lat: 31.233, lon: 121.476, tags: { amenity: 'restaurant' } },
     { type: 'node', id: 5, lat: 31.233, lon: 121.476, tags: { name: '无名小馆', amenity: 'restaurant' } },
     { type: 'node', id: 6, lat: 31.2352, lon: 121.4802, tags: { name: '人民广场', place: 'square' } },
-    { type: 'node', id: 7, lat: 31.223, lon: 121.445, tags: { name: '静安寺', amenity: 'place_of_worship' } }
+    { type: 'node', id: 7, lat: 31.223, lon: 121.445, tags: { name: '静安寺', amenity: 'place_of_worship' } },
+    {
+      type: 'way', id: 8, center: { lat: 32.057, lon: 118.77 },
+      tags: { name: '鼓楼公园', leisure: 'park', 'addr:street': '北京西路', 'addr:district': '鼓楼区' }
+    }
   ]
 };
 
@@ -192,7 +197,7 @@ test('parseWikipediaResponse：过滤 + 名称清洗 + 类别 + 图片 + 摘要'
 test('parseOverpassResponse：白名单类别 + 地址拼接 + 无名/不支持跳过', () => {
   const items = parseOverpassResponse(overpassFixture, origin);
   const names = items.map((item) => item.name);
-  assert.deepEqual(names.slice().sort(), ['人民广场', '星巴克咖啡', '旧书店', '某纪念碑', '静安寺'].sort());
+  assert.deepEqual(names.slice().sort(), ['人民广场', '星巴克咖啡', '旧书店', '某纪念碑', '静安寺', '鼓楼公园'].sort());
 
   const cafe = items.find((item) => item.name === '星巴克咖啡');
   assert.equal(cafe.category, 'cafe');
@@ -209,6 +214,12 @@ test('parseOverpassResponse：白名单类别 + 地址拼接 + 无名/不支持�
   const temple = items.find((item) => item.name === '静安寺');
   assert.equal(temple.category, 'temple');
   assert.equal(items.some((item) => item.name === '无名小馆'), false);
+
+  const park = items.find((item) => item.name === '鼓楼公园');
+  assert.equal(park.category, 'park');
+  assert.equal(park.lat, 32.057);
+  assert.equal(park.lon, 118.77);
+  assert.equal(park.address, '鼓楼区 · 北京西路');
 });
 
 test('批内去重：同名 / 30m 内只保留一个', () => {
@@ -236,8 +247,12 @@ test('URL / QL 构造与契约参数一致', () => {
   const query = buildOverpassQuery(31.2304, 121.4737, 1200);
   assert.ok(query.includes('[out:json]'));
   assert.ok(query.includes('node["amenity"="cafe"](around:1200,31.2304,121.4737);'));
+  assert.ok(query.includes('way["amenity"="cafe"](around:1200,31.2304,121.4737);'));
   assert.ok(query.includes('node["shop"="books"]'));
+  assert.ok(query.includes('way["shop"="books"]'));
   assert.ok(query.includes('node["historic"]'));
+  assert.ok(query.includes('way["historic"]'));
+  assert.ok(query.includes('out center tags'));
 });
 
 // ============================================================
@@ -315,9 +330,52 @@ test('Overpass 镜像容错：第一个失败后换第二个', async () => {
   assert.ok(count >= 2);
 });
 
+test('高德周边搜索：解析有效坐标和类别，并作为无维基结果时的备用源', async () => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(String(url));
+    if (String(url).includes('wikipedia.org')) return jsonResponse({ query: { pages: {} } });
+    if (String(url).includes('restapi.amap.com')) {
+      return jsonResponse({
+        status: '1',
+        pois: [
+          { name: '鼓楼公园', location: '118.7715,32.0601', type: '风景名胜;公园', address: '南京市鼓楼区' },
+          { name: '金银街咖啡', location: '118.7718,32.0602', type: '餐饮服务;咖啡厅', address: '金银街' }
+        ]
+      });
+    }
+    throw new Error('Overpass should not be requested when Amap returned enough results');
+  };
+  const result = await fetchCandidates({
+    lat: 32.0597,
+    lon: 118.7713,
+    radius: 1200,
+    limit: 2,
+    getMapKey: (provider) => provider === 'amap' ? 'test-amap-key' : '',
+    fetchImpl
+  });
+  assert.equal(result.source, 'amap');
+  assert.equal(result.items.length, 2);
+  assert.equal(result.items[0].category, 'park');
+  assert.equal(result.items[0].source, 'amap');
+  assert.ok(calls.some((url) => url.includes('restapi.amap.com')));
+  assert.equal(calls.some((url) => url.includes('overpass')), false);
+});
+
 test('fetchWikipediaCandidates：网络失败返回空数组（不抛）', async () => {
   const items = await fetchWikipediaCandidates(31.2304, 121.4737, 1200, async () => {
     throw new Error('offline');
   });
   assert.deepEqual(items, []);
+});
+
+test('fetchCandidates：两类数据源均无可用地点时返回可操作提示', async () => {
+  const result = await fetchCandidates({
+    ...origin,
+    radius: 1200,
+    limit: 10,
+    fetchImpl: async () => jsonResponse({ elements: [] })
+  });
+  assert.deepEqual(result.items, []);
+  assert.equal(result.warning, '当前范围没有找到可导入的地点。请扩大抓取半径后重试。');
 });

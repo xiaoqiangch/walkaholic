@@ -2,13 +2,20 @@ import SwiftUI
 
 // MARK: - 图鉴 Cards（design-system §5.5，视觉基准：web 原型 #/cards）
 
+private struct NearbyPlaceItem: Identifiable {
+    let place: Place
+    let surprise: BuriedSurprise?
+
+    var id: String { place.id }
+}
+
 struct CardsView: View {
 
     let store: WalkaholicStore
 
     @State private var filter: CardFilter = .all
     @State private var selectedPlace: Place?
-    /// 从「附近惊喜」点进来的惊喜 id（打开探寻页时聚焦它）
+    /// 从附近用户惊喜点进来的惊喜 id（打开探寻页时聚焦它）
     @State private var seekFocusID: String?
     @State private var showSeek = false
     /// 点未解锁卡片、但还没有定位 → 弹出「先拿到位置」的说明
@@ -61,12 +68,10 @@ struct CardsView: View {
                     .padding(.bottom, 12)
                 almostThereCard
                     .padding(.bottom, 20)
-                nearbyHintsSection
+                nearbyPlacesSection
                     .padding(.bottom, 16)
                 filterRow
                     .padding(.bottom, 14)
-                nearbyStatusRow
-                    .padding(.bottom, 10)
                 grid
                 if !unresolvedCards.isEmpty {
                     unresolvedNotice
@@ -160,38 +165,10 @@ struct CardsView: View {
             }
         }
         .task {
-            // 先把真实目录填上（策展 POI + 历史已收录点），再拉附近的惊喜和附近兴趣点
+            // 先把真实目录填上（策展 POI + 历史已收录点），再拉统一附近列表的数据
             await AdminPOIService.shared.prepare()
             await refreshRemoteSurprises()
             await loadNearbyCandidates()
-        }
-    }
-
-    /// 「正在找附近兴趣点 / 没找到 / 找失败」的一行说明
-    @ViewBuilder
-    private var nearbyStatusRow: some View {
-        if isLoadingNearby && nearbyCandidates.isEmpty {
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.mini)
-                Text("正在找附近的真实地点…")
-                    .font(.caption)
-                    .foregroundStyle(WATheme.ink2)
-            }
-        } else if let nearbyError {
-            HStack(spacing: 6) {
-                Image(systemName: "info.circle")
-                    .font(.caption)
-                Text(nearbyError)
-                    .font(.caption)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 0)
-                Button("重试") {
-                    Task { await loadNearbyCandidates() }
-                }
-                .font(.caption.weight(.medium))
-                .foregroundStyle(WATheme.amber)
-            }
-            .foregroundStyle(WATheme.ink2)
         }
     }
 
@@ -299,7 +276,7 @@ struct CardsView: View {
         store.mergeRemoteSurprises(remote, near: origin)
     }
 
-    // MARK: 附近的惊喜（隐晦提示）
+    // MARK: 统一附近点列表
 
     /// 待寻的惊喜，按距离排序
     private var nearbyHintList: [BuriedSurprise] {
@@ -307,6 +284,26 @@ struct CardsView: View {
         // 有定位按 5km 圈；没有定位就全部待寻的，并显示「位置未知」
         let all = store.explorableSurprises(near: origin)
         return Array(all.prefix(3))
+    }
+
+    private var nearbyPlaceItems: [NearbyPlaceItem] {
+        let poiItems = nearbyCandidates.map { NearbyPlaceItem(place: $0, surprise: nil) }
+        let surpriseItems = nearbyHintList.map { surprise in
+            NearbyPlaceItem(
+                place: Place.userSurpriseProjection(id: surprise.id, authorEmoji: surprise.authorEmoji),
+                surprise: surprise
+            )
+        }
+        return (poiItems + surpriseItems).sorted { lhs, rhs in
+            nearbyDistance(lhs) < nearbyDistance(rhs)
+        }
+    }
+
+    private func nearbyDistance(_ item: NearbyPlaceItem) -> Double {
+        if let surprise = item.surprise, let origin = store.lastKnownOrigin {
+            return GeoMath.distance(from: origin, to: surprise.location)
+        }
+        return distanceTo(item.place)
     }
 
     private func distanceBucket(_ meters: Double?) -> String {
@@ -336,14 +333,18 @@ struct CardsView: View {
     }
 
     @ViewBuilder
-    private var nearbyHintsSection: some View {
-        let list = nearbyHintList
+    private var nearbyPlacesSection: some View {
+        let list = nearbyPlaceItems
+        let poiCount = list.filter { $0.place.type == .poi }.count
+        let surpriseCount = list.filter { $0.place.type == .userSurprise }.count
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Text("附近的惊喜")
+                Text("附近点位")
                     .font(.headline)
                 Spacer(minLength: 0)
-                Text(list.isEmpty ? "这一带暂时没有" : "\(list.count) 个还没被找到")
+                Text(list.isEmpty
+                     ? (isLoadingNearby ? "正在查找" : "暂时没有")
+                     : "地图兴趣点 \(poiCount) · 用户惊喜 \(surpriseCount)")
                     .font(.footnote)
                     .foregroundStyle(WATheme.ink2)
             }
@@ -353,9 +354,9 @@ struct CardsView: View {
                     showSeek = true
                 } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: "plus")
+                        Image(systemName: "sparkles")
                             .font(.system(size: 12, weight: .medium))
-                        Text("这一带还没人埋过，你来第一个")
+                        Text("查看附近的用户惊喜")
                             .font(.system(size: 13, weight: .medium))
                     }
                     .foregroundStyle(WATheme.ink2)
@@ -367,33 +368,16 @@ struct CardsView: View {
                 .buttonStyle(WAPressEffectStyle())
             } else {
                 VStack(spacing: 0) {
-                    ForEach(Array(list.enumerated()), id: \.element.id) { index, surprise in
+                    ForEach(Array(list.enumerated()), id: \.element.id) { index, item in
                         Button {
-                            seekFocusID = surprise.id
-                            showSeek = true
-                        } label: {
-                            HStack(alignment: .center, spacing: 12) {
-                                Text(surprise.authorEmoji)
-                                    .font(.body)
-                                    .frame(width: 34, height: 34)
-                                    .background(Color(.secondarySystemFill))
-                                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(distanceBucket(store.lastKnownOrigin.map { GeoMath.distance(from: $0, to: surprise.location) }))
-                                        .font(.body)
-                                        .foregroundStyle(WATheme.ink)
-                                    Text(atmosphere(for: surprise))
-                                        .font(.footnote)
-                                        .foregroundStyle(WATheme.ink2)
-                                        .lineLimit(2)
-                                        .multilineTextAlignment(.leading)
-                                }
-                                Spacer(minLength: 0)
-                                Image(systemName: "chevron.right")
-                                    .font(.footnote.weight(.semibold))
-                                    .foregroundStyle(WATheme.ink3)
+                            if let surprise = item.surprise {
+                                seekFocusID = surprise.id
+                                showSeek = true
+                            } else {
+                                startExplore(item.place)
                             }
+                        } label: {
+                            nearbyPlaceRow(item)
                             .padding(.vertical, 10)
                             .contentShape(Rectangle())
                         }
@@ -408,6 +392,72 @@ struct CardsView: View {
                 .background(WATheme.paper)
                 .clipShape(RoundedRectangle(cornerRadius: WATheme.cardRadius, style: .continuous))
             }
+
+            if isLoadingNearby && nearbyCandidates.isEmpty {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.mini)
+                    Text("正在找附近的地图兴趣点…")
+                        .font(.caption)
+                        .foregroundStyle(WATheme.ink2)
+                }
+            } else if let nearbyError {
+                HStack(spacing: 6) {
+                    Image(systemName: "info.circle")
+                        .font(.caption)
+                    Text(nearbyError)
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Button("重试") {
+                        Task { await loadNearbyCandidates() }
+                    }
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(WATheme.amber)
+                }
+                .foregroundStyle(WATheme.ink2)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func nearbyPlaceRow(_ item: NearbyPlaceItem) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            Text(item.place.emoji)
+                .font(.body)
+                .frame(width: 34, height: 34)
+                .background(Color(.secondarySystemFill))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 2) {
+                if let surprise = item.surprise {
+                    Text(distanceBucket(store.lastKnownOrigin.map {
+                        GeoMath.distance(from: $0, to: surprise.location)
+                    }))
+                    .font(.body)
+                    .foregroundStyle(WATheme.ink)
+                    Text(atmosphere(for: surprise))
+                        .font(.footnote)
+                        .foregroundStyle(WATheme.ink2)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                } else {
+                    Text(distanceCopy(item.place))
+                        .font(.body)
+                        .foregroundStyle(WATheme.ink)
+                    Text(unexploredSummary(item.place))
+                        .font(.footnote)
+                        .foregroundStyle(WATheme.ink2)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                }
+            }
+            Spacer(minLength: 0)
+            Text(item.place.type == .poi ? "地图" : "惊喜")
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(WATheme.ink3)
+            Image(systemName: "chevron.right")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(WATheme.ink3)
         }
     }
 
@@ -789,9 +839,6 @@ struct CardsView: View {
         for poi in AdminPOIService.shared.allPlaces { append(poi, allowFar: false) }
         // 3) 运行时抓到过的真实点（同样只看走得到的）
         for place in PlaceDirectory.shared.all { append(place, allowFar: false) }
-        // 4) 现场搜到的附近真实兴趣点（未探索 → 问号卡）
-        for place in nearbyCandidates { append(place, allowFar: false) }
-
         return result
     }
 
