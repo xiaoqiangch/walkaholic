@@ -836,7 +836,7 @@ for (const [section, detail] of sectionPasses) {
 
 console.log('');
 if (failures.length === 0) {
-  console.log(`✅ 全部通过：${etsFiles.length} 个 .ets 文件，0 error（.hap 编译仍需 DevEco Studio）`);
+  console.log(`✅ 全部通过：${etsFiles.length} 个 .ets 文件，0 error`);
   process.exit(0);
 } else {
   console.log(`❌ 静态检查失败：${failures.length} 个问题`);

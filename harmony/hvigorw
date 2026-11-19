@@ -1,6 +1,15 @@
 #!/bin/sh
 # hvigorw: 使用 DevEco Studio 自带工具链 (API 26)
-IDE=/Volumes/XQProjects/DevTools/apps/DevEco-Studio.app/Contents
-export DEVECO_SDK_HOME="$IDE/sdk"
-export JAVA_HOME="$IDE/jbr/Contents/Home"
-exec "$IDE/tools/node/bin/node" "$IDE/tools/hvigor/bin/hvigorw.js" "$@"
+#
+# 为什么不是 /Applications/DevEco-Studio.app/Contents？
+#   macOS 26 的 App Management 保护会拦截「在 .app 包内直接执行 Mach-O」，
+#   进程会在 dyld 阶段永久卡死（node / java / hdc 都会）。
+#   所以 CLI 构建改用 ~/DevTools/deveco 下的同版本工具链副本（由 scripts/setup-deveco-cli.sh 生成）。
+#   IDE 图形界面仍走 /Applications/DevEco-Studio.app，不受影响。
+IDE_HOME=${DEVECO_IDE_HOME:-$HOME/DevTools/deveco}
+if [ ! -x "$IDE_HOME/tools/node/bin/node" ]; then
+  IDE_HOME=/Applications/DevEco-Studio.app/Contents
+fi
+export DEVECO_SDK_HOME="$IDE_HOME/sdk"
+export JAVA_HOME="$IDE_HOME/jbr/Contents/Home"
+exec "$IDE_HOME/tools/node/bin/node" "$IDE_HOME/tools/hvigor/bin/hvigorw.js" "$@"

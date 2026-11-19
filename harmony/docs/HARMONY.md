@@ -1,8 +1,8 @@
 # 步迷 Walkaholic · HarmonyOS 移植
 
-> 状态：v0.7 功能对齐 Web v32 完成（2026-11-09）
-> 目标平台：**HarmonyOS NEXT**（API 12 / 5.0.0），ArkTS + ArkUI 声明式
-> 本机限制：**没有 DevEco Studio / hvigor / ohpm**，所以 `.hap` 编译需在你装的 DevEco 里完成；逻辑层已用 TypeScript + Node 做真实校验。
+> 状态：v0.9 与 iOS 1:1 对齐（2026-11-14）；**已在本机完成真实 `.hap` 编译 + 本地签名**（2026-11-19）
+> 目标平台：**HarmonyOS NEXT**（API 26 / 26.0.1），ArkTS + ArkUI 声明式
+> 本机工具链：DevEco Studio 26.0.1 + SDK 26（已部署，见 §11「本机开发环境」）
 
 ---
 
@@ -79,32 +79,74 @@ entry/src/main/ets/
 
 ---
 
-## 3. 怎么在 DevEco Studio 里跑起来
+## 3. 怎么跑起来
+
+### 3.1 图形界面（推荐日常开发）
 
 ```bash
 # 1. 装 DevEco Studio（免费）
 #    https://developer.huawei.com/consumer/cn/deveco-studio/
-#    安装时勾选 HarmonyOS SDK（API 12 或更高）
+#    26.0.1 已内置 SDK（HarmonyOS 26.0.1 / API 26）、Node、ohpm、hvigor、JBR、模拟器
 
 # 2. 打开工程
 DevEco Studio → Open → 选择仓库里的 harmony/ 目录（不是仓库根目录）
 
-# 3. 等 Sync 完成（hvigor 会自动拉 oh_modules）
+# 3. 等 Sync 完成（hvigor 自动拉 oh_modules）
 
-# 4. 签名（首次必须）
+# 4. 签名（首次）
 File → Project Structure → Signing Configs → 勾选 Automatically generate signature
-（需要登录华为开发者账号，免费）
+（需登录华为开发者账号，免费。**只有这条路能产可上架 / 可进真机的正式签名**）
 
 # 5. 运行
-选模拟器（Device Manager 里下 Phone）或真机（开发者模式 + USB 调试）
- → Run 'entry'
+Device Manager 下模拟器镜像（或真机开发者模式 + USB 调试）→ Run 'entry'
 ```
+
+### 3.2 纯命令行（CI / 无账号也能编译签名）
+
+**已经打通并实测通过**（2026-11-19）：
+
+```bash
+bash scripts/setup-deveco-cli.sh    # ① 把 IDE 工具链复制到 ~/DevTools/deveco
+bash scripts/gen-local-sign.sh      # ② 用 SDK 自带 CA 生成本地签名材料
+bash scripts/build-hap.sh           # ③ 编译 + 签名 + 校验签名
+bash scripts/build-hap.sh --device  # ④ 构建后直接装到已连接的模拟器/真机
+```
+
+产物：`harmony/entry/build/default/outputs/default/entry-default-signed.hap`
+
+#### 为什么要有 ①：macOS 26 的坑
+
+**现象**：在 `/Applications/DevEco-Studio.app/Contents` 里直接执行任何 Mach-O
+（`tools/node/bin/node`、`jbr/.../java`、`sdk/.../hdc`）都会永久卡死，
+`sample` 抓栈显示停在 dyld 的 `_dyld_start`，CPU 占用 0。
+
+**原因**：macOS 26（本机 27.0.1 / 26A434）的 App Management 保护会拦截
+「在 .app bundle 内执行可执行文件」；用 `open -a` 启动 IDE 本身不受影响，
+但 fork 出来的 CLI 子进程会卡在签名校验那一步。同样的二进制复制到普通目录立刻正常。
+
+所以命令行构建走 `~/DevTools/deveco/` 下的副本（`ditto` 复制，约 7 GB），
+IDE 图形界面仍用 `/Applications`。`harmony/hvigorw` 会优先找 `~/DevTools/deveco`，
+找不到才回退到 `/Applications`（并可用 `DEVECO_IDE_HOME` 覆盖）。
+
+#### 为什么要有 ②：绕过华为账号的本地签名
+
+hvigor 的 `SignHap` 要求密码是 DevEco 加密格式（密文长度 ≥32），
+命令行拼不出来；而华为账号自动签名需要登录。折中方案：
+
+- OpenHarmony SDK 自带一套完整 CA 私钥（`toolchains/lib/OpenHarmony.p12`，口令 `123456`）
+- 用它 `generate-app-cert` 签发三级证书链 → `sign-profile` 签 profile → `hap-sign-tool sign-app` 签 HAP
+- 产物经 `verify-app` 验证为 `Verify success`
+
+**限制**：本地签名的 `.hap` 只能在本机模拟器 / 自签设备调试，**不能上架应用市场**。
+正式发布仍须走 §3.1 第 4 步（华为账号 + AGC 正式证书）。
 
 ### 常见首编问题
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | `hvigor-ohos-plugin not found` | 没 Sync 或网络问题 | File → Sync and Refresh Project |
-| `Signature not configured` | 没配签名 | §3 第 4 步 |
+| `Signature not configured` | 没配签名 | §3.1 第 4 步，或走 §3.2 的本地签名 |
+| `Invalid storeFile value` / `长度小于 32` | `sign-config.json5` 指向的 `~/.ohos/config/*.p12` 不存在，或密码是明文 | 走 §3.2；明文口令 hvigor 不认 |
+| CLI 卡死无输出 | macOS 26 App Management 拦截 .app 内可执行文件 | 走 §3.2 第 ① 步 |
 | 定位无反应 | 权限未授予 | 首次进入点「允许」；模拟器需在 Device Manager 里设置虚拟位置 |
 | `Cannot find module './core/xxx'` | 大小写或路径拼错 | 鸿蒙对路径大小写敏感 |
 
@@ -221,23 +263,26 @@ bash scripts/check-harmony.sh
 
 ---
 
-## 7. 待 DevEco 首编验证的点
+## 7. 首编验证结果与仍需真机确认的行为
 
-代码里已标 `⚠️ 待 DevEco 验证` 的共 8 处（都是 API 签名层面，写法取了官方文档最保守的形式）：
+### 7.1 ArkTS 编译：8 处 API 写法全部通过（2026-11-19 实测）
 
-| 文件 | 待验证内容 |
-|---|---|
-| `entryability/EntryAbility.ets` | `windowStage.loadContent` 回调签名、`setWindowBackgroundColor` |
-| `components/Location.ets` | `geoLocationManager.getCurrentLocation` / `on('locationChange')` 的 API 12 写法 |
-| `components/PreferencesKV.ets` | `@kit.ArkData` 的 `preferences.getSync / putSync / deleteSync` 签名 |
-| `components/AbstractMap.ets` | `CanvasRenderingContext2D` 的字体与 `lineDash` 写法 |
-| `components/FogPath.ets` | **Canvas 的 `rotate` / `setLineDash` / `globalAlpha` / `arc` 四件套**（迷雾路径全部靠它） |
-| `components/HttpClient.ets` | **`http.createHttp()` / `request()` 的 API 12 签名**、`expectDataType`、`header` 键名大小写、`responseCode` 类型 |
-| `components/HttpClient.ets` | **`resourceManager.getRawFileContent('mapkeys.json')`**（包内 Key 下发；文件不存在时必须走 catch 分支） |
-| `components/AccountPanel.ets` | `TextInput` 的 `InputType.Password`、`promptAction.showToast` |
-| `components/SeekPanel.ets` | `@Prop @Watch` 多字段联动（hints 数组 + 坐标同时变）是否只触发一次；`WaQuietButton` 的 `tag` 参数（本轮未用 tag） |
+原本列为「首次编译大概率报错」的 8 处 API 签名，在真实 ArkTS 编译下**全部一次通过**：
 
-首次编译报错大概率集中在这 8 处，改起来都是机械调整。其余（组件树、装饰器、状态管理）是按 ArkTS 规范写的。
+| 文件 | 待验证内容 | 结果 |
+|---|---|---|
+| `entryability/EntryAbility.ets` | `windowStage.loadContent` 回调签名、`setWindowBackgroundColor` | ✅ |
+| `components/Location.ets` | `geoLocationManager.getCurrentLocation` / `on('locationChange')` | ✅ |
+| `components/PreferencesKV.ets` | `@kit.ArkData` 的 `preferences.getSync / putSync / deleteSync` | ✅ |
+| `components/AbstractMap.ets` | `CanvasRenderingContext2D` 字体与 `lineDash` | ✅ |
+| `components/FogPath.ets` | Canvas `rotate` / `setLineDash` / `globalAlpha` / `arc` 四件套 | ✅ |
+| `components/HttpClient.ets` | `http.createHttp()` / `request()` 签名、`expectDataType`、header 键名、`responseCode` | ✅ |
+| `components/HttpClient.ets` | `resourceManager.getRawFileContent('mapkeys.json')` + catch 分支 | ✅ |
+| `components/AccountPanel.ets` | `TextInput` 的 `InputType.Password`、`promptAction.showToast` | ✅ |
+| `components/SeekPanel.ets` | `@Prop @Watch` 多字段联动、`WaQuietButton` 的 `tag` | ✅ |
+
+> 说明：编译通过 ≠ 运行正确。装饰器/状态管理的**运行时行为**、Canvas 的实际渲染、
+> 权限弹窗、网络请求的真实响应，仍需在模拟器/真机上确认 —— 见 §7.2。
 
 ### v0.7 新增、需要真机确认的行为
 
@@ -363,9 +408,11 @@ bash scripts/check-harmony.sh
 ```
 harmony/
 ├── AppScope/app.json5                应用级配置（bundleName / 版本 / 图标 / 名称）
-├── build-profile.json5               构建配置（compatibleSdkVersion 5.0.0(12)）
+├── build-profile.json5               构建配置（compileSdkVersion 26.0.1 / target 26.0.0）
 ├── hvigorfile.ts                     app 级构建脚本
 ├── oh-package.json5                  依赖
+├── hvigorw                           命令行构建入口（优先用 ~/DevTools/deveco 工具链）
+├── .sign/sign-config.json5           签名配置（华为账号自动签名会写这里）
 ├── entry/                            主模块
 │   ├── build-profile.json5
 │   ├── hvigorfile.ts
@@ -379,4 +426,131 @@ harmony/
 ├── docs/HARMONY.md                   本文
 ├── package.json                      TypeScript + 测试脚本（仅开发用）
 └── tsconfig.test.json                逻辑层类型检查配置
+
+scripts/                              仓库级脚本（与 harmony/ 同级）
+├── check-harmony.sh                  离线校验（tsc + 单测 + 静态检查）
+├── setup-deveco-cli.sh               部署 CLI 工具链副本
+├── gen-local-sign.sh                 生成本地签名材料
+├── build-hap.sh                      编译 + 签名 + 校验
+└── emulator.sh                       模拟器镜像 / 实例 / 装机 / 截图
 ```
+
+---
+
+## 11. 本机开发环境（2026-11-19 部署记录）
+
+### 版本
+
+| 项 | 值 |
+|---|---|
+| IDE | DevEco Studio **26.0.1**（build DS-261.23567.138.36.2601290） |
+| 安装位置 | `/Applications/DevEco-Studio.app`（11 GB，含内置 SDK） |
+| SDK | HarmonyOS **26.0.1 / API 26**（Beta1，version 26.0.1.120） |
+| CLI 工具链副本 | `~/DevTools/deveco`（7.1 GB，node 24.14.1 / ohpm 26.0.1.220 / hdc 3.2.0f / JBR 25.0.2） |
+| 模拟器镜像 | `~/.deveco/emulator`（HarmonyOS 7.0.0 / API 26，phone） |
+| 本地签名材料 | `~/.deveco/localsign`（自签 CA 链 + debug profile） |
+
+### 一键脚本
+
+| 脚本 | 作用 |
+|---|---|
+| `scripts/setup-deveco-cli.sh` | 部署可执行的 CLI 工具链副本（绕开 macOS 26 的 App Management 拦截） |
+| `scripts/gen-local-sign.sh` | 生成 OpenHarmony 自签证书链 + debug profile（免华为账号） |
+| `scripts/build-hap.sh` | 编译 → 签名 → 校验，`--device` 直接装机 |
+| `scripts/emulator.sh` | 镜像下载 / 建实例 / 启停 / 装机 / 截图 |
+| `scripts/check-harmony.sh` | 逻辑层类型检查 + 单元测试 + ArkTS 静态检查（不依赖 IDE） |
+
+### 环境变量
+
+```bash
+export DEVECO_CLI_HOME="$HOME/DevTools/deveco"   # CLI 工具链位置（默认值）
+export DEVECO_IDE_HOME="$HOME/DevTools/deveco"   # harmony/hvigorw 用，可指向 /Applications
+export LOCAL_SIGN_DIR="$HOME/.deveco/localsign"  # 签名材料位置
+export HARMONY_IMAGE_ROOT="$HOME/.deveco/emulator"
+```
+
+### 首次真编译结果（2026-11-19）
+
+这是仓库里第一次跑真正的 ArkTS 编译（此前只有 tsc + 静态检查）：
+
+```
+hvigor 6.26.20 / SDK 26.0.1
+:entry:default@CompileArkTS       ✅ 通过（0 error）
+:entry:default@PackageHap         ✅ 通过
+:entry:default@SignHap            ⚠️ 密码必须是 DevEco 加密格式 → 改用 hap-sign-tool 直签
+sign-app / verify-app             ✅ Verify success
+产物                              entry-default-signed.hap (2.7 MB)
+```
+
+**§7「待 DevEco 首编验证」的 8 处 API 写法全部一次编译通过**，
+没有任何一处需要按文档调整签名 —— 之前刻意取「官方文档最保守写法」的策略生效了。
+
+编译期只有 deprecated 警告，两类：
+
+| 警告 | 位置 | 处理建议 |
+|---|---|---|
+| `animateTo` has been deprecated | `views/RevealView.ets:349/358/423/427` | 可换 `UIContext.animateTo`；不影响运行 |
+| `getContext` has been deprecated | `pages/Index.ets:133/434` | 可换 `this.getUIContext()`；不影响运行 |
+
+> 这两类警告**不阻塞出包**，按优先级低于功能验证，本轮未改（避免为了消警告引入回归）。
+
+---
+
+## 12. 模拟器实测记录（2026-11-19，第一次真机运行）
+
+环境：DevEco Studio 26.0.1 + HarmonyOS 7.0.0(26.0.0) phone 模拟器（127.0.0.1:5555，UDID `454D5504…70270C06B278AA400000000000`）。
+
+### 12.1 端到端跑通的链路
+
+| 步骤 | 结果 | 证据 |
+|---|---|---|
+| hdc install 签名 HAP | ✅ `install bundle successfully` | — |
+| 冷启动 | ✅ 进程存活，无崩溃 | `01-home.png` |
+| 定位权限申请 | ✅ 系统弹窗正常（拒绝后走「明确失败」面板，不虚构地点） | 首屏弹窗 |
+| 定位开关打开 → 单次定位 | ✅ 拿到真实坐标 | 旅程页「实时定位 · 真实坐标」 |
+| 抽盒（真实网络：维基 + OSM） | ✅ 抽到 **南京鼓楼**（史诗） | `04-reveal.png` |
+| 路线规划 | ✅ 1.6 公里 / 21 分钟，前方 1563 米 | `03-journey.png` |
+| 迷雾路径 Canvas | ✅ 已走段/前方段/两端渐隐/指北针全部渲染 | `03-journey.png` |
+| 线索保密 | ✅ 1/3 只给氛围句「会有一点旧木头和雨的味道」，无地名 | `03-journey.png` |
+| 揭晓 | ✅ 真名 + Wikimedia 实图 + 简介 + 「为什么是这里」+ 小任务 | `04-reveal.png` |
+| 图鉴 | ✅ 已收集 1/16，附近 15 个点只显示**类别 + 距离**（保密规则生效） | `05-cards.png` |
+| 圈子 | ✅ 同频码 AAAAAA、本周榜、揭晓动态（含真实地名） | `06-social.png` |
+| 我的 | ✅ 等级/里程/成就/音效/触感/地图跟随/数据源/城市地图 | `07-profile.png` |
+| 持久化 | ✅ 杀进程重开，进度（0.8 km / 1 盒 / 连续 1 天）保留 | `07-profile.png` |
+| 时段盲盒 | ✅ 20:00 后自动切成「夜里的盲盒 🌙」（15:00 前是「黄昏的盲盒 🌇」） | `02-setup.png` |
+| 运行时异常 | ✅ 全流程 **0 致命错误**（仅模拟器自身的 QoS / Ace 主题噪声） | hilog |
+
+### 12.2 实机测试才发现的两个问题（都已写进脚本）
+
+**① 模拟器默认关闭定位开关**
+
+第一次点「摇一个盲盒」拿到的是「定位超时」，`locationhub` 日志显示
+`QuerySwitchStateForUser: query state failed` / `userId switch 100 is not exist`。
+`param set` 没有权限，最后是通过下拉控制中心 → 「位置」打开开关解决的。
+`scripts/emulator.sh` 与 `docs` 都记了这一步；新机器上第一次跑务必先打开。
+
+**② 权限授予后必须重启 Ability 才生效**
+
+用 `atm perm -g` 授权（或系统弹窗授权）后，已运行的 Ability 仍持有旧的拒绝状态，
+必须 `aa force-stop` 再 `aa start`。`scripts/smoke-test.sh` 里已经这么做了。
+
+### 12.3 编译告警（不阻塞，未改）
+
+| 告警 | 位置 | 建议 |
+|---|---|---|
+| `animateTo` deprecated | `views/RevealView.ets:349/358/423/427` | 换 `UIContext.animateTo` |
+| `getContext` deprecated | `pages/Index.ets:133/434` | 换 `this.getUIContext()` |
+
+### 12.4 截图
+
+`docs/screenshots/`（由 `scripts/capture-screens.sh` 生成）：
+
+| 文件 | 内容 |
+|---|---|
+| `01-home.png` | 首页：夜里的盲盒、今日盲盒卡、统计、惊喜社区 |
+| `02-setup.png` | 抽盒设置：盒型 / 怎么去 / 时长 / 心情 / 区域 |
+| `03-journey.png` | 旅程：转向卡、迷雾路径 Canvas、距离、线索 1/3 |
+| `04-reveal.png` | 揭晓：南京鼓楼、Wikimedia 实图、小任务 |
+| `05-cards.png` | 图鉴：1/16、附近点（类别 + 距离，不含地名） |
+| `06-social.png` | 圈子：同频码、本周榜、揭晓动态 |
+| `07-profile.png` | 我的：等级、里程、成就、开关、数据源 |
