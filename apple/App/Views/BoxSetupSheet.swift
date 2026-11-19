@@ -128,7 +128,7 @@ struct BoxSetupSheet: View {
 
             if store.selectedScope == .roam {
                 VStack(alignment: .leading, spacing: 6) {
-                    Label("超过 10 公里的兴趣点也能刷到：选中后会先带你开车到目的地 1 公里左右停车，剩下的路再步行探索。", systemImage: "car")
+                    Label("5–15 公里内的兴趣点也能刷到：选中后会先带你开车到目的地 1 公里左右停车，剩下的路再步行探索。", systemImage: "car")
                         .fixedSize(horizontal: false, vertical: true)
                     Label("开车段不给线索、不画路线；进入停车圈（或点「已停车」）后才开始解锁线索。", systemImage: "lock")
                         .fixedSize(horizontal: false, vertical: true)
@@ -311,7 +311,7 @@ struct BoxSetupSheet: View {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
                     Text(searchHint ?? (store.selectedScope == .roam
-                                        ? "正在 10–45 公里内找值得开过去的地方…"
+                                        ? "正在 5–15 公里内找值得开过去的地方…"
                                         : "正在找附近真实存在的地点…"))
                         .font(.footnote)
                         .foregroundStyle(WATheme.ink2)
@@ -427,8 +427,8 @@ struct BoxSetupSheet: View {
             // ② 三档放宽：每档都用真实数据，只是"挑哪个"逐步放宽
             var reports: [POISourceReport] = []
             var dullFallback: POICandidate?
-            // 漫游每次要撒 4 个点 × 多个源，代价比附近搜索高，
-            // 只跑两档（45 公里 → 55 公里），第三档收益很小、等待翻倍。
+            // 漫游每次要撒 4 个点 × 多个源，代价比附近搜索高，只跑两档。
+            // 重试只放宽候选挑选质量，距离始终限制在 5–15 公里。
             let tierIndices: [Int] = scope == .roam
                 ? (extraWide ? [1] : [0, 1])
                 : Array((extraWide ? 2 : 0)..<POISelection.tiers.count)
@@ -482,7 +482,7 @@ struct BoxSetupSheet: View {
     private static func tierHint(_ tier: Int, scope: ExploreScope = .walk) -> String {
         if scope == .roam {
             switch tier {
-            case 1: return "10 公里外点少，把环带放宽到 55 公里再找…"
+            case 1: return "5–15 公里内再放宽条件找找…"
             default: return "再往外扩一圈，看看更远的地方…"
             }
         }

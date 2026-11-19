@@ -174,7 +174,7 @@ struct HomeView: View {
         case .walk:
             return "\(store.selectedDuration.rawValue) 分钟 · \(WAFormat.distanceKilometers(store.selectedDuration.radiusMeters)) 内"
         case .roam:
-            return "10–45 公里 · 先开车再走"
+            return "5–15 公里 · 先开车再走"
         }
     }
 

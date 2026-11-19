@@ -190,7 +190,7 @@ final class AdminPOIService {
     ) -> Place? {
         guard !pois.isEmpty else { return nil }
 
-        // 步行：按「离你多远」筛；漫游：按「先开车到附近」的 10–45 公里筛
+        // 步行：按「离你多远」筛；漫游：按「先开车到附近」的 5–15 公里筛
         let minDistance = scope == .roam ? 0 : max(110, Double(startMeters) * 0.35)
         var pool: [(poi: CuratedPOI, weight: Int)] = []
 

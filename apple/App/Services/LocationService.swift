@@ -194,6 +194,7 @@ final class LiveLocationService: NSObject, LocationProviding, CLLocationManagerD
     // MARK: 状态
 
     private let manager = CLLocationManager()
+    private var fixFilter = NavigationFixFilter()
     private(set) var lastLocation: CLLocation?
     private(set) var remainingMeters: Int?
     private(set) var bearingDegrees: Double?
@@ -233,7 +234,7 @@ final class LiveLocationService: NSObject, LocationProviding, CLLocationManagerD
     override init() {
         super.init()
         manager.delegate = self
-        manager.desiredAccuracy = kCLLocationAccuracyBest
+        manager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
         manager.distanceFilter = 3
         manager.activityType = .fitness
         manager.headingFilter = 5
@@ -363,7 +364,7 @@ final class LiveLocationService: NSObject, LocationProviding, CLLocationManagerD
             }
         }
         let reading = LocationReading(
-            timestamp: Date(),
+            timestamp: location.timestamp,
             origin: origin,
             remainingMeters: remainingMeters.map(Double.init),
             bearingDegrees: bearingDegrees,
@@ -401,14 +402,33 @@ final class LiveLocationService: NSObject, LocationProviding, CLLocationManagerD
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        guard let latest = locations.last else { return }
-        lastFixAt = Date()
+        let now = Date()
+        guard let latest = locations.reversed().first(where: { location in
+            location.horizontalAccuracy >= 0
+                && location.horizontalAccuracy <= NavigationFixFilter.maximumAccuracyMeters
+                && abs(location.timestamp.timeIntervalSince(now)) <= 15
+        }) else {
+            issueText = "信号弱，正在重新定位"
+            if hasFix { publish() }
+            return
+        }
 
-        // 移动方向：走了 ≥2.5m 才更新，避免站着时抖动
-        let point = GeoPoint(latitude: latest.coordinate.latitude, longitude: latest.coordinate.longitude)
+        let measuredPoint = GeoPoint(latitude: latest.coordinate.latitude, longitude: latest.coordinate.longitude)
+        guard let point = fixFilter.accept(
+            measuredPoint,
+            accuracy: latest.horizontalAccuracy,
+            timestamp: latest.timestamp
+        ) else {
+            issueText = "定位不稳定，正在校准"
+            if hasFix { publish() }
+            return
+        }
+        lastFixAt = now
+
+        // 只用累计移动后的稳定点更新行进方向，避免低速时 GPS 噪声让箭头左右跳。
         if let previous = previousPoint {
             let moved = GeoMath.distance(from: previous, to: point)
-            if moved >= 2.5 {
+            if moved >= 6 {
                 let raw = GeoMath.bearing(from: previous, to: point)
                 if let current = moveHeading {
                     let delta = ((raw - current + 540).truncatingRemainder(dividingBy: 360)) - 180
@@ -416,19 +436,26 @@ final class LiveLocationService: NSObject, LocationProviding, CLLocationManagerD
                 } else {
                     moveHeading = raw
                 }
+                previousPoint = point
             }
+        } else {
+            previousPoint = point
         }
-        previousPoint = point
 
-        // 精度为负 = 无效点；时间太旧 = 缓存兜底点，直接丢
-        guard latest.horizontalAccuracy >= 0 else { return }
-        guard abs(latest.timestamp.timeIntervalSinceNow) < 30 else { return }
-
-        lastLocation = latest
+        let acceptedLocation = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: point.latitude, longitude: point.longitude),
+            altitude: latest.altitude,
+            horizontalAccuracy: latest.horizontalAccuracy,
+            verticalAccuracy: latest.verticalAccuracy,
+            course: latest.course,
+            speed: latest.speed,
+            timestamp: latest.timestamp
+        )
+        lastLocation = acceptedLocation
         horizontalAccuracy = latest.horizontalAccuracy
         hasFix = true
         issueText = nil
-        recompute(for: latest)
+        recompute(for: acceptedLocation)
         publish()
     }
 

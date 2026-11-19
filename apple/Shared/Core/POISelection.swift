@@ -55,15 +55,9 @@ public enum POISelection {
         tiers[max(0, min(tiers.count - 1, relax))]
     }
 
-    /// 远程漫游的距离窗口：下限固定 10 公里，上限逐档放宽（45 → 55 → 65 公里）。
-    ///
-    /// 为什么下限不再往下掉：早年为了让「10 公里外一个点都没有」也能出结果，
-    /// 第三档会掉到 6 公里 —— 那已经能走过去了，却还按「先开车」的流程展示，
-    /// 用户会觉得被耍。宁可明确失败，也不把近距离的点伪装成漫游。
+    /// 远程漫游的距离硬边界。重试档位可以放宽候选质量，但不能扩大里程范围。
     public static func roamRange(relax: Int = 0) -> ClosedRange<Double> {
-        let ups: [Double] = [ExploreScope.roamMaxMeters, 55_000, 65_000]
-        let index = max(0, min(ups.count - 1, relax))
-        return ExploreScope.roamMinMeters...ups[index]
+        ExploreScope.roamMinMeters...ExploreScope.roamMaxMeters
     }
 
     /// 远程漫游的搜索半径（米）。高德/百度的 around 半径上限是 50000。

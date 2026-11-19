@@ -122,12 +122,12 @@ final class POIProviderService: @unchecked Sendable {
         return ProviderFetchResult(candidates: limited, reports: reports)
     }
 
-    // MARK: - 远程漫游（10–45 公里环带）
+    // MARK: - 远程漫游（5–15 公里环带）
 
     /// 远程漫游的取点方式与「附近搜索」不同，原因很实际：
     ///
     /// 高德 / 百度的 around 接口**按距离升序返回**，在 50 公里半径下第一页永远是最里面的
-    /// 几百米 —— 想拿到 10–45 公里的点得翻 30 页，不现实。
+    /// 几百米 —— 想拿到远距离的点得翻很多页，不现实。
     ///
     /// 所以改成「在环带上撒几个点，每个点做一次 3 公里的小范围搜索」：
     /// 命中率够高、只要 4–6 次请求，而且天然覆盖各个方向。
@@ -150,11 +150,10 @@ final class POIProviderService: @unchecked Sendable {
             reports.append(POISourceReport(id: "baidu", label: "百度地图", ok: false, count: 0, error: "未配置 Key"))
         }
 
-        // 环带采样：4 个方向，落点让「采样圆」正好盖住整个环带
-        // （圆心离下限 2 公里 → 覆盖 8 公里起；离上限 1.2 公里 → 45 公里也在圆内）
+        // 环带采样：采样圆覆盖 5–15 公里的有效范围，最终候选仍由 band 严格过滤。
         let band = POISelection.roamRange(relax: relax)
-        let low = max(band.lowerBound + 2_000, 12_000)
-        let high = max(low + 1_000, min(band.upperBound - 1_200, 43_000))
+        let low = band.lowerBound + 2_000
+        let high = band.upperBound - 1_200
         var generator = SeededGenerator(seed: seed &+ 0x5EED)
         var centers: [GeoPoint] = []
         for index in 0..<4 {
@@ -199,7 +198,7 @@ final class POIProviderService: @unchecked Sendable {
                     lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 }
             }
-            // 维基 geosearch 单次上限 10 公里 —— 但采样点本身就在 10 公里外，
+            // 维基 geosearch 单次上限 10 公里 —— 采样点在漫游环带内，
             // 以小半径绕采样点查，等效于查到了远程的地标（还带实景照片）。
             do {
                 let list = try await withTimeout(deadline) {
