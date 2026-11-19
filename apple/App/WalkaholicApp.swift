@@ -40,7 +40,6 @@ struct WalkaholicApp: App {
                 let origin = GeoPoint(latitude: 31.2304, longitude: 121.4737)
                 let target = GeoPoint(latitude: 31.2330, longitude: 121.4710) // 人民公园（真实 POI，路线适合展示迷雾）
                 store.lastKnownOrigin = origin
-                _ = store.startQuest(origin: origin)
                 let poi = POICandidate(
                     id: "amap-demo-museum",
                     name: "人民公园",
@@ -52,24 +51,23 @@ struct WalkaholicApp: App {
                 let place = RealPlaceFactory.scrub(RealPlaceFactory.makePlace(
                     from: poi, origin: origin, mood: .drift, hour: 10, startMeters: 480
                 ))
-                if let current = store.session {
-                    let distance = max(Double(QuestSession.arriveThreshold + 1), GeoMath.distance(from: origin, to: target))
-                    let total = max(Int(distance.rounded()), QuestSession.arriveThreshold + 1)
-                    let bearing = GeoMath.bearing(from: origin, to: target)
-                    store.session = QuestSession(
-                        id: current.id,
-                        placeID: current.placeID,
-                        startedAt: current.startedAt,
-                        totalMeters: total,
-                        remainingMeters: total,
-                        phase: .walking,
-                        unlockedHintCount: 1,
-                        target: target,
-                        currentBearing: bearing
-                    )
-                    store.currentPlace = place
-                    _ = store.updateLocation(distanceMeters: Double(total), bearingDegrees: bearing)
-                }
+                // 不依赖 PlaceDirectory 抽盒：模拟器冷装时目录是空的，startQuest 会返回 nil，
+                // 截图走查就只剩「没有正在走的盲盒」空态（此前 parity 一直截不到导航页）。
+                let distance = max(Double(QuestSession.arriveThreshold + 1), GeoMath.distance(from: origin, to: target))
+                let total = max(Int(distance.rounded()), QuestSession.arriveThreshold + 1)
+                let bearing = GeoMath.bearing(from: origin, to: target)
+                store.session = QuestSession(
+                    placeID: place.id,
+                    totalMeters: total,
+                    remainingMeters: total,
+                    phase: .walking,
+                    unlockedHintCount: 1,
+                    target: target,
+                    currentBearing: bearing
+                )
+                store.currentPlace = place
+                PlaceDirectory.shared.remember(place)
+                _ = store.updateLocation(distanceMeters: Double(total), bearingDegrees: bearing)
             }
             // 真实 POI 自检：用内置的一条真实 POI 直接建旅程（不走 MapKit，离线可复现）
             if preview == "realquest" {

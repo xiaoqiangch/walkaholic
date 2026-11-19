@@ -38,7 +38,8 @@ import {
   metersPerPixel,
   projectToCanvas,
   staticMapUrl,
-  panViewport
+  panViewport,
+  zoomViewportAtPoint
 } from '../core/staticmap';
 
 /** 地图窗口：全部 / 最近 7 天 */
@@ -114,6 +115,14 @@ export struct CityMapView {
   /** 拖动中的实时位移（底图与标记一起平移，松手才提交） */
   @State private panOffsetX: number = 0;
   @State private panOffsetY: number = 0;
+  /** 双指缩放预览：底图缩放、POI/轨迹按新视窗重投影 */
+  @State private pinchActive: boolean = false;
+  @State private pinchScale: number = 1;
+  @State private pinchCenterX: number = 0;
+  @State private pinchCenterY: number = 0;
+  @State private previewZoom: number = 16;
+  @State private previewCenterLat: number = 0;
+  @State private previewCenterLon: number = 0;
   /** 屏幕上要显示的地点文字标签 */
   @State private labels: PlaceLabel[] = [];
   /** 是否需要「重新框选」（用户手动缩放/拖动后就不再自动复位） */
@@ -123,6 +132,9 @@ export struct CityMapView {
   /** 拖动起点（windowX/Y；用绝对值算位移，不依赖元素自身位置） */
   private dragStartX: number = 0;
   private dragStartY: number = 0;
+  private pinchStartViewport: MapViewport = new MapViewport(0, 0, 16);
+  private pinchStartZoom: number = 16;
+  private multiTouchActive: boolean = false;
 
   /** 平台能力（拉地图 Key） */
   http: HttpClient | undefined = undefined;
@@ -271,6 +283,9 @@ export struct CityMapView {
 
   /** 当前视窗（中心为 GCJ-02，因为高德底图吃这个） */
   private viewport(): MapViewport {
+    if (this.pinchActive) {
+      return new MapViewport(this.previewCenterLat, this.previewCenterLon, this.previewZoom);
+    }
     return new MapViewport(this.centerLat, this.centerLon, this.zoom);
   }
 
@@ -337,6 +352,63 @@ export struct CityMapView {
     this.centerLat = next.centerLat;
     this.centerLon = next.centerLon;
     this.userMoved = true;
+    this.refreshBasemap();
+  }
+
+  private beginPinch(event: GestureEvent): void {
+    if (this.centerLat === 0 && this.centerLon === 0) return;
+    this.pinchStartViewport = new MapViewport(this.centerLat, this.centerLon, this.zoom);
+    this.pinchStartZoom = this.zoom;
+    this.pinchCenterX = event.pinchCenterX;
+    this.pinchCenterY = event.pinchCenterY;
+    this.previewZoom = this.zoom;
+    this.previewCenterLat = this.centerLat;
+    this.previewCenterLon = this.centerLon;
+    this.pinchScale = 1;
+    this.pinchActive = true;
+    this.panOffsetX = 0;
+    this.panOffsetY = 0;
+    this.userMoved = true;
+  }
+
+  private updatePinch(event: GestureEvent): void {
+    if (!this.pinchActive) return;
+    const rawZoom: number = this.pinchStartZoom + Math.log(event.scale) / Math.LN2;
+    const nextZoom: number = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, rawZoom));
+    const preview: MapViewport = zoomViewportAtPoint(
+      this.pinchStartViewport,
+      nextZoom,
+      this.pinchCenterX,
+      this.pinchCenterY,
+      this.canvasWidth,
+      MAP_HEIGHT
+    );
+    this.previewZoom = preview.zoom;
+    this.previewCenterLat = preview.centerLat;
+    this.previewCenterLon = preview.centerLon;
+    this.pinchScale = Math.pow(2, nextZoom - this.pinchStartZoom);
+    this.draw();
+  }
+
+  private finishPinch(): void {
+    if (!this.pinchActive) return;
+    const targetZoom: number = Math.max(
+      MIN_ZOOM,
+      Math.min(MAX_ZOOM, Math.round(this.previewZoom))
+    );
+    const committed: MapViewport = zoomViewportAtPoint(
+      this.pinchStartViewport,
+      targetZoom,
+      this.pinchCenterX,
+      this.pinchCenterY,
+      this.canvasWidth,
+      MAP_HEIGHT
+    );
+    this.zoom = committed.zoom;
+    this.centerLat = committed.centerLat;
+    this.centerLon = committed.centerLon;
+    this.pinchScale = 1;
+    this.pinchActive = false;
     this.refreshBasemap();
   }
 
@@ -566,6 +638,12 @@ export struct CityMapView {
             .height(MAP_HEIGHT)
             .objectFit(ImageFit.Fill)
             .interpolation(ImageInterpolation.High)
+            .scale({
+              x: this.pinchScale,
+              y: this.pinchScale,
+              centerX: this.pinchCenterX,
+              centerY: this.pinchCenterY
+            })
         }
 
         // ② 轨迹与地点圆点（与底图共用墨卡托投影，严格对齐）
@@ -619,7 +697,19 @@ export struct CityMapView {
         .onTouch((event: TouchEvent) => {
           // 用 TouchEvent 而不是 PanGesture：偏移量按「按下点」的手动差值算，
           // 与元素自身是否移动完全无关，天然不会形成反馈环。
-          if (event.touches.length === 0) return;
+          if (event.touches.length > 1) {
+            this.multiTouchActive = true;
+            this.panOffsetX = 0;
+            this.panOffsetY = 0;
+            return;
+          }
+          if (event.touches.length === 0) {
+            this.multiTouchActive = false;
+            this.panOffsetX = 0;
+            this.panOffsetY = 0;
+            return;
+          }
+          if (this.multiTouchActive || this.pinchActive) return;
           const touch: TouchObject = event.touches[0];
           if (event.type === TouchType.Down) {
             this.dragStartX = touch.windowX;
@@ -679,6 +769,21 @@ export struct CityMapView {
     .borderRadius(WASize.cardRadius)
     .border({ width: 1, color: WAColor.line, radius: WASize.cardRadius })
     .clip(true)
+    .gesture(
+      PinchGesture({ fingers: 2, distance: 5 })
+        .onActionStart((event: GestureEvent) => {
+          this.beginPinch(event);
+        })
+        .onActionUpdate((event: GestureEvent) => {
+          this.updatePinch(event);
+        })
+        .onActionEnd(() => {
+          this.finishPinch();
+        })
+        .onActionCancel(() => {
+          this.finishPinch();
+        })
+    )
   }
 
   @Builder
@@ -799,4 +904,3 @@ export struct CityMapView {
     .height('100%')
   }
 }
-

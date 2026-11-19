@@ -122,6 +122,7 @@ import {
   bearing,
   compassLabel,
   arrow,
+  normalizeSignedDegrees,
   wgs84ToGcj02,
   gcj02ToWgs84,
   wgs84ToBd09,
@@ -267,6 +268,14 @@ import {
   parseValhalla,
   toRoutePolyline
 } from '../entry/src/main/ets/core/route';
+import {
+  MapPixel,
+  MapViewport,
+  projectToCanvas,
+  worldPixel,
+  worldPixelToLatLon,
+  zoomViewportAtPoint
+} from '../entry/src/main/ets/core/staticmap';
 
 interface TestCase {
   name: string;
@@ -283,6 +292,26 @@ function geoPoint(latitude: number, longitude: number): GeoPoint {
   const point: GeoPoint = { latitude: latitude, longitude: longitude };
   return point;
 }
+
+test('个人地图：双指缩放以手指中心为焦点保持 POI 地理位置', (): void => {
+  const viewport: MapViewport = new MapViewport(31.2304, 121.4737, 14);
+  const width: number = 320;
+  const height: number = 380;
+  const focalX: number = 82;
+  const focalY: number = 126;
+  const center: MapPixel = worldPixel(viewport.centerLat, viewport.centerLon, viewport.zoom);
+  const focal: MapPixel = worldPixelToLatLon(
+    new MapPixel(center.x + focalX - width / 2, center.y + focalY - height / 2),
+    viewport.zoom
+  );
+  const zoomed: MapViewport = zoomViewportAtPoint(viewport, 16, focalX, focalY, width, height);
+  const projected: MapPixel = projectToCanvas(focal.x, focal.y, zoomed, width, height);
+
+  assert.equal(zoomed.zoom, 16);
+  assert.ok(Math.abs(projected.x - focalX) < 0.001, '焦点 POI 缩放后横向位置应稳定');
+  assert.ok(Math.abs(projected.y - focalY) < 0.001, '焦点 POI 缩放后纵向位置应稳定');
+  assert.equal(zoomViewportAtPoint(viewport, 99, focalX, focalY, width, height).zoom, 17);
+});
 
 /**
  * 测试用 store：显式播种演示档案（testSeed = true）。
@@ -2240,13 +2269,15 @@ test('迷雾：几何数据（已走/前方颜色、箭头间距、两端渐隐�
   assert.ok(geometry.chevrons.length <= Math.floor(geometry.remaining / CHEVRON_SPACING_METERS) + 1);
   // 指北针：正北路线 → 旋转 0
   assert.ok(Math.abs(geometry.compassRotation) < 1);
-  // 「你」钉在画布正中（不是偏下 86%）
+  // 「你」钉在 72% 的锚点上（不是正中、也不是贴底）
   assert.equal(geometry.userX, layout.centerX);
   assert.equal(geometry.userY, layout.centerY);
-  assert.equal(layout.centerY, 196 * 0.5, '默认布局居中');
+  assert.equal(layout.centerY, 196 * 0.72, '默认布局把「你」放在偏下 72%');
+  assert.equal(layout.aheadPixels, 196 * 0.68, '前方留 68% 屏高');
+  assert.equal(layout.behindPixels, 196 * 0.28, '后方留 28% 屏高');
 });
 
-test('迷雾：「你」始终钉在正中，左右偏移时是地图在动', (): void => {
+test('迷雾：「你」始终钉在固定位置，左右偏移时是地图在动', (): void => {
   const line = straightRoute();
   const cumulative = buildCumulative(line)!;
   const at100 = pointAlongPath(cumulative, 100);
@@ -2257,10 +2288,10 @@ test('迷雾：「你」始终钉在正中，左右偏移时是地图在动', ()
   assert.equal(onPath.userX, layout.centerX);
   assert.equal(onPath.userY, layout.centerY);
 
-  // 向东偏 30 米：人仍在正中，是路径整体西移
+  // 向东偏 30 米：人仍钉在锚点上，是路径整体西移
   const shifted: GeoPoint = geoPoint(at100.latitude, at100.longitude + 0.00032);
   const offPath = fogGeometry(line, shifted, layout);
-  assert.equal(offPath.userX, layout.centerX, '偏移时「你」也必须居中');
+  assert.equal(offPath.userX, layout.centerX, '偏移时「你」也必须钉在锚点');
   assert.equal(offPath.userY, layout.centerY);
   // 路径相对画布中心应整体左移（东偏 → 路面在人左边）
   let minX: number = Infinity;
@@ -2302,6 +2333,17 @@ test('迷雾：指北针旋转 = -bearing（东向路线 → -90°）', (): void
   const geometry = fogGeometry(line, geoPoint(31.2304, 121.4737), defaultLayout(320, 196));
   assert.ok(Math.abs(geometry.compassRotation + 90) < 1,
     '指北针应转 -bearing（东向 = -90°），实测 ' + geometry.compassRotation.toFixed(1));
+});
+
+test('迷雾：旋转量归一化到 (-180, 180]，不出现 -360°', (): void => {
+  assert.equal(normalizeSignedDegrees(0), 0);
+  assert.equal(normalizeSignedDegrees(-0.4), -0.4);
+  assert.equal(normalizeSignedDegrees(-359.99).toFixed(2), '0.01', '-359.99° 其实是 +0.01°，不是转一整圈');
+  assert.equal(normalizeSignedDegrees(359.99).toFixed(2), '-0.01');
+  assert.equal(normalizeSignedDegrees(180), 180);
+  assert.equal(normalizeSignedDegrees(-180), 180, '(-180, 180] 的边界归到 +180');
+  assert.equal(normalizeSignedDegrees(270), -90);
+  assert.equal(normalizeSignedDegrees(-540), 180);
 });
 
 // ============================================================

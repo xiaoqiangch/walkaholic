@@ -582,6 +582,10 @@ struct Index {
           },
           onOpenJourney: () => {
             this.activeOverlay = OVERLAY_JOURNEY;
+            // 恢复上次旅程时路线不落盘：不重新规划就会退回「抽象地图」，
+            // 迷雾路径 / 指北针 / 正北-随动全都消失（用户以为导航坏了）。
+            this.planRouteInBackground();
+            this.refresh();
           },
           onOpenCards: () => {
             this.tab = TAB_CARDS;

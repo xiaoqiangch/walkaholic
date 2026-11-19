@@ -135,7 +135,9 @@ struct JourneyView: View {
     /// 预算：屏高 − 顶栏(60) − 定位状态行(34) − 导航/距离区(214) − 线索标题+首条(104)
     ///       − 底部按钮区(118) − 安全区(60)
     private func mapHeight(for available: CGFloat) -> CGFloat {
-        let budget = available - 60 - 34 - 214 - 104 - 118 - 60
+        // 转向横幅（约 76pt）只在有路线时出现，预算要一起扣掉，否则小屏会被挤到线索引不出来
+        let banner: CGFloat = currentRouteProgress == nil ? 0 : 76
+        let budget = available - 60 - 34 - 214 - banner - 104 - 118 - 60
         // 地图本身保留一点呼吸感，夹在 170…360 之间
         return min(360, max(170, budget))
     }
@@ -163,14 +165,19 @@ struct JourneyView: View {
                     if WATheme.isWide(geo.size.width) {
                         HStack(alignment: .top, spacing: 22) {
                             // 宽屏同样要先分「开车段 / 步行段」：开车段没有迷雾路径可画
-                            Group {
-                                if isDriveSegment {
-                                    driveSection(session: session)
-                                } else {
-                                    mapSection(session: session)
+                            VStack(spacing: 10) {
+                                if !isDriveSegment, currentRouteProgress != nil {
+                                    maneuverBanner(remaining: navigationRemainingMeters(session: session))
                                 }
+                                Group {
+                                    if isDriveSegment {
+                                        driveSection(session: session)
+                                    } else {
+                                        mapSection(session: session)
+                                    }
+                                }
+                                .frame(height: max(260, mapHeight(for: geo.size.height)))
                             }
-                            .frame(height: max(260, mapHeight(for: geo.size.height)))
 
                             VStack(alignment: .leading, spacing: 16) {
                                 if authorization.isBlocked && !choseDemo {
@@ -201,7 +208,12 @@ struct JourneyView: View {
                                     .padding(.horizontal, WATheme.pagePadding)
                                     .padding(.top, 6)
                             } else {
-                                // 抽象地图区：占屏高约 45%（design-system §5.3），小屏收到 38%
+                                // 转向横幅压在导航地图上方：主提示先进眼睛，再看地图
+                                if currentRouteProgress != nil {
+                                    maneuverBanner(remaining: navigationRemainingMeters(session: session))
+                                        .padding(.horizontal, WATheme.pagePadding)
+                                        .padding(.bottom, 10)
+                                }
                                 mapSection(session: session)
                                     .frame(height: mapHeight(for: geo.size.height))
                             }
@@ -585,19 +597,16 @@ struct JourneyView: View {
 
     private func mapSection(session: QuestSession) -> some View {
         ZStack(alignment: .topLeading) {
-            // 真实地点 + 有真实坐标 → 迷雾路径（heading-up，不画终点）；演示模式才用抽象地图
+            // 真实地点 + 有真实坐标 → 步行导航地图（不画终点）；演示模式才用抽象地图
             if session.target != nil, PlaceSource.isReal(store.currentPlace?.source) {
                 FogPathView(
                     route: route,
                     here: currentPoint,
-                    remainingMeters: navigationRemainingMeters(session: session),
                     heading: mapHeading,
                     northUp: !mapFollowsHeading,
-                    walkedMeters: Int(currentRouteProgress?.walked.rounded() ?? Double(session.totalMeters - session.remainingMeters)),
-                    clueGap: currentRouteProgress.flatMap {
-                        nextClueGapMeters(in: session, remaining: Int($0.remaining.rounded()))
-                    } ?? nextClueGapMeters(in: session),
-                    clueIndex: session.unlockedHintCount + 1
+                    onToggleOrientation: {
+                        mapFollowsHeading.toggle()
+                    }
                 )
             } else {
                 JourneyMapView(
@@ -606,42 +615,7 @@ struct JourneyView: View {
                 )
                 mapCaption(session: session)
             }
-
-            if session.target != nil, PlaceSource.isReal(store.currentPlace?.source) {
-                mapOrientationControl
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                    .padding(10)
-            }
         }
-    }
-
-    private var mapOrientationControl: some View {
-        HStack(spacing: 2) {
-            orientationButton("正北", followsHeading: false)
-            orientationButton("随我转向", followsHeading: true)
-        }
-        .padding(3)
-        .background(WATheme.paper.opacity(0.94))
-        .clipShape(Capsule())
-        .overlay(Capsule().stroke(WATheme.line, lineWidth: 1))
-        .accessibilityLabel("地图朝向")
-    }
-
-    private func orientationButton(_ title: String, followsHeading: Bool) -> some View {
-        Button {
-            mapFollowsHeading = followsHeading
-            WAHaptics.light()
-        } label: {
-            Text(title)
-                .font(WATheme.caption(11))
-                .foregroundStyle(mapFollowsHeading == followsHeading ? WATheme.paper : WATheme.ink2)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 6)
-                .background(mapFollowsHeading == followsHeading ? WATheme.ink : .clear)
-                .clipShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(mapFollowsHeading == followsHeading ? .isSelected : [])
     }
 
     /// 当前定位点（真实 GPS 优先；预览/演示模式用 store 里最近一次定位）
@@ -681,11 +655,6 @@ struct JourneyView: View {
         }
     }
 
-    private func navigationInstruction(_ next: (maneuver: RouteManeuver, distance: Int)) -> String {
-        if next.distance <= 12 { return "现在\(next.maneuver.label)" }
-        return "\(next.distance) 米后\(next.maneuver.label)"
-    }
-
     /// 拿到真实目的地后拉一次步行路线；失败不影响旅程（只显示「正在规划路径」）
     private func loadRouteIfNeeded() {
         // 开车段不规划步行路线：20 公里的 pedestrian 路线既慢又会把终点形状拼出来
@@ -697,6 +666,23 @@ struct JourneyView: View {
             let fetched = await RouteService.shared.walkingRoute(from: here, to: target)
             guard routeTarget == target else { return }
             route = fetched
+            // 截图走查：`WA_START_AT=<米>` 把模拟定位沿路线前移，用来核对转向提示 / 已走进度
+            if let fetched,
+               ProcessInfo.processInfo.environment["WA_PREVIEW"] == "parity",
+               let raw = ProcessInfo.processInfo.environment["WA_START_AT"],
+               let meters = Double(raw), meters > 0 {
+                let along = min(meters, max(0, fetched.distanceMeters - 40))
+                let ahead = RouteMath.point(atAlong: along, route: fetched)
+                store.lastKnownOrigin = ahead
+                lastReading = LocationReading(
+                    origin: ahead,
+                    remainingMeters: fetched.distanceMeters - along,
+                    bearingDegrees: store.session?.currentBearing,
+                    headingDegrees: lastReading?.headingDegrees,
+                    headingAccuracy: lastReading?.headingAccuracy,
+                    horizontalAccuracy: 8
+                )
+            }
             if ProcessInfo.processInfo.environment["WA_DEBUG_POI"] == "1" {
                 if let fetched {
                     let first = fetched.points.first ?? here
@@ -707,19 +693,6 @@ struct JourneyView: View {
                 }
             }
         }
-    }
-
-    /// 距离下一条线索还差多少米（没有未解锁线索时 nil）
-    private func nextClueGapMeters(in session: QuestSession) -> Int? {
-        guard session.unlockedHintCount < QuestSession.hintThresholds.count else { return nil }
-        let threshold = QuestSession.hintThresholds[session.unlockedHintCount]
-        return max(0, session.remainingMeters - threshold)
-    }
-
-    private func nextClueGapMeters(in session: QuestSession, remaining: Int) -> Int? {
-        guard session.unlockedHintCount < QuestSession.hintThresholds.count else { return nil }
-        let threshold = QuestSession.hintThresholds[session.unlockedHintCount]
-        return max(0, remaining - threshold)
     }
 
     /// 这一趟是不是「远程漫游」：优先看会话自己记的范围（抽盒时选定），
@@ -819,50 +792,57 @@ struct JourneyView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    // MARK: 距离
+    // MARK: 距离 / 导航面板
 
-    private func distanceSection(session: QuestSession) -> some View {
-        let remaining = navigationRemainingMeters(session: session)
-        let walked = Int(currentRouteProgress?.walked.rounded() ?? Double(session.totalMeters - session.remainingMeters))
-        let total = route.map { Int($0.distanceMeters.rounded()) } ?? session.totalMeters
-        let useKilometers = isRoamQuest || remaining >= 1000
-        return VStack(alignment: .leading, spacing: 8) {
-            if let next = upcomingManeuver, currentRouteProgress != nil {
-                HStack(spacing: 12) {
-                    Image(systemName: navigationArrow(for: next.maneuver.direction))
-                        .font(.system(size: 24, weight: .semibold))
-                        .foregroundStyle(WATheme.amberDeep)
-                        .frame(width: 32)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(navigationInstruction(next))
-                            .font(WATheme.title(16))
-                            .foregroundStyle(WATheme.ink)
-                        Text(next.distance <= 45 ? "留意前方路口" : "沿步行路线前进")
-                            .font(WATheme.caption(12))
-                            .foregroundStyle(WATheme.ink2)
-                    }
-                    Spacer(minLength: 0)
-                }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(WATheme.amberSoft)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .accessibilityElement(children: .combine)
-            } else if currentRouteProgress != nil {
-                HStack(spacing: 10) {
-                    Image(systemName: "figure.walk")
-                        .font(.system(size: 20, weight: .medium))
-                        .foregroundStyle(WATheme.teal)
-                    Text(remaining < 60 ? "就在附近 · 抬头看看周围" : "沿步行路线继续")
-                        .font(WATheme.title(15))
-                        .foregroundStyle(WATheme.ink)
-                }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(WATheme.paper2)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    /// 转向横幅（主流步行导航放在地图上方的主提示）
+    @ViewBuilder
+    private func maneuverBanner(remaining: Int) -> some View {
+        let next = upcomingManeuver
+        let isNow = (next?.distance ?? 999) <= 15
+        HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isNow ? WATheme.amberDeep : WATheme.amberSoft)
+                    .frame(width: 52, height: 52)
+                Image(systemName: next.map { navigationArrow(for: $0.maneuver.direction) } ?? "figure.walk")
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundStyle(isNow ? .white : WATheme.amberDeep)
             }
 
+            VStack(alignment: .leading, spacing: 3) {
+                Text(maneuverHeadline(next, remaining: remaining))
+                    .font(.system(size: 21, weight: .semibold))
+                    .foregroundStyle(WATheme.ink)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                Text(maneuverDetail(next, remaining: remaining))
+                    .font(WATheme.caption(12.5))
+                    .foregroundStyle(WATheme.ink2)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(isNow ? WATheme.amberSoft : WATheme.paper)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(isNow ? WATheme.amberDeep.opacity(0.35) : WATheme.line, lineWidth: 1)
+        )
+        .accessibilityElement(children: .combine)
+    }
+
+    private func distanceSection(session: QuestSession) -> some View {
+        let progress = currentRouteProgress
+        let remaining = navigationRemainingMeters(session: session)
+        let walked = Int(progress?.walked.rounded() ?? Double(session.totalMeters - session.remainingMeters))
+        let total = route.map { Int($0.distanceMeters.rounded()) } ?? session.totalMeters
+        let useKilometers = isRoamQuest || remaining >= 1000
+        let hasRoute = progress != nil
+        let minutes = max(1, Int((Double(remaining) / 75).rounded()))
+        return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 if useKilometers {
                     Text(String(format: "%.1f", Double(remaining) / 1000))
@@ -883,18 +863,22 @@ struct JourneyView: View {
                 }
 
                 Spacer(minLength: 8)
-                if currentRouteProgress != nil {
-                    Text("约 \(max(1, Int((Double(remaining) / 75).rounded()))) 分钟")
-                        .font(WATheme.caption(12))
-                        .foregroundStyle(WATheme.ink2)
-                } else {
+
+                if !hasRoute {
+                    // 没有路线时才退回「目的地相对你」的箭头
                     directionArrowView(session: session)
                 }
             }
 
-            Text(currentRouteProgress == nil ? session.compassCopy : "步行路线 · 距离按路线计算")
-                .font(WATheme.body(14))
-                .foregroundStyle(WATheme.ink2)
+            if hasRoute {
+                Text("步行 \(minutes) 分钟 · 约 \(arrivalClock(minutes: minutes)) 到")
+                    .font(WATheme.body(14))
+                    .foregroundStyle(WATheme.ink2)
+            } else {
+                Text(session.compassCopy)
+                    .font(WATheme.body(14))
+                    .foregroundStyle(WATheme.ink2)
+            }
 
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
@@ -902,28 +886,59 @@ struct JourneyView: View {
                     Capsule()
                         .fill(WATheme.amber)
                         .frame(width: max(0, geo.size.width * CGFloat(
-                            currentRouteProgress.map { min(1, $0.walked / max(1, route?.distanceMeters ?? 1)) }
+                            progress.map { min(1, $0.walked / max(1, route?.distanceMeters ?? 1)) }
                                 ?? session.progress
                         )))
                 }
             }
             .frame(height: 5)
-            .padding(.top, 4)
 
-            if currentRouteProgress != nil {
-                Text("已走 \(distanceText(meters: walked)) · 路线 \(distanceText(meters: total))")
-                    .font(WATheme.caption(10))
+            if hasRoute {
+                Text("已走 \(distanceText(meters: walked)) · 路线全长 \(distanceText(meters: total))")
+                    .font(WATheme.caption(11))
                     .foregroundStyle(WATheme.ink3)
             } else if useKilometers {
                 Text("已走 \(distanceText(meters: session.totalMeters - session.remainingMeters)) · 共 \(distanceText(meters: session.totalMeters))")
-                    .font(WATheme.caption(10))
+                    .font(WATheme.caption(11))
                     .foregroundStyle(WATheme.ink3)
             } else {
                 Text("已走 \(session.totalMeters - session.remainingMeters) 米 · 共 \(session.totalMeters) 米")
-                    .font(WATheme.caption(10))
+                    .font(WATheme.caption(11))
                     .foregroundStyle(WATheme.ink3)
             }
         }
+    }
+
+    /// 预计到达时刻（`22:58`）。用户看导航时最先想知道的是「我几点能到」。
+    private func arrivalClock(minutes: Int) -> String {
+        let date = Date().addingTimeInterval(Double(minutes) * 60)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: date)
+    }
+
+    /// 主文案：`50 米后左拐` / `现在左拐` / `继续直行`
+    private func maneuverHeadline(_ next: (maneuver: RouteManeuver, distance: Int)?, remaining: Int) -> String {
+        guard let next else {
+            return remaining < 60 ? "就在附近，抬头看看周围" : "沿步行路线继续走"
+        }
+        let label = next.maneuver.label
+        if next.distance <= 12 { return "现在\(label)" }
+        if next.maneuver.direction == "straight" { return "继续直行" }
+        return "\(next.distance) 米后\(label)"
+    }
+
+    /// 副文案：直行段说还有多远，转弯前提醒路口
+    private func maneuverDetail(_ next: (maneuver: RouteManeuver, distance: Int)?, remaining: Int) -> String {
+        guard let next else {
+            return remaining < 60 ? "到了就揭晓" : "跟着蓝色路线走"
+        }
+        if next.maneuver.direction == "straight" {
+            return "沿当前方向走 \(next.distance) 米"
+        }
+        if next.distance <= 12 { return "拐过去继续走" }
+        if next.distance <= 45 { return "留意路口，准备转向" }
+        return "沿当前方向继续走"
     }
 
     /// 真实定位 + 有手机朝向 → 相对方向（bearing - heading）；否则退回绝对/演示箭头
@@ -1062,7 +1077,6 @@ struct JourneyView: View {
 
             if unlocked {
                 HStack(alignment: .top, spacing: 8) {
-                    Text("✅").font(.system(size: 14))
                     Text(hint)
                         .font(WATheme.body(14))
                         .foregroundStyle(WATheme.ink)
@@ -1337,12 +1351,19 @@ struct JourneyView: View {
         // 截图/预览：不弹定位授权，用模拟起点做一条真实路线（`WA_PREVIEW=parity`）
         let preview = ProcessInfo.processInfo.environment["WA_PREVIEW"] ?? ""
         if preview == "parity", let origin = store.lastKnownOrigin {
+            // 走查朝向：`SIMCTL_CHILD_WA_HEADING=210` 注入设备朝向，
+            // 用来核对「随动转向」与「正北朝上」两种模式的旋转是否正确
+            let injected = Double(ProcessInfo.processInfo.environment["WA_HEADING"] ?? "")
+            if let injected {
+                headingDegrees = injected
+                smoothedHeading = injected
+            }
             lastReading = LocationReading(
                 origin: origin,
                 remainingMeters: Double(store.session?.remainingMeters ?? 0),
                 bearingDegrees: store.session?.currentBearing,
-                headingDegrees: nil,
-                headingAccuracy: nil,
+                headingDegrees: injected,
+                headingAccuracy: injected == nil ? nil : 8,
                 horizontalAccuracy: 8
             )
             if walkedTrail.isEmpty { walkedTrail = [origin] }

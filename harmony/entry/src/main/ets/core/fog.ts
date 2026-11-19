@@ -18,7 +18,7 @@
  */
 
 import { GeoPoint } from './types';
-import { distance } from './geo';
+import { distance, normalizeSignedDegrees } from './geo';
 
 // ============================================================
 // 规格常量（改之前先改 docs/parity.md §3）
@@ -335,33 +335,30 @@ export interface FogLayout {
   /** 画布宽 / 高（vp） */
   width: number;
   height: number;
-  /** 「你」在画布上的位置（默认居中） */
+  /** 「你」在画布上的位置（默认 72% 高） */
   centerX: number;
   centerY: number;
-  /** 竖向前方可用像素（默认 height * 0.44） */
+  /** 竖向前方可用像素（默认 height * 0.68） */
   aheadPixels: number;
-  /** 竖向后方可用像素（默认 height * 0.44） */
+  /** 竖向后方可用像素（默认 height * 0.28） */
   behindPixels: number;
-  /** 横向可用半宽（默认 width * 0.42） */
-  lateralPixels: number;
 }
 
 /**
- * 默认布局：**「你」在画面正中间**。
+ * 默认布局：**「你」在画面偏下（72%）**，和主流步行导航一致。
  *
- * 为什么不再把「你」放在偏下 86% 处：那样画布上方 3/4 全给前方路径，
- * 用户自己却挤在下边缘 —— 视线要一直往下找「我在哪」，很像地图没跟随。
- * 居中之后前后都有余量，视觉重心和手指遮住的区域都更合理。
+ * 早期把它放在正中，后来放到 86%：前者让前方没多少余量、后者把用户挤到下边缘。
+ * 72% 是折中：前方留出 68% 的屏高看路，脚下还留 28% 显示走过来的路，
+ * 手指按住底部按钮也不会挡住「我在哪」。
  */
 export function defaultLayout(width: number, height: number): FogLayout {
   const layout: FogLayout = {
     width: width,
     height: height,
     centerX: width / 2,
-    centerY: height * 0.5,
-    aheadPixels: height * 0.44,
-    behindPixels: height * 0.44,
-    lateralPixels: width * 0.42
+    centerY: height * 0.72,
+    aheadPixels: height * 0.68,
+    behindPixels: height * 0.28
   };
   return layout;
 }
@@ -388,6 +385,8 @@ export interface FogGeometry {
   remaining: number;
   /** 偏离米数 */
   offRoute: number;
+  /** 前方可见米数（画布比例尺 = aheadPixels / aheadMeters） */
+  aheadMeters: number;
 }
 
 export interface FogPoint {
@@ -430,7 +429,8 @@ export function fogGeometry(
     caption: FOG_CAPTION,
     hidden: false,
     remaining: 0,
-    offRoute: 0
+    offRoute: 0,
+    aheadMeters: 0
   };
 
   const cumulative: RouteCumulative | undefined = buildCumulative(line);
@@ -455,10 +455,11 @@ export function fogGeometry(
   const window: FogWindow = fogWindow(progress.walked, total);
   empty.remaining = Math.round(window.remaining);
   empty.offRoute = Math.round(progress.offRoute);
-  empty.compassRotation = -up;
-  empty.userRotation = userRotation;
+  empty.aheadMeters = window.ahead;
+  empty.compassRotation = normalizeSignedDegrees(-up);
+  empty.userRotation = normalizeSignedDegrees(userRotation);
 
-  // 「你」永远钉在画布正中：地图跟着人动，而不是人在地图上跑。
+  // 「你」永远钉在 layout 的锚点（默认 72% 高）：地图跟着人动，而不是人在地图上跑。
   // 只有「剩余 < 60m 隐藏」和「正在规划」这两种情况才用 layout 默认值。
   empty.userX = layout.centerX;
   empty.userY = layout.centerY;
@@ -483,7 +484,7 @@ export function fogGeometry(
   const aheadMeters: number = Math.max(window.ahead, 1);
   const scaleY: number = layout.aheadPixels / aheadMeters;
 
-  // 先采样，再按横向范围自适应缩放
+  // 先按 3 米步长采样路线，再统一换算到画布坐标
   interface LocalPoint {
     s: number;
     along: number;
@@ -500,24 +501,18 @@ export function fogGeometry(
   }
 
   if (local.length >= 2) {
-    let minLateral: number = Infinity;
-    let maxLateral: number = -Infinity;
-    for (let i = 0; i < local.length; i += 1) {
-      if (local[i].lateral < minLateral) minLateral = local[i].lateral;
-      if (local[i].lateral > maxLateral) maxLateral = local[i].lateral;
-    }
-    const halfSpan: number = Math.max(12, Math.max(Math.abs(minLateral), Math.abs(maxLateral)) + 8);
-    let scaleX: number = layout.lateralPixels / halfSpan;
-    if (scaleX > scaleY) scaleX = scaleY;
-    // 横向也跟随「你」：把用户的横向偏移抵消掉，让标记始终钉在画布正中，
+    // 统一比例尺：横向不做「压缩到刚好放得下」的适配。
+    // 那样会把一条 200 米的路压成画布中间一指宽 —— 真导航地图是让路伸出屏幕边缘的。
+    const scale: number = scaleY;
+    // 横向也跟随「你」：把用户的横向偏移抵消掉，让标记始终钉在固定位置，
     // 路面整体相对他左右移动 —— 这才是「地图随动」。
-    const originX: number = layout.centerX - progress.lateral * scaleX;
+    const originX: number = layout.centerX - progress.lateral * scale;
 
     const toScreen: (along: number, lateral: number) => FogPoint =
       (along: number, lateral: number): FogPoint => {
         const point: FogPoint = {
-          x: originX + lateral * scaleX,
-          y: layout.centerY - along * scaleY
+          x: originX + lateral * scale,
+          y: layout.centerY - along * scale
         };
         return point;
       };

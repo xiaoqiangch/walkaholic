@@ -34,6 +34,18 @@ export function normalizeDegrees(degrees: number): number {
   return value < 0 ? value + 360 : value;
 }
 
+/**
+ * 把角度归一化到 (-180, 180]。
+ * 用于「旋转量」（指北针、朝向扇形）：-359° 和 +1° 是同一个朝向，
+ * 但直接拿 -up 算会得到 -359，看起来像转了一整圈。
+ */
+export function normalizeSignedDegrees(degrees: number): number {
+  let value: number = degrees % 360;
+  if (value > 180) value -= 360;
+  if (value <= -180) value += 360;
+  return value;
+}
+
 /** 从 origin 指向 target 的方位角（度）。0 = 正北，90 = 正东 */
 export function bearing(from: GeoPoint, to: GeoPoint): number {
   const lat1: number = from.latitude * DEG_TO_RAD;

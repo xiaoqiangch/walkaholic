@@ -129,6 +129,30 @@ export function panViewport(
 }
 
 /**
+ * 缩放地图并保持焦点处的地理位置不变。
+ * 这样双指缩放围绕手指中心进行，而不是把视野中心固定在地图中央。
+ */
+export function zoomViewportAtPoint(
+  viewport: MapViewport,
+  targetZoom: number,
+  focalX: number,
+  focalY: number,
+  width: number,
+  height: number
+): MapViewport {
+  const zoom: number = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, targetZoom));
+  const offsetX: number = focalX - width / 2;
+  const offsetY: number = focalY - height / 2;
+  const oldCenter: MapPixel = worldPixel(viewport.centerLat, viewport.centerLon, viewport.zoom);
+  const focalGeoPixel: MapPixel = new MapPixel(oldCenter.x + offsetX, oldCenter.y + offsetY);
+  const focalGeo: MapPixel = worldPixelToLatLon(focalGeoPixel, viewport.zoom);
+  const focalAtZoom: MapPixel = worldPixel(focalGeo.x, focalGeo.y, zoom);
+  const nextCenterPixel: MapPixel = new MapPixel(focalAtZoom.x - offsetX, focalAtZoom.y - offsetY);
+  const center: MapPixel = worldPixelToLatLon(nextCenterPixel, zoom);
+  return new MapViewport(center.x, center.y, zoom);
+}
+
+/**
  * 高德静态地图 URL。
  *
  * 注意坐标系：高德吃的是 **GCJ-02**，调用方必须先把 WGS-84 转好再传进来
