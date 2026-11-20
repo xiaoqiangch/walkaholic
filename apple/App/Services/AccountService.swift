@@ -56,6 +56,12 @@ final class AccountService {
             if !config.baseUrl.isEmpty { base = config.baseUrl }
             storedUser = config.user
         }
+        // 开发/测试覆盖：注册页已不再暴露服务地址，需要连本地服务时用启动环境变量指定。
+        //   xcrun devicectl device process launch --environment-variables '{"WA_ACCOUNT_BASE":"http://127.0.0.1:8803"}' …
+        if let override = ProcessInfo.processInfo.environment["WA_ACCOUNT_BASE"],
+           !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            base = override
+        }
         baseURL = base
         user = storedUser
 

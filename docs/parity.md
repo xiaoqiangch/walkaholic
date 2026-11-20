@@ -108,7 +108,29 @@ Web：旅程页路径卡左上角胶囊可点击快速切换（`data-action="tog
 - Cookie 会话（HttpOnly），客户端需带凭据
 - 未登录：本地单机可用
 - 登录后：`同步到账号`（整包覆盖）、`从账号恢复`（覆盖本机）、`退出`、`删除账号`
-- 服务地址可配置，默认 `http://127.0.0.1:8803`
+- **主入口只有 Apple / 微信**；账号密码降为「用账号密码登录」二级入口（点了才展开）
+- **注册/登录页不显示服务地址**：默认连已部署的账号服务（`https://xqlounge.top`），用户只填用户名和密码。
+  本地调试用启动环境变量覆盖：iOS `WA_ACCOUNT_BASE` / Web `localStorage` / 鸿蒙 kv
+- 服务端用户管理（停用/重置密码/删除）在管理后台「用户账号」面板，不在 App 内
+
+### 4.1 为什么账号密码没直接删掉
+
+两个前置条件没到位，现在删掉就一个登录方式都没有：
+
+| 登录方式 | 阻塞项 |
+|---|---|
+| Apple | 免费 Personal Team **不支持** `Sign in with Apple` capability，Xcode 直接拒绝出包（实测报错：`Personal development teams … do not support the Sign In with Apple capability`）。需 $99/年 Apple Developer Program |
+| 微信 | 服务端 `wechat.enabled=false`（缺 `WA_WECHAT_APPID` / `WA_WECHAT_SECRET`）；App 内必须接 WeChatOpenSDK 并在微信开放平台登记包名+签名，不能用网页授权 |
+
+所以三端都是：Apple / 微信按钮**如实置灰并说明原因**，账号密码收在「用账号密码登录」里作兜底。
+两者就绪后，删掉那个兜底入口即可（iOS 见 `AccountView.otherWaysSection`、Web 见 `ui.accountMore`、
+鸿蒙见 `AccountPanel.passwordExpanded`）。
+
+iOS 侧启用 Apple 登录的完整步骤：
+1. 加入付费 Apple Developer Program
+2. `apple/project.yml` 取消 `CODE_SIGN_ENTITLEMENTS: Info/Walkaholic.entitlements` 的注释并重新生成工程
+3. Build Settings → `SWIFT_ACTIVE_COMPILATION_CONDITIONS` 增加 `WA_APPLE_SIGNIN`
+   （`AccountView.appleCapabilityAvailable` 会据此自动把按钮点亮）
 
 ## 5. 字号（对齐 Web v32）
 

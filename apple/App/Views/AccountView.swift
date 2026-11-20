@@ -7,6 +7,12 @@ import SwiftUI
 
 struct AccountView: View {
 
+    /// 账号密码表单正在提交的动作
+    private enum AccountSubmit: Equatable {
+        case login
+        case register
+    }
+
     let store: WalkaholicStore
 
     @Environment(\.dismiss) private var dismiss
@@ -17,6 +23,28 @@ struct AccountView: View {
     @State private var deletePassword = ""
     @State private var showDeleteConfirm = false
     @State private var localMessage: String?
+    /// 表单级错误：紧贴按钮显示，避免「点了没反应」——服务端错误与本地校验都走这里
+    @State private var localError: String?
+    /// 当前正在提交的动作（登录 / 注册）。只由按钮自己控制，
+    /// 不受 onAppear 里 refresh() 的 isBusy 影响（否则刚打开面板时按钮会短暂失效）
+    @State private var submitting: AccountSubmit?
+    /// 账号密码收在「其他方式」里，点了才展开（主入口只留 Apple / 微信）
+    @State private var passwordExpanded = false
+    /// Apple 登录是否真的可用。
+    ///
+    /// 免费 Personal Team 签不出 `com.apple.developer.applesignin` entitlement
+    /// （Xcode 会直接拒绝出包），所以这里按编译条件如实标记：
+    ///   - 现在：不可用 → 按钮置灰 + 说明「需要付费开发者账号」，不让人点了白点
+    ///   - 买到付费 Apple Developer Program 后：打开 project.yml 里的
+    ///     CODE_SIGN_ENTITLEMENTS，并在 Build Settings 的
+    ///     SWIFT_ACTIVE_COMPILATION_CONDITIONS 加上 WA_APPLE_SIGNIN → 自动启用
+    private var appleCapabilityAvailable: Bool {
+        #if WA_APPLE_SIGNIN
+        return true
+        #else
+        return false
+        #endif
+    }
     /// 微信登录：服务端是否启用 + 是否有码
     @State private var wechatConfig: WeChatLoginService.Config?
     @State private var wechatLoading = false
@@ -63,7 +91,6 @@ struct AccountView: View {
                 Task { await sms.refreshAvailability(baseURL: account.baseURL) }
                 Task {
                     await account.refresh()
-                    baseURL = account.baseURL
                     let env = ProcessInfo.processInfo.environment
                     if env["WA_ACCOUNT_AUTO_LOGIN"] == "1", !account.isLoggedIn {
                         let username = env["WA_ACCOUNT_USER"] ?? "wascreenshot"
@@ -122,7 +149,7 @@ struct AccountView: View {
                     Text(account.isLoggedIn ? "已登录：\(account.user?.username ?? "")" : "未登录 · 数据只存在这台设备")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(WATheme.ink)
-                    Text(account.isLoggedIn ? account.baseURL : "不登录也能用，数据留在本机。")
+                    Text(account.isLoggedIn ? "资料会同步到账号，换手机也不丢" : "不登录也能用，数据留在本机。")
                         .font(.system(size: 13))
                         .foregroundStyle(WATheme.ink3)
                         .lineLimit(1)
@@ -135,7 +162,9 @@ struct AccountView: View {
                     .font(.system(size: 13))
                     .foregroundStyle(WATheme.teal)
             }
-            if let error = account.lastError {
+            // 未登录时的失败原因贴在表单旁边（见 loginCard），这里只在已登录状态下
+            // 显示同步/恢复/删号的错误，避免同一句话出现两遍。
+            if account.isLoggedIn, let error = account.lastError {
                 Text(error)
                     .font(.system(size: 13))
                     .foregroundStyle(WATheme.ember)
@@ -161,58 +190,28 @@ struct AccountView: View {
         }
     }
 
-    // MARK: 未登录：微信 / 账号密码
+    // MARK: 未登录：Apple / 微信（账号密码收进「其他方式」兜底）
 
     private var loginCard: some View {
         VStack(alignment: .leading, spacing: 14) {
             appleButton
-            smsSection
             wechatSection
 
-            HStack(spacing: 8) {
-                Rectangle().fill(WATheme.line).frame(height: 1)
-                Text("或用账号密码").font(.footnote).foregroundStyle(WATheme.ink2).fixedSize()
-                Rectangle().fill(WATheme.line).frame(height: 1)
+            // 账号密码不再作为主入口：收进「其他方式」，点了才展开。
+            // 为什么保留：Apple 登录需要付费开发者账号（$99/年）签发 applesignin
+            // capability，微信登录需要服务端 appid + WeChatOpenSDK。在这两者就绪前，
+            // 完全去掉密码就一个登录方式都没有了。等它们可用后删掉这一段即可。
+            otherWaysSection
+
+            // 失败原因统一显示在按钮组下方（Apple / 微信 / 账号密码都会写这里）
+            if let localError {
+                Text(localError)
+                    .font(.system(size: 13))
+                    .foregroundStyle(WATheme.ember)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            field("账号服务地址", text: $baseURL, placeholder: "https://xqlounge.top", secure: false)
-            field("用户名", text: $username, placeholder: "3–24 个字符", secure: false)
-            field("密码", text: $password, placeholder: "至少 6 位", secure: true)
-
-            HStack(spacing: 10) {
-                Button {
-                    commitBaseURL()
-                    Task {
-                        localMessage = nil
-                        if await account.login(username: username, password: password) {
-                            localMessage = account.lastMessage
-                            let count = await SurpriseService.shared.flushPending(store: store)
-                            if count > 0 { localMessage = "已登录 · 补传了 \(count) 个之前埋下的惊喜" }
-                        }
-                    }
-                } label: {
-                    buttonLabel("登录", filled: true)
-                }
-                .buttonStyle(WAPressEffectStyle())
-
-                Button {
-                    commitBaseURL()
-                    Task {
-                        localMessage = nil
-                        if await account.register(username: username, password: password) {
-                            localMessage = account.lastMessage
-                            let count = await SurpriseService.shared.flushPending(store: store)
-                            if count > 0 { localMessage = "注册成功 · 补传了 \(count) 个之前埋下的惊喜" }
-                        }
-                    }
-                } label: {
-                    buttonLabel("注册并登录", filled: false)
-                }
-                .buttonStyle(WAPressEffectStyle())
-            }
-            .disabled(account.isBusy || username.isEmpty || password.isEmpty)
-
-            if account.isBusy {
+            if account.isBusy || submitting != nil {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
                     Text("正在连接账号服务…").font(.system(size: 13)).foregroundStyle(WATheme.ink3)
@@ -223,6 +222,116 @@ struct AccountView: View {
         .background(WATheme.paper)
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(WATheme.line, lineWidth: 1))
+    }
+
+    // MARK: 其他登录方式（账号密码兜底）
+
+    @ViewBuilder
+    private var otherWaysSection: some View {
+        if passwordExpanded {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    Rectangle().fill(WATheme.line).frame(height: 1)
+                    Text("用账号密码").font(.footnote).foregroundStyle(WATheme.ink2).fixedSize()
+                    Rectangle().fill(WATheme.line).frame(height: 1)
+                }
+
+                field("用户名", text: $username, placeholder: "3–24 个字符", secure: false)
+                field("密码", text: $password, placeholder: "至少 6 位", secure: true)
+
+                HStack(spacing: 10) {
+                    Button {
+                        submitAccount(.login)
+                    } label: {
+                        buttonLabel(submitting == .login ? "登录中…" : "登录", filled: true)
+                    }
+                    .buttonStyle(WAPressEffectStyle())
+                    .disabled(submitting != nil)
+
+                    Button {
+                        submitAccount(.register)
+                    } label: {
+                        buttonLabel(submitting == .register ? "注册中…" : "注册并登录", filled: false)
+                    }
+                    .buttonStyle(WAPressEffectStyle())
+                    .disabled(submitting != nil)
+                }
+
+                // 按钮始终可点：不合格时点一下就把原因说出来（不要让它「看起来点了没反应」）
+                if accountFormHint != nil, localError == nil {
+                    Text(accountFormHint ?? "")
+                        .font(.system(size: 12))
+                        .foregroundStyle(WATheme.ink3)
+                }
+            }
+        } else {
+            Button {
+                withAnimation(WAAnimation.quick) { passwordExpanded = true }
+            } label: {
+                Text("用账号密码登录")
+                    .font(.footnote)
+                    .foregroundStyle(WATheme.ink3)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+            }
+            .buttonStyle(WAPressEffectStyle())
+        }
+    }
+
+    // MARK: 账号密码表单
+
+    /// 与账号服务端同一套规则（account/server/index.mjs）：
+    ///   用户名 3–24 个字母/数字/下划线/中文；密码 6–128 位。
+    /// 本地先判一遍；不合格时按钮仍然可点（点击后立刻说明原因），
+    /// 只是不会真的发请求 —— 这样用户不会觉得「按钮坏了」。
+    private var accountFormHint: String? {
+        let name = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty { return "先填用户名（3–24 个字母、数字、下划线或中文）" }
+        let pattern = "^[A-Za-z0-9_\\u4e00-\\u9fff]{3,24}$"
+        if name.range(of: pattern, options: .regularExpression) == nil {
+            return "用户名需为 3–24 个字母、数字、下划线或中文"
+        }
+        if password.isEmpty { return "再填密码（至少 6 位）" }
+        if password.count < 6 { return "密码至少 6 位" }
+        if password.count > 128 { return "密码不能超过 128 位" }
+        return nil
+    }
+
+    private func submitAccount(_ action: AccountSubmit) {
+        guard submitting == nil else { return }
+        // 本地不合格时按钮本来是禁用的，这里再兜一次：把原因说出来而不是静默
+        if let hint = accountFormHint {
+            localError = hint
+            return
+        }
+        commitBaseURL()
+        localMessage = nil
+        localError = nil
+        submitting = action
+        let name = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        Task {
+            let ok: Bool
+            switch action {
+            case .login:
+                ok = await account.login(username: name, password: password)
+            case .register:
+                ok = await account.register(username: name, password: password)
+            }
+            submitting = nil
+            if ok {
+                localMessage = account.lastMessage
+                localError = nil
+                let count = await SurpriseService.shared.flushPending(store: store)
+                if count > 0 {
+                    localMessage = (action == .login ? "已登录" : "注册成功")
+                        + " · 补传了 \(count) 个之前埋下的惊喜"
+                }
+            } else {
+                // 关键：失败一定要有可见反馈（用户名被占 / 密码太短 / 网络不通 / 服务地址错）
+                localError = account.lastError ?? "操作失败，请稍后再试"
+                localMessage = nil
+            }
+        }
     }
 
     // MARK: Sign in with Apple
@@ -249,12 +358,28 @@ struct AccountView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .buttonStyle(WAPressEffectStyle())
-            .disabled(appleLoading || account.isBusy)
+            .disabled(appleLoading || account.isBusy || !appleCapabilityAvailable)
+            .opacity(appleCapabilityAvailable ? 1 : 0.45)
 
             Text("Apple 只把你的姓名和邮箱交给步迷，不会拿到你的 Apple ID。")
                 .font(.caption2)
                 .foregroundStyle(WATheme.ink3)
                 .multilineTextAlignment(.center)
+
+            // Apple 登录需要付费开发者账号（$99/年）签发 applesignin capability。
+            // 当前证书是免费 Personal Team，点了会直接失败 —— 与其让用户点完一脸茫然，
+            // 不如在这里如实说明，并提供可用的替代路径。
+            if !appleCapabilityAvailable {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.caption)
+                    Text("当前构建的签名不支持 Apple 登录（需要付费开发者账号）。请先用下方「用账号密码登录」。")
+                        .font(.caption2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .foregroundStyle(WATheme.ink3)
+                .padding(.top, 2)
+            }
         }
     }
 
@@ -568,7 +693,7 @@ struct AccountView: View {
     }
 
     private var hintCard: some View {
-        Text("账号是可选的。不登录也能用，数据留在本机。\n默认连公网 https://xqlounge.top（已部署），单元测试/本地开发也可改成 http://127.0.0.1:8803。")
+        Text("账号是可选的。不登录也能用，数据留在本机。")
             .font(.system(size: 13))
             .foregroundStyle(WATheme.ink3)
             .fixedSize(horizontal: false, vertical: true)
@@ -585,6 +710,8 @@ struct AccountView: View {
             .overlay(Capsule().stroke(filled ? Color.clear : WATheme.line, lineWidth: 1))
     }
 
+    /// 提交服务地址。注册页不再显示地址输入框，这里保留是因为短信 / 微信 / Apple
+    /// 登录仍要确保 `AccountService.baseURL` 与界面一致（值来自 `account.baseURL`）。
     private func commitBaseURL() {
         account.setBaseURL(baseURL)
         baseURL = account.baseURL
