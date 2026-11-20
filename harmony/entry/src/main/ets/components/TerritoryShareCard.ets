@@ -403,12 +403,15 @@ function emptyRank(): TerritoryRankResult {
       title: '白身',
       seal: '民',
       thresholdKm2: 0,
+      minPoints: 0,
       color: '#9CA3AF',
       desc: '还没有自己的疆域'
     },
     progress: 0,
     toNextKm2: 0,
-    areaKm2: 0
+    areaKm2: 0,
+    capped: false,
+    pointsNeeded: 0
   };
   return rank;
 }

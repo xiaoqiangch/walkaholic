@@ -635,9 +635,6 @@ struct Index {
             this.syncSurprises();
             this.refresh();
           },
-          onShareTerritory: () => {
-            this.openTerritoryCard();
-          },
           onOpenSeek: (surpriseID: string) => {
             this.openSeek(surpriseID);
           }

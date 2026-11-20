@@ -28,7 +28,7 @@ import { GeoPoint, Place, PlaceCard, WalkPoint } from '../core/types';
 import { TrackDay, simplifyPoints, splitTrackSegments, trackOpacity } from '../core/track';
 import { HttpClient } from '../core/http';
 import { KeyValueStore } from '../core/contract';
-import { WaMicroLabel, WaStatsRow, StatItem } from '../components/Common';
+import { WaMicroLabel, WaProgressBar, WaStatsRow, StatItem } from '../components/Common';
 import { emptySnapshot, readSnapshot } from '../components/StoreBridge';
 import { WAColor, WAFont, WASize } from '../theme/Theme';
 import { getStoreInstance } from '../core/store';
