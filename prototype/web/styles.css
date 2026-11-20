@@ -3783,3 +3783,138 @@ body[data-sheet="1"] .toast,
   font-weight: 650;
   color: var(--amber);
 }
+
+/* ============================================================
+   40. 疆域与爵位（我的页）
+   ============================================================ */
+
+.territory {
+  margin: 14px 0 4px;
+  padding: 16px;
+  border-radius: var(--radius-card);
+  border: 1px solid var(--line);
+  background: linear-gradient(150deg, #FFFFFF 0%, #F7F9FF 100%);
+}
+
+.territory__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.territory__seal {
+  flex: none;
+  width: 46px;
+  height: 46px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--rank-color, #5B6CFF);
+  color: #FFFFFF;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.territory__title { flex: 1; min-width: 0; }
+
+.territory__rank {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.territory__desc {
+  margin: 2px 0 0;
+  font-size: 11.5px;
+  color: var(--ink-3, #9CA3AF);
+}
+
+.territory__share {
+  flex: none;
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(91, 108, 255, .35);
+  background: rgba(91, 108, 255, .08);
+  color: var(--amber-deep);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.territory__stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin: 14px 0 10px;
+}
+
+.territory__stats > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+}
+
+.territory__stats b {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--ink);
+  line-height: 1.15;
+}
+
+.territory__stats b i {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--ink-3, #9CA3AF);
+  margin-left: 1px;
+}
+
+.territory__stats span {
+  font-size: 10.5px;
+  color: var(--ink-3, #9CA3AF);
+}
+
+.territory__bar {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(17, 24, 39, .07);
+  overflow: hidden;
+}
+
+.territory__fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--rank-color, #5B6CFF);
+  transition: width .4s var(--ease, ease);
+}
+
+.territory__sub {
+  margin: 7px 0 0;
+  font-size: 11px;
+  color: var(--ink-3, #9CA3AF);
+}
+
+.territory__hint {
+  margin: 12px 0 2px;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+/* 分享卡弹层 */
+.sharecard__img {
+  display: block;
+  width: 100%;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+}
+
+.sharecard__hint {
+  margin: 10px 0 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--ink-3, #9CA3AF);
+}
