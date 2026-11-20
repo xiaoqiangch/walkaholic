@@ -5,8 +5,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APPLE="$ROOT/apple"
 fail=0
 
-echo "== 1) Shared/Core + Shared/Design typecheck (macOS SDK) =="
-if xcrun --sdk macosx swiftc -typecheck "$APPLE"/Shared/Design/Theme.swift "$APPLE"/Shared/Core/*.swift; then
+echo "== 1) Shared/Core + Shared/Design typecheck (iOS SDK) =="
+# 用 iOS SDK 而不是 macOS SDK：Theme.swift 用了 UIColor 语义色（Color(.secondaryLabel)），
+# 在 macOS 下对应的是 NSColor.secondaryLabelColor，用 macosx SDK 会误报。
+if xcrun --sdk iphoneos swiftc -typecheck -target arm64-apple-ios17.0 \
+     "$APPLE"/Shared/Design/Theme.swift "$APPLE"/Shared/Core/*.swift; then
   echo "OK: shared core typechecks"
 else
   echo "FAIL: shared core typecheck"

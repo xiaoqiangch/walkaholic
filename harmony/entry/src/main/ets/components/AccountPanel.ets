@@ -81,6 +81,8 @@ export struct WaAccountPanel {
   @State private baseUrlText: string = ACCOUNT_BASE_DEFAULT;
   @State private usernameText: string = '';
   @State private passwordText: string = '';
+  /** 账号密码收在「其他方式」里，默认收起（主入口只留 Apple / 微信） */
+  @State private passwordExpanded: boolean = false;
   @State private deletePassword: string = '';
   @State private confirmDelete: boolean = false;
   @State private showLogin: boolean = true;
@@ -194,6 +196,10 @@ export struct WaAccountPanel {
     promptAction.showToast({ message: text, duration: 2200 });
   }
 
+  /**
+   * 保存服务地址。登录页已不再暴露地址输入框（默认连已部署的账号服务），
+   * 这里保留给「我的 → 账号」里的调试场景：改 kv 里的 baseUrl 后立即生效。
+   */
   private saveBaseUrl(): void {
     if (this.kv === undefined) return;
     const normalized: string = normalizeBaseUrl(this.baseUrlText);
@@ -348,55 +354,65 @@ export struct WaAccountPanel {
   }
 
   @Builder
-  baseUrlRow() {
-    Column({ space: 6 }) {
-      Text('账号服务地址')
-        .fontSize(WAFont.micro)
-        .fontColor(WAColor.ink3)
-        .letterSpacing(0.8)
+  loginForm() {
+    Column({ space: 10 }) {
+      // ---------- 主入口：Apple / 微信 ----------
+      // 鸿蒙侧：Apple 登录在本平台不提供；微信登录需要 @tencent/wechat_open_sdk
+      // 并在 AGC 登记包名+签名，服务端 appid 也还没配。两者如实标注「暂不可用」，
+      // 不画点了没反应的按钮；账号密码收在下面「用账号密码登录」里作为兜底。
+      this.oauthRow('通过 Apple 登录', false, () => {
+        this.showMessage('鸿蒙端不提供 Apple 登录', true);
+      })
+      this.oauthRow('微信登录', false, () => {
+        this.showMessage('微信登录还没接入（需要 WeChatOpenSDK 与服务端 appid）', true);
+      })
 
-      Row({ space: 8 }) {
-        TextInput({ placeholder: ACCOUNT_BASE_DEFAULT, text: this.baseUrlText })
-          .height(40)
-          .fontSize(WAFont.captionSm)
-          .layoutWeight(1)
-          .backgroundColor(WAColor.paper2)
-          .borderRadius(WASize.cardRadiusXs)
-          .border({ width: 1, color: WAColor.line, radius: WASize.cardRadiusXs })
-          .onChange((value: string) => {
-            this.baseUrlText = value;
-          })
-
+      if (!this.passwordExpanded) {
         Button() {
-          Text('保存')
-            .fontSize(WAFont.captionSm)
-            .fontColor(WAColor.ink)
+          Text('用账号密码登录')
+            .fontSize(WAFont.microSm)
+            .fontColor(WAColor.ink3)
         }
         .type(ButtonType.Capsule)
-        .height(40)
-        .padding({ left: 16, right: 16 })
-        .backgroundColor(WAColor.amberSoftStrong)
-        .border({ width: 1, color: WAColor.amberBorder, radius: WASize.chipRadius })
-        .onClick(() => {
-          this.saveBaseUrl();
-        })
-      }
-      .width('100%')
-
-      Text('默认连公网 https://xqlounge.top。登录是可选的，不登录也能正常用。')
-        .fontSize(WAFont.microSm)
-        .fontColor(WAColor.ink3)
+        .height(36)
         .width('100%')
-        .lineHeight(16)
+        .backgroundColor(Color.Transparent)
+        .onClick(() => {
+          this.passwordExpanded = true;
+        })
+      } else {
+        this.passwordForm()
+      }
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
   }
 
+  /** 第三方登录按钮：不可用时置灰并说明原因，不做假按钮 */
   @Builder
-  loginForm() {
+  oauthRow(label: string, enabled: boolean, action: () => void) {
+    Button() {
+      Text(enabled ? label : label + '（暂不可用）')
+        .fontSize(WAFont.titleSm)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(enabled ? WAColor.ink : WAColor.ink3)
+    }
+    .type(ButtonType.Capsule)
+    .height(48)
+    .width('100%')
+    .backgroundColor(enabled ? WAColor.amber : WAColor.paper2)
+    .border({ width: 1, color: WAColor.line, radius: WASize.chipRadius })
+    .enabled(enabled)
+    .opacity(enabled ? 1 : 0.55)
+    .onClick(() => {
+      action();
+    })
+  }
+
+  /** 账号密码表单（兜底入口，默认收起） */
+  @Builder
+  passwordForm() {
     Column({ space: 10 }) {
-      // ---------- 手机号登录（服务端可用时才显示） ----------
       if (this.providers.sms.enabled) {
         this.smsSection()
       } else if (this.providers.sms.missing.length > 0) {
@@ -731,9 +747,8 @@ export struct WaAccountPanel {
           this.header()
 
           Column({ space: 14 }) {
-            this.baseUrlRow()
-
-            Divider().strokeWidth(1).color(WAColor.line)
+            // 注册/登录页不再显示服务地址 —— 默认连已部署的账号服务。
+            // 需要连本地服务时在「我的 → 数据源」那种调试入口改，或在 localStorage/kv 里改。
 
             if (this.loggedIn()) {
               this.loggedInForm()
