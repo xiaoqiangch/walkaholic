@@ -283,6 +283,7 @@ export function accountErrorText(code: string, fallback: string): string {
   if (code === 'USERNAME_TAKEN') return '这个用户名已被注册';
   if (code === 'BAD_REQUEST') return '用户名 3–24 字符，密码至少 6 位';
   if (code === 'TOO_MANY_ATTEMPTS') return '尝试次数太多，10 分钟后再试';
+  if (code === 'ACCOUNT_DISABLED') return '这个账号已被停用，请联系管理员';
   if (code === 'UNAUTHENTICATED') return '登录已过期，请重新登录';
   return fallback;
 }

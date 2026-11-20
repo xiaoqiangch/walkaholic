@@ -97,6 +97,15 @@ CREATE TABLE IF NOT EXISTS place_photos (
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (user_id, place_id)
 );
+
+-- 用户管理状态（后台封禁 / 解封）。单独一张表而不是给 users 加列：
+-- 老库已经在跑，CREATE TABLE IF NOT EXISTS 是纯增量操作，不需要 ALTER TABLE 迁移。
+CREATE TABLE IF NOT EXISTS user_admin (
+  user_id TEXT PRIMARY KEY,
+  disabled_at INTEGER,
+  disabled_reason TEXT,
+  updated_at INTEGER NOT NULL
+);
 `;
 
 /** 打开 SQLite（WAL）并建表 */
@@ -168,6 +177,16 @@ export class AccountStore {
     return row ? Number(row.c) : 0;
   }
 
+  // ---------- 用户管理（后台封禁） ----------
+  // 列表 / 重置密码 / 删号这些运维操作在 admin/server/users.mjs 里（后台直连同一个库），
+  // 账号服务只关心「这个用户是不是被停用了」，避免两处实现分叉。
+
+  /** 是否被封禁（鉴权 / 登录时都要问一次） */
+  isUserDisabled(userId) {
+    const row = this.db.prepare('SELECT disabled_at FROM user_admin WHERE user_id = ?').get(userId);
+    return !!(row && row.disabled_at);
+  }
+
   // ---------- profile ----------
 
   getProfile(userId) {
@@ -235,12 +254,20 @@ export class AccountStore {
     try {
       const removedProfiles = this.db.prepare('DELETE FROM profiles WHERE user_id = ?').run(userId);
       const removedSessions = this.db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
+      // 身份绑定、到达照片、封禁记录没有独立生命周期，跟着账号一起清掉；
+      // 留下的孤儿行会让「同一个微信再登录」错误地落到已删除的账号上。
+      const removedIdentities = this.db.prepare('DELETE FROM identities WHERE user_id = ?').run(userId);
+      const removedPhotos = this.db.prepare('DELETE FROM place_photos WHERE user_id = ?').run(userId);
+      const removedAdmin = this.db.prepare('DELETE FROM user_admin WHERE user_id = ?').run(userId);
       const removedUsers = this.db.prepare('DELETE FROM users WHERE id = ?').run(userId);
       this.db.exec('COMMIT');
       return {
         users: Number(removedUsers.changes),
         profiles: Number(removedProfiles.changes),
-        sessions: Number(removedSessions.changes)
+        sessions: Number(removedSessions.changes),
+        identities: Number(removedIdentities.changes),
+        photos: Number(removedPhotos.changes),
+        admin: Number(removedAdmin.changes)
       };
     } catch (error) {
       this.db.exec('ROLLBACK');

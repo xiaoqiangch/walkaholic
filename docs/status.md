@@ -334,6 +334,28 @@
 **验证**：`bash scripts/check-harmony.sh` 全过 —— tsc 0 error、Node 单测 **132/132**、ArkTS 静态检查 **31 文件 0 error**（新增「iOS 对齐」一节）。
 **未对齐（平台差异）**：Sign in with Apple / 微信登录（需微信 HarmonyOS OpenSDK）/ 华为手表端。
 
+### 2026-11-20 09:00 · 后台用户账号管理（xqlounge.top 已上线）
+
+域名备案完成后，账号体系从「只能自助注册」补上运维侧能力：后台新增「用户账号」面板。
+
+| 能力 | 实现 | 关键约束 |
+|---|---|---|
+| 用户列表 | `GET /api/users`：用户名/ID 搜索、正常/已停用分页、每人资料体积、活跃会话数、惊喜数、到达照片数、登录方式 | 一次 JOIN 聚合，不做 N+1；**绝不返回** `pass_hash` / `pass_salt` |
+| 停用 / 恢复 | `PUT /api/users/:id/status` 写账号库 `user_admin`（`disabled_at` / `disabled_reason`）；账号服务每次鉴权与登录先查它 | 需要登录的接口返回 `403 ACCOUNT_DISABLED`；**刻意不删会话**，否则客户端只看到 401「登录过期」，说不出原因 |
+| 重置密码 | `PUT /api/users/:id/password`，`scrypt`(64) + 随机 salt，参数与 `account/server/auth.mjs` 完全一致 | 重置同时清掉该用户全部会话，旧密码立即失效 |
+| 删除账号 | `DELETE /api/users/:id` 级联清 `users/profiles/sessions/identities/place_photos/user_admin` | 用户埋下的**惊喜保留**（别人可能已找到，突然消失会让寻者困惑） |
+| 账号库不可用 | `USERS_UNAVAILABLE` 503 + 明确原因 | **绝不新建空库**；老库缺 `user_admin` 表时按同结构补建（纯增量） |
+
+**顺带修掉的真问题**：`deleteUserCascade` 之前只清 users/profiles/sessions，`identities` 与 `place_photos` 会变成孤儿行 ——
+同一个微信再登录会错误地落回已删除账号。三端现在统一处理级联清理。
+
+**验证**：
+- 后台单测 **119/119**（新增 users.test 11 项 + users-api.test 6 项）
+- 账号服务单测 **67/67**（新增 admin-disable.test 5 项：停用后会话失效、登录 403、恢复即生效、同名不可重注册、删号级联）
+- 本地起台账号服务 + 后台 + 模拟 nginx 前缀代理，浏览器实走：搜索 → 停用（含原因）→ 账号侧登录 403 → 恢复 → 重置密码（旧密码 401 / 新密码 200）→ 删除，面板计数与 toast 均正确
+- 线上 xqlounge.top 部署后实测：`/api/users/status` 返回 `available:true`、14 个用户可列；停用探测账号 → 登录 403 `ACCOUNT_DISABLED` → 恢复 → 登录 200 → 删除成功
+- 鸿蒙：tsc 0 error、**143/143** 测试、ArkTS 31 文件 0 error；三端补齐 `ACCOUNT_DISABLED` 文案
+
 ## 5. 风险与对策
 
 | 风险 | 影响 | 对策 |

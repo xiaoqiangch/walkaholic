@@ -1433,3 +1433,73 @@ textarea.input--hint { min-height: 40px; }
 }
 
 .surprise__actions { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 11px; }
+
+/* ---------- 用户账号管理 ---------- */
+
+.users__scroll {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--paper-2);
+}
+.users__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.users__table th {
+  text-align: left;
+  white-space: nowrap;
+  padding: 9px 12px;
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: .04em;
+  color: var(--ink-3);
+  border-bottom: 1px solid var(--line);
+  background: var(--paper-3);
+}
+.users__table td {
+  padding: 9px 12px;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-2);
+}
+.users__table tr:last-child td { border-bottom: 0; }
+.users__table tr.is-disabled td { background: rgba(210, 92, 58, .045); }
+.users__table tr.is-disabled .users__name { color: var(--ember); }
+
+.users__name {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--ink);
+}
+.users__id {
+  margin: 2px 0 0;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-3);
+  max-width: 210px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.users__num {
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+.users__ops {
+  white-space: nowrap;
+}
+.users__ops .btn { margin-right: 5px; }
+.users__ops .btn:last-child { margin-right: 0; }
+
+@media (max-width: 640px) {
+  .users__table { font-size: 11.5px; }
+  .users__table th, .users__table td { padding: 8px 9px; }
+}

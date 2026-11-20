@@ -84,3 +84,25 @@ Safari 默认阻止第三方 Cookie，所以 GitHub Pages + 自有域名的组�
 - 后台管理：部署脚本每次会生成一个随机密码并打印（只显示一次）。
   想固定密码：在服务器 `/etc/systemd/system/walkaholic-admin.service` 里改 `WA_ADMIN_PASSWORD`，然后 `systemctl daemon-reload && systemctl restart walkaholic-admin`。
 - 账号：普通用户自助注册，密码 PBKDF2/Scrypt 加盐哈希存储。
+
+## 用户管理（后台 → 用户账号）
+
+域名备案完成后，账号的运维动作都在后台做，不需要登服务器改库：
+
+```bash
+# 打开 https://xqlounge.top/admin/ → 顶部「用户账号」
+```
+
+| 动作 | 实际做了什么 | 对用户的影响 |
+|---|---|---|
+| 搜索 | 按用户名 / 用户 ID 模糊匹配 | — |
+| 停用 | 写账号库 `user_admin.disabled_at`（可填原因） | 该账号所有需要登录的接口返回 `403 ACCOUNT_DISABLED`，客户端提示「账号已被停用」；**数据保留** |
+| 恢复 | 清空 `disabled_at` | 立即能再登录，不需要重启任何服务 |
+| 重置密码 | `scrypt` 重写哈希 + 清掉该用户全部会话 | 旧密码立刻失效，所有设备需用新密码重新登录 |
+| 删除 | 级联清 `users / profiles / sessions / identities / place_photos / user_admin` | 不可恢复；他埋下的惊喜**保留**给寻者 |
+
+为什么停用不删会话：删了客户端只会拿到 401「登录已过期」，用户不知道是被停用。
+保留会话时账号服务每条鉴权都查 `user_admin`，能稳定返回 403 并给出原因。
+
+接口契约见 [admin/docs/CONTRACT.md](../admin/docs/CONTRACT.md) §4.12。
+

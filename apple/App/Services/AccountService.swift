@@ -352,6 +352,7 @@ final class AccountService {
             switch account.code {
             case "USERNAME_TAKEN": return "这个用户名已被注册"
             case "BAD_CREDENTIALS": return "用户名或密码不对"
+            case "ACCOUNT_DISABLED": return "这个账号已被停用，请联系管理员"
             case "UNAUTHENTICATED": return "登录已过期，请重新登录"
             case "TOO_MANY_ATTEMPTS": return "尝试太频繁，请稍后再试"
             case "WECHAT_NOT_CONFIGURED": return "服务端还没配置微信登录（缺 WECHAT_APPID / WECHAT_SECRET）"

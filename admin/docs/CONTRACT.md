@@ -394,3 +394,36 @@ body: { "address": "南京市鼓楼区金银街16号" }
 - 优先顺序：当前后台配置的高德 Key → 百度 Key → OpenStreetMap Nominatim；前一服务报错或无匹配时才回退。
 - 输入无效返回 400 `BAD_REQUEST`；服务不可用或未找到地址返回 422 `GEOCODE_FAILED`，包含明确错误，不伪造默认上海坐标。
 - 管理 UI 默认地址是南京市鼓楼区金银街16号；只有成功解析或经纬度显式手填后才可开始抓取。
+
+### 4.12 用户账号管理（读账号库）
+
+后台直连账号服务的 SQLite（与 §4.8 惊喜审核、§4.9 微信设置同一套做法），
+不把管理令牌交给前端。账号服务的库路径由 `WA_ACCOUNT_DB` / `BW_ACCOUNT_DB` 指定，
+缺省按 §4.8 的规则猜（`/var/lib/walkaholic/account/walkaholic-users.db` 等）。
+
+```
+GET  /api/users?filter=all|active|disabled&q=&limit=50&offset=0
+→ { "items": [ { "id", "username", "createdAt", "disabledAt", "disabledReason",
+                 "profileBytes", "profileUpdatedAt", "sessionCount",
+                 "surpriseCount", "photoCount", "providers": ["wechat"] } ],
+    "total": 3, "counts": { "all": 3, "active": 2, "disabled": 1 }, "limit": 50, "offset": 0 }
+
+GET    /api/users/status           → { "available": true, "dbPath": "…", "error": "" }
+GET    /api/users/:id              → 单个用户（字段同上）
+PUT    /api/users/:id/status       body { "disabled": true|false, "reason": "可选，≤200 字" }
+PUT    /api/users/:id/password     body { "password": "6–128 位" }
+DELETE /api/users/:id              → { "ok":true, "username", "surprisesKept": 2, "removed": {…} }
+```
+
+- **绝不返回** `pass_hash` / `pass_salt`；列表只给体积、条数、登录方式等统计字段。
+- 停用语义：写账号库的 `user_admin` 表（`disabled_at` / `disabled_reason`），
+  账号服务每次鉴权与登录都先查它 → 需要登录的接口返回 `403 ACCOUNT_DISABLED`。
+  **刻意不删会话**：删了客户端只会看到 401「登录已过期」，无法告知用户原因。
+- 重置密码：`scrypt`（keylen 64）+ 随机 salt，参数与 `account/server/auth.mjs` 完全一致；
+  重置同时清掉该用户全部会话，旧密码立即失效。
+- 删除：级联清 `users / profiles / sessions / identities / place_photos / user_admin`；
+  用户埋下的**惊喜保留**（别人可能已经找到，突然消失会让寻者困惑）。
+- 错误码：`USERS_UNAVAILABLE`（503，账号库不存在或不是账号库，**绝不新建空库**）、
+  `NOT_FOUND`（404）、`BAD_REQUEST`（400）。
+- `user_admin` 表由账号服务启动时建（`CREATE TABLE IF NOT EXISTS`）；后台对老库也会补建同结构表，
+  纯增量、不改动既有表。
