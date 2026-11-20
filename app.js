@@ -7,7 +7,7 @@
 
   var D = window.WA_DATA;
   var STORE_KEY = 'walkaholic:v1';
-  var APP_VERSION = 'v50';
+  var APP_VERSION = 'v52';
   var APP_BUILT_AT = '2026-11-09 14:10';
 
   var ROUTES = ['/home', '/setup', '/journey', '/reveal', '/cards', '/social', '/profile', '/debug',
@@ -2681,6 +2681,63 @@
     return list.slice(0, limit || 3);
   }
 
+  /* ============================================================
+     探索基金（金币）
+     - 登录后从 /api/wallet 拉取；未登录显示本地估算
+     - 失败静默（不阻塞主流程）
+     ============================================================ */
+  function loadWallet() {
+    var cfg = accountConfig();
+    var base = (cfg.baseUrl || '').replace(/\/$/, '');
+    if (!base || !cfg.user) {
+      state.wallet = null;
+      return Promise.resolve(null);
+    }
+    return fetch(base + '/api/wallet', { credentials: 'include', cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (!data || !data.wallet) { state.wallet = null; return null; }
+        state.wallet = {
+          coins: data.wallet.coins,
+          earnedToday: data.wallet.earnedToday,
+          dailyCap: data.wallet.dailyCap,
+          buriedToday: data.wallet.buriedToday,
+          dailyBuryLimit: data.wallet.dailyBuryLimit,
+          initialCoins: data.economy ? data.economy.initialCoins : 100,
+          buryReward: data.economy ? data.economy.buryReward : 45,
+          findBase: data.economy ? data.economy.findBaseReward : 15
+        };
+        if (currentRoute() === '/profile') render();
+        return state.wallet;
+      })
+      .catch(function () { state.wallet = null; return null; });
+  }
+
+  /** 金币卡（我的页，账号卡下方） */
+  function walletCardHTML() {
+    var w = state.wallet;
+    if (!w) {
+      return '<section class="wallet wallet--guest" aria-label="探索基金">' +
+        '<div class="wallet__head"><span class="wallet__icon" aria-hidden="true">🪙</span>' +
+        '<div><p class="wallet__title">探索基金</p>' +
+        '<p class="wallet__sub">注册即送 ' + 100 + ' 金币，登录后查看</p></div>' +
+        '<button type="button" class="wallet__cta" data-action="go-account">登录</button></div>' +
+        '</section>';
+    }
+    var pct = w.dailyCap > 0 ? Math.min(100, (w.earnedToday / w.dailyCap) * 100) : 0;
+    return '<section class="wallet" aria-label="探索基金">' +
+      '<div class="wallet__head">' +
+      '<span class="wallet__icon" aria-hidden="true">🪙</span>' +
+      '<div><p class="wallet__title"><b>' + w.coins + '</b> 金币</p>' +
+      '<p class="wallet__sub">今日已赚 ' + w.earnedToday + '/' + w.dailyCap + '</p></div>' +
+      '</div>' +
+      '<div class="wallet__bar"><div class="wallet__fill" style="width:' + pct.toFixed(1) + '%"></div></div>' +
+      '<p class="wallet__hint">埋下一个惊喜（免费）→ 被找到时得 ' + w.buryReward +
+      ' 金币；找到别人的得基础 ' + w.findBase + ' 金币 + 距离加成</p>' +
+      '<p class="wallet__meta">今日已埋 ' + w.buriedToday + '/' + w.dailyBuryLimit + ' 个</p>' +
+      '</section>';
+  }
+
   /** 从账号服务拉「附近别人埋的惊喜」。失败就静默跳过（只用本地的） */
   function loadNearbySurprises(lat, lon, radius) {
     var cfg = accountConfig();
@@ -3004,7 +3061,28 @@
     var points = territoryPoints();
     var stats = T.territoryOf(points);
     var rankInfo = T.rankFor(stats.areaKm2);
-    return { stats: stats, rank: rankInfo, points: points };
+    var fief = null;
+    if (window.BW_FIEF) {
+      fief = window.BW_FIEF.fiefNameOf(points, rankInfo.rank, stats);
+    }
+    return { stats: stats, rank: rankInfo, points: points, fief: fief };
+  }
+
+  /** 封号主标题：有采邑名时显示「幕府侯」，否则只显示爵位 */
+  function fiefTitleText(info) {
+    if (!info || !info.fief) return info && info.rank ? info.rank.rank.title : '白身';
+    return info.fief.title;
+  }
+
+  /** 副标题：有封号时显示爵位+释义，否则显示爵位释义 */
+  function fiefDescText(info) {
+    if (!info) return '';
+    var fief = info.fief;
+    var rank = info.rank.rank;
+    if (fief && fief.fief) {
+      return rank.title + ' · ' + rank.desc;
+    }
+    return rank.desc;
   }
 
   /** 疆域卡（我的页顶部，等级卡下方） */
@@ -3043,8 +3121,8 @@
       '<div class="territory__head">' +
       sealGlyph +
       '<div class="territory__title">' +
-      '<p class="territory__rank">' + esc(rankInfo.rank.title) + '</p>' +
-      '<p class="territory__desc">' + esc(rankInfo.rank.desc) + '</p>' +
+      '<p class="territory__rank">' + esc(fiefTitleText(info)) + '</p>' +
+      '<p class="territory__desc">' + esc(fiefDescText(info)) + '</p>' +
       '</div>' +
       '<div class="territory__actions">' +
       '<button type="button" class="territory__map" data-action="open-mymap" aria-label="查看我的城市地图">地图</button>' +
@@ -3098,15 +3176,19 @@
     ctx.fillText(rankInfo.rank.seal, 0, 4);
     ctx.restore();
 
-    // 标题
+    // 标题：封号（幕府侯），无封号则只写爵位
     ctx.textAlign = 'center';
     ctx.fillStyle = '#111827';
     ctx.font = 'bold 46px -apple-system, "PingFang SC", sans-serif';
-    ctx.fillText(rankInfo.rank.title, W / 2, 268);
+    var cardTitle = (info.fief && info.fief.fief) ? info.fief.title : rankInfo.rank.title;
+    ctx.fillText(cardTitle, W / 2, 268);
 
     ctx.fillStyle = '#6B7280';
     ctx.font = '22px -apple-system, "PingFang SC", sans-serif';
-    ctx.fillText(rankInfo.rank.desc, W / 2, 305);
+    var cardSub = (info.fief && info.fief.fief)
+      ? rankInfo.rank.title + ' · ' + rankInfo.rank.desc
+      : rankInfo.rank.desc;
+    ctx.fillText(cardSub, W / 2, 305);
 
     // 疆域图形
     var mapTop = 350;
@@ -3183,7 +3265,7 @@
     var info = territoryInfo();
     var rows = '<img class="sharecard__img" src="' + url + '" alt="我的疆域身份卡">' +
       '<p class="sharecard__hint">长按图片保存，或截图分享给朋友</p>';
-    dom.overlayRoot.innerHTML = modalShell(rows, '我的疆域 · ' + info.rank.rank.title);
+    dom.overlayRoot.innerHTML = modalShell(rows, '我的封号 · ' + fiefTitleText(info));
     dom.overlayRoot.hidden = false;
     requestAnimationFrame(function () { dom.overlayRoot.classList.add('is-open'); });
   }
@@ -3266,6 +3348,7 @@
       '</div>' +
       '</section>' +
       territoryCardHTML() +
+      walletCardHTML() +
       accountCard +
       '<div class="section-head"><h2>成就</h2><a href="#/achievements" style="font-size:10.5px;color:var(--ink-3);text-decoration:none" aria-label="查看全部成就">全部成就 ›</a></div>' +
       '<div class="strip">' + strip + '</div>' +
@@ -3369,15 +3452,16 @@
       '<section class="mymap__card">' +
       '<div class="mymap__head">' +
       '<span class="territory__seal" style="--rank-color:' + color + '">' + esc(rankInfo.rank.seal) + '</span>' +
-      '<div><p class="mymap__rank">' + esc(rankInfo.rank.title) + '</p>' +
-      '<p class="mymap__desc">' + esc(rankInfo.rank.desc) + '</p></div>' +
+      '<div><p class="mymap__rank">' + esc(fiefTitleText(info)) + '</p>' +
+      '<p class="mymap__desc">' + esc(fiefDescText(info)) + '</p></div>' +
       '</div>' +
       mapSvg +
       statsRow +
       '</section>' +
       (hasTerritory
         ? '<p class="mymap__note">' + esc(T.formatArea(stats.areaKm2)) + ' 的疆域由 ' + stats.hullPointCount +
-          ' 个边界点围成 · 再开新地点可以扩大范围</p>'
+          ' 个边界点围成 · 再开新地点可以扩大范围</p>' +
+          (info.fief && info.fief.fief ? '<p class="mymap__note mymap__basis">封号依据：' + esc(info.fief.basis) + '</p>' : '')
         : '<p class="mymap__note">至少 3 个真实地点才能围成一片疆域</p>') +
       '</div>';
   }
@@ -4211,6 +4295,7 @@
         break;
       case '/profile':
         html = profileHTML();
+        loadWallet();          // 进我的页时拉一次金币余额（登录后才有）
         break;
       case '/mymap':
         html = myMapHTML();

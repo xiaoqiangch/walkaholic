@@ -4025,3 +4025,92 @@ body[data-sheet="1"] .toast,
   line-height: 1.6;
   color: var(--ink-3, #9CA3AF);
 }
+.mymap__basis { opacity: .75; font-size: 11px; margin-top: 4px; }
+
+/* ============================================================
+   42. 探索基金（金币卡）
+   ============================================================ */
+
+.wallet {
+  margin: 12px 0 4px;
+  padding: 15px 16px;
+  border-radius: var(--radius-card);
+  border: 1px solid var(--line);
+  background: linear-gradient(150deg, #FFFDF6 0%, #FFFFFF 60%);
+}
+
+.wallet--guest { background: linear-gradient(150deg, #F8F9FF 0%, #FFFFFF 70%); }
+
+.wallet__head {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+.wallet__icon {
+  flex: none;
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(245, 158, 11, .12);
+  font-size: 20px;
+}
+
+.wallet__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.wallet__title b { font-size: 22px; font-weight: 750; letter-spacing: -.01em; }
+
+.wallet__sub {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: var(--ink-3, #9CA3AF);
+}
+
+.wallet__cta {
+  flex: none;
+  margin-left: auto;
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(91, 108, 255, .3);
+  background: rgba(91, 108, 255, .08);
+  color: var(--amber-deep);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.wallet__bar {
+  height: 5px;
+  margin: 12px 0 0;
+  border-radius: 999px;
+  background: rgba(17, 24, 39, .07);
+  overflow: hidden;
+}
+
+.wallet__fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--gold, #F59E0B);
+  transition: width .4s var(--ease, ease);
+}
+
+.wallet__hint {
+  margin: 10px 0 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--ink-2, #4B5563);
+}
+
+.wallet__meta {
+  margin: 6px 0 0;
+  font-size: 10.5px;
+  color: var(--ink-3, #9CA3AF);
+}
