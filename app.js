@@ -7,7 +7,7 @@
 
   var D = window.WA_DATA;
   var STORE_KEY = 'walkaholic:v1';
-  var APP_VERSION = 'v48';
+  var APP_VERSION = 'v49';
   var APP_BUILT_AT = '2026-11-09 14:10';
 
   var ROUTES = ['/home', '/setup', '/journey', '/reveal', '/cards', '/social', '/profile', '/debug',
@@ -2977,6 +2977,214 @@
       '</div>';
   }
 
+
+  /* ============================================================
+     疆域与爵位
+     - 只统计「真实地点」且有坐标的已开盒卡片（演示/内置地点无坐标，不计入）
+     - 疆域 = 这些点的凸包面积
+     ============================================================ */
+  function territoryPoints() {
+    var out = [];
+    (state.profile.cards || []).forEach(function (card) {
+      var place = placeOf(card.placeID);
+      if (!place || !place.coordinate) return;
+      if (!isRealSource(place.source)) return;   // 内置演示地点不算
+      out.push({
+        lat: place.coordinate.lat,
+        lon: (place.coordinate.lon !== undefined ? place.coordinate.lon : place.coordinate.lng),
+        name: place.name
+      });
+    });
+    return out;
+  }
+
+  function territoryInfo() {
+    var T = window.BW_TERRITORY;
+    if (!T) return null;
+    var points = territoryPoints();
+    var stats = T.territoryOf(points);
+    var rankInfo = T.rankFor(stats.areaKm2);
+    return { stats: stats, rank: rankInfo, points: points };
+  }
+
+  /** 疆域卡（我的页顶部，等级卡下方） */
+  function territoryCardHTML() {
+    var info = territoryInfo();
+    if (!info) return '';
+    var T = window.BW_TERRITORY;
+    var stats = info.stats;
+    var rankInfo = info.rank;
+    var enough = stats.pointCount >= 3;
+
+    var sealGlyph = '<span class="territory__seal" style="--rank-color:' + rankInfo.rank.color + '">' +
+      esc(rankInfo.rank.seal) + '</span>';
+
+    var body;
+    if (!enough) {
+      var need = 3 - stats.pointCount;
+      body = '<p class="territory__hint">再开 ' + need + ' 个盲盒就能围出你的第一块疆域</p>' +
+        '<p class="territory__sub">至少 3 个真实地点才能围成一片地</p>';
+    } else {
+      body = '<div class="territory__stats">' +
+        '<div><b>' + esc(T.formatArea(stats.areaKm2)) + '</b><span>疆域面积</span></div>' +
+        '<div><b>' + stats.pointCount + '</b><span>占领地点</span></div>' +
+        '<div><b>' + Math.round(stats.spanM) + '<i>m</i></b><span>最长跨度</span></div>' +
+        '</div>' +
+        '<div class="territory__bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' +
+          Math.round(rankInfo.progress * 100) + '">' +
+          '<div class="territory__fill" style="width:' + (rankInfo.progress * 100).toFixed(1) + '%;--rank-color:' + rankInfo.rank.color + '"></div>' +
+        '</div>' +
+        '<p class="territory__sub">' + (rankInfo.next
+          ? '再扩 ' + esc(T.formatArea(rankInfo.toNextKm2)) + ' 晋' + esc(rankInfo.next.title)
+          : '已是最高爵位 · 疆域无出其右') + '</p>';
+    }
+
+    return '<section class="territory" aria-label="我的疆域与爵位">' +
+      '<div class="territory__head">' +
+      sealGlyph +
+      '<div class="territory__title">' +
+      '<p class="territory__rank">' + esc(rankInfo.rank.title) + '</p>' +
+      '<p class="territory__desc">' + esc(rankInfo.rank.desc) + '</p>' +
+      '</div>' +
+      '<button type="button" class="territory__share" data-action="share-territory" aria-label="分享身份卡牌">分享</button>' +
+      '</div>' +
+      body +
+      '</section>';
+  }
+
+
+  /* ============================================================
+     疆域身份卡牌（canvas 生成，可保存 / 分享）
+     ============================================================ */
+  function renderTerritoryCard(scale) {
+    var info = territoryInfo();
+    if (!info) return null;
+    var T = window.BW_TERRITORY;
+    var stats = info.stats;
+    var rankInfo = info.rank;
+    var W = 720;
+    var H = 960;
+    var canvas = document.createElement('canvas');
+    canvas.width = W * (scale || 2);
+    canvas.height = H * (scale || 2);
+    var ctx = canvas.getContext('2d');
+    ctx.scale(scale || 2, scale || 2);
+
+    // 底色
+    var bg = ctx.createLinearGradient(0, 0, W, H);
+    bg.addColorStop(0, '#F3F5FB');
+    bg.addColorStop(1, '#E8ECFB');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+
+    // 爵位色带
+    ctx.fillStyle = rankInfo.rank.color;
+    ctx.fillRect(0, 0, W, 10);
+
+    // 印章
+    ctx.save();
+    ctx.translate(W / 2, 150);
+    ctx.beginPath();
+    ctx.arc(0, 0, 62, 0, Math.PI * 2);
+    ctx.fillStyle = rankInfo.rank.color;
+    ctx.fill();
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = 'bold 64px -apple-system, "PingFang SC", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(rankInfo.rank.seal, 0, 4);
+    ctx.restore();
+
+    // 标题
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#111827';
+    ctx.font = 'bold 46px -apple-system, "PingFang SC", sans-serif';
+    ctx.fillText(rankInfo.rank.title, W / 2, 268);
+
+    ctx.fillStyle = '#6B7280';
+    ctx.font = '22px -apple-system, "PingFang SC", sans-serif';
+    ctx.fillText(rankInfo.rank.desc, W / 2, 305);
+
+    // 疆域图形
+    var mapTop = 350;
+    var mapSize = 340;
+    if (stats.hull && stats.hull.length >= 3) {
+      var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      stats.hull.forEach(function (pt) {
+        if (pt.x < minX) minX = pt.x;
+        if (pt.x > maxX) maxX = pt.x;
+        if (pt.y < minY) minY = pt.y;
+        if (pt.y > maxY) maxY = pt.y;
+      });
+      var spanX = Math.max(1, maxX - minX);
+      var spanY = Math.max(1, maxY - minY);
+      var scaleFit = Math.min((mapSize - 40) / spanX, (mapSize - 40) / spanY);
+      var offX = W / 2 - (minX + maxX) / 2 * scaleFit;
+      var offY = mapTop + mapSize / 2 + (minY + maxY) / 2 * scaleFit;
+
+      ctx.beginPath();
+      stats.hull.forEach(function (pt, i) {
+        var px = offX + pt.x * scaleFit;
+        var py = offY - pt.y * scaleFit;
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      });
+      ctx.closePath();
+      ctx.fillStyle = rankInfo.rank.color + '33';
+      ctx.fill();
+      ctx.strokeStyle = rankInfo.rank.color;
+      ctx.lineWidth = 3;
+      ctx.stroke();
+
+      // 顶点
+      stats.hull.forEach(function (pt) {
+        ctx.beginPath();
+        ctx.arc(offX + pt.x * scaleFit, offY - pt.y * scaleFit, 5, 0, Math.PI * 2);
+        ctx.fillStyle = rankInfo.rank.color;
+        ctx.fill();
+      });
+    } else {
+      ctx.fillStyle = '#9CA3AF';
+      ctx.font = '22px -apple-system, "PingFang SC", sans-serif';
+      ctx.fillText('再开 3 个盲盒即可围出疆域', W / 2, mapTop + mapSize / 2);
+    }
+
+    // 数据行
+    var statY = mapTop + mapSize + 40;
+    var cols = [
+      { v: T.formatArea(stats.areaKm2), l: '疆域面积' },
+      { v: String(stats.pointCount), l: '占领地点' },
+      { v: Math.round(stats.spanM) + 'm', l: '最长跨度' }
+    ];
+    cols.forEach(function (c, i) {
+      var cx = W * (i + 0.5) / 3;
+      ctx.fillStyle = '#111827';
+      ctx.font = 'bold 40px -apple-system, "PingFang SC", sans-serif';
+      ctx.fillText(c.v, cx, statY);
+      ctx.fillStyle = '#9CA3AF';
+      ctx.font = '20px -apple-system, "PingFang SC", sans-serif';
+      ctx.fillText(c.l, cx, statY + 34);
+    });
+
+    // 页脚
+    ctx.fillStyle = '#9CA3AF';
+    ctx.font = '20px -apple-system, "PingFang SC", sans-serif';
+    ctx.fillText('步谜 StepRiddle · ' + new Date().toLocaleDateString('zh-CN'), W / 2, H - 56);
+
+    return canvas;
+  }
+
+  function openTerritoryShare() {
+    var canvas = renderTerritoryCard(2);
+    if (!canvas) { showToast('还画不出疆域卡', '🗺️'); return; }
+    var url = canvas.toDataURL('image/png');
+    var info = territoryInfo();
+    var rows = '<img class="sharecard__img" src="' + url + '" alt="我的疆域身份卡">' +
+      '<p class="sharecard__hint">长按图片保存，或截图分享给朋友</p>';
+    dom.overlayRoot.innerHTML = modalShell(rows, '我的疆域 · ' + info.rank.rank.title);
+    dom.overlayRoot.hidden = false;
+    requestAnimationFrame(function () { dom.overlayRoot.classList.add('is-open'); });
+  }
+
   function profileHTML() {
     var profile = state.profile;
     var level = levelInfo();
@@ -3054,6 +3262,7 @@
       '<div><b>' + profile.streakDays + '</b><span>连续天数</span></div>' +
       '</div>' +
       '</section>' +
+      territoryCardHTML() +
       accountCard +
       '<div class="section-head"><h2>成就</h2><a href="#/achievements" style="font-size:10.5px;color:var(--ink-3);text-decoration:none" aria-label="查看全部成就">全部成就 ›</a></div>' +
       '<div class="strip">' + strip + '</div>' +
@@ -4461,6 +4670,9 @@
         showToast('正在重新获取定位…', '📡', { duration: 1600 });
         break;
       }
+      case 'share-territory':
+        openTerritoryShare();
+        break;
       case 'go-account':
         navigate('/account');
         break;
