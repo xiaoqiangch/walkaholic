@@ -7,7 +7,7 @@
 
   var D = window.WA_DATA;
   var STORE_KEY = 'walkaholic:v1';
-  var APP_VERSION = 'v52';
+  var APP_VERSION = 'v53';
   var APP_BUILT_AT = '2026-11-09 14:10';
 
   var ROUTES = ['/home', '/setup', '/journey', '/reveal', '/cards', '/social', '/profile', '/debug',
@@ -956,6 +956,12 @@
       return;
     }
     if (reveal.collected) return;
+
+    // 真实地点必须先完成「拍照验证」（照片带 GPS 且在目的地附近）
+    var place = placeOf(reveal.placeID);
+    var needsVerify = place && place.coordinate && !reveal.photoGps && !reveal.verified;
+    if (needsVerify) { startPhotoVerify(); return; }
+
     var cardEl = $('.reveal-card');
     var animate = !reducedMotion() && cardEl;
     if (animate) cardEl.classList.add('is-flying');
@@ -964,6 +970,122 @@
     } else {
       doCollect();
     }
+  }
+
+
+  /* ============================================================
+     拍照验证：探索一个地点 = 在目的地附近拍一张**带 GPS 的照片**
+     - 照片 EXIF 里的坐标与目的地相距 ≤ 120m 才算到达
+     - 照片没有 GPS 时，明确告诉用户去开相机的"位置信息"，而不是静默失败
+     ============================================================ */
+  var PHOTO_VERIFY_RADIUS = 120;
+
+  /** 让用户拍/选一张照片，并立即解析其 GPS 做校验 */
+  function captureWithGps(target, onPass, onFail) {
+    var input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.setAttribute('capture', 'environment');
+    input.style.position = 'fixed';
+    input.style.left = '-9999px';
+    document.body.appendChild(input);
+
+    input.addEventListener('change', function () {
+      var file = input.files && input.files[0];
+      if (document.body.contains(input)) document.body.removeChild(input);
+      if (!file) { if (onFail) onFail({ reason: 'CANCELLED' }); return; }
+
+      var reader = new FileReader();
+      reader.onload = function () {
+        var buffer = reader.result;
+        // 关键：**在压缩之前**读 EXIF。canvas 重编码会丢掉 EXIF。
+        var gps = window.BW_EXIF
+          ? window.BW_EXIF.readGpsFromBuffer(buffer)
+          : { ok: false, reason: 'NO_EXIF', detail: 'EXIF 模块未加载' };
+
+        if (!gps.ok) {
+          if (onFail) onFail(gps);
+          return;
+        }
+        var verdict = window.BW_EXIF.verifyPhotoAt(target, gps, PHOTO_VERIFY_RADIUS);
+        if (!verdict.ok) {
+          if (onFail) onFail({ reason: verdict.reason, detail: verdict.detail, distanceMeters: verdict.distanceMeters });
+          return;
+        }
+        // 通过：再压缩成可存储的 dataURL
+        compressImageToDataURL(file, function (dataURL) {
+          if (!dataURL) { if (onFail) onFail({ reason: 'NOT_IMAGE' }); return; }
+          if (onPass) onPass({ dataURL: dataURL, photoGps: gps, distanceMeters: verdict.distanceMeters });
+        });
+      };
+      reader.onerror = function () { if (onFail) onFail({ reason: 'NOT_IMAGE' }); };
+      reader.readAsArrayBuffer(file);
+    });
+    input.click();
+  }
+
+  /** 失败提示：区分「没开相机定位」和「离太远」 */
+  function photoVerifyFailText(fail) {
+    var E = window.BW_EXIF;
+    if (!fail) return { title: '拍照失败', howto: '再试一次' };
+    if (fail.reason === 'CANCELLED') return null;
+    if (fail.reason === 'TOO_FAR') {
+      return {
+        title: '这张照片拍得太远了',
+        howto: '照片拍摄点离目的地 ' + Math.round(fail.distanceMeters || 0) +
+          ' 米，需要在 ' + PHOTO_VERIFY_RADIUS + ' 米内拍摄。走近一点再拍一张。'
+      };
+    }
+    var title = (E && E.REASON_TEXT[fail.reason]) || (fail.detail || '照片没有位置信息');
+    var howto = (E && E.REASON_HOWTO[fail.reason]) || '请重新用手机相机拍一张';
+    return { title: title, howto: howto };
+  }
+
+  /** 拍照验证弹层（到达揭晓页后，先完成这一步才能收集卡片） */
+  function photoVerifySheetHTML() {
+    var pending = state.pendingPhotoVerify;
+    if (!pending) return '';
+    var lastFail = pending.lastFail;
+    var failBlock = lastFail
+      ? '<div class="photoverify__fail" role="alert">' +
+        '<p class="photoverify__fail-title">⚠️ ' + esc(lastFail.title) + '</p>' +
+        '<p class="photoverify__fail-howto">' + esc(lastFail.howto) + '</p>' +
+        '</div>'
+      : '';
+    return '<div class="photoverify" role="dialog" aria-label="拍照验证">' +
+      '<div class="photoverify__card">' +
+      '<p class="photoverify__title">到达了？拍一张照片</p>' +
+      '<p class="photoverify__desc">照片里的位置要和这里一致（' + PHOTO_VERIFY_RADIUS +
+      ' 米内），这样才算你真的来过。</p>' +
+      failBlock +
+      '<button type="button" class="btn btn--primary btn--block" data-action="photo-verify-capture">' +
+      '📷 打开相机拍一张</button>' +
+      '<p class="photoverify__tip">如果提示「没有位置信息」，请到 手机设置 → 相机 → 打开「位置信息 / 地点标记」，再重新拍。</p>' +
+      '</div></div>';
+  }
+
+  /** 开始拍照验证流程 */
+  function startPhotoVerify() {
+    var reveal = state.reveal;
+    var place = reveal ? placeOf(reveal.placeID) : null;
+    if (!place || !place.coordinate) {
+      // 演示地点没有真实坐标，不需要验证
+      state.pendingPhotoVerify = null;
+      return doCollect();
+    }
+    state.pendingPhotoVerify = { placeId: place.id, lastFail: null };
+    render();
+  }
+
+  /** 拍照验证成功 → 记录并收集 */
+  function onPhotoVerified(result) {
+    var reveal = state.reveal;
+    if (!reveal) return;
+    reveal.photoGps = result.photoGps;
+    reveal.photoDistanceMeters = result.distanceMeters;
+    reveal.photoData = result.dataURL;
+    state.pendingPhotoVerify = null;
+    doCollect();
   }
 
   function doCollect() {
@@ -986,7 +1108,10 @@
         placeID: place.id,
         serial: reveal.serial,
         collectedAt: now,
-        taskDone: false
+        taskDone: false,
+        // 到达验证凭证：照片里的 GPS + 实测距离（用于事后审计 / 疆域计算）
+        photoGps: reveal.photoGps || null,
+        photoDistance: reveal.photoDistanceMeters !== undefined ? reveal.photoDistanceMeters : null
       });
     }
 
@@ -3060,7 +3185,7 @@
     if (!T) return null;
     var points = territoryPoints();
     var stats = T.territoryOf(points);
-    var rankInfo = T.rankFor(stats.areaKm2);
+    var rankInfo = T.rankFor(stats.areaKm2, stats.pointCount);
     var fief = null;
     if (window.BW_FIEF) {
       fief = window.BW_FIEF.fiefNameOf(points, rankInfo.rank, stats);
@@ -3112,9 +3237,13 @@
           Math.round(rankInfo.progress * 100) + '">' +
           '<div class="territory__fill" style="width:' + (rankInfo.progress * 100).toFixed(1) + '%;--rank-color:' + rankInfo.rank.color + '"></div>' +
         '</div>' +
-        '<p class="territory__sub">' + (rankInfo.next
-          ? '再扩 ' + esc(T.formatArea(rankInfo.toNextKm2)) + ' 晋' + esc(rankInfo.next.title)
-          : '已是最高爵位 · 疆域无出其右') + '</p>';
+        '<p class="territory__sub">' + (rankInfo.capped
+          ? '边界够大了，但只有 ' + stats.pointCount + ' 个探索点 · 再探索 ' + rankInfo.pointsNeeded +
+            ' 个点才能晋' + esc(rankInfo.blockedBy.title)
+          : (rankInfo.next
+            ? '再扩 ' + esc(T.formatArea(rankInfo.toNextKm2)) + ' 晋' + esc(rankInfo.next.title) +
+              (rankInfo.pointsNeeded > 0 ? '（还需 ' + rankInfo.pointsNeeded + ' 个探索点）' : '')
+            : '已是最高爵位 · 疆域无出其右')) + '</p>';
     }
 
     return '<section class="territory" aria-label="我的疆域与爵位">' +
@@ -3461,7 +3590,10 @@
       (hasTerritory
         ? '<p class="mymap__note">' + esc(T.formatArea(stats.areaKm2)) + ' 的疆域由 ' + stats.hullPointCount +
           ' 个边界点围成 · 再开新地点可以扩大范围</p>' +
-          (info.fief && info.fief.fief ? '<p class="mymap__note mymap__basis">封号依据：' + esc(info.fief.basis) + '</p>' : '')
+          (info.fief && info.fief.fief ? '<p class="mymap__note mymap__basis">封号依据：' + esc(info.fief.basis) + '</p>' : '') +
+          (info.rank.capped ? '<p class="mymap__note mymap__basis">⚠️ ' + esc(T.formatArea(stats.areaKm2)) +
+            ' 的边界只有 ' + stats.pointCount + ' 个探索点支撑，因此只授予「' + esc(info.rank.rank.title) +
+            '」。再探索 ' + info.rank.pointsNeeded + ' 个点可晋「' + esc(info.rank.blockedBy.title) + '」</p>' : '')
         : '<p class="mymap__note">至少 3 个真实地点才能围成一片疆域</p>') +
       '</div>';
   }
@@ -4337,7 +4469,7 @@
       html = debugHTML();
     }
 
-    dom.main.innerHTML = html;
+    dom.main.innerHTML = html + (state.pendingPhotoVerify ? photoVerifySheetHTML() : '');
     dom.main.scrollTop = 0;
 
     if (state.updatePending && route === '/home' && !window.__bwReloading) {
@@ -4874,6 +5006,22 @@
       case 'back-profile':
         navigate('/profile');
         break;
+      case 'photo-verify-capture': {
+        var reveal0 = state.reveal;
+        var place0 = reveal0 ? placeOf(reveal0.placeID) : null;
+        if (!place0 || !place0.coordinate) { state.pendingPhotoVerify = null; doCollect(); break; }
+        captureWithGps(place0.coordinate, function (result) {
+          onPhotoVerified(result);
+        }, function (fail) {
+          var msg = photoVerifyFailText(fail);
+          if (!msg) return;   // 用户取消
+          if (state.pendingPhotoVerify) state.pendingPhotoVerify.lastFail = msg;
+          else state.pendingPhotoVerify = { placeId: place0.id, lastFail: msg };
+          render();
+          showToast(msg.title, '⚠️', { duration: 3200 });
+        });
+        break;
+      }
       case 'share-territory':
         openTerritoryShare();
         break;
