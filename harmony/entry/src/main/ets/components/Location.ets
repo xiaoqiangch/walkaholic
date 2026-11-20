@@ -16,6 +16,13 @@ import { GeoPoint } from '../core/types';
 import { bearing, distance } from '../core/geo';
 import { MAX_WALKING_FIX_ACCURACY_METERS, WalkingFixFilter } from '../core/location';
 
+/** 兜底轮询间隔：1.5 秒（原来 5 秒，用户感觉「导航半天不动」） */
+const POLL_INTERVAL_MS: number = 1500;
+/** 4 秒内有过真实交付就跳过这次轮询 */
+const POLL_SKIP_MS: number = 4000;
+/** 界面最多允许冻结这么久（毫秒），超时强制推一次当前点 */
+const STALE_UI_MS: number = 2500;
+
 const LOCATION_PERMISSIONS: Permissions[] = [
   'ohos.permission.APPROXIMATELY_LOCATION',
   'ohos.permission.LOCATION'
@@ -78,7 +85,10 @@ export function getCurrentLocationOnce(timeoutMs: number): Promise<GeoPoint> {
  * 返回的句柄在组件 aboutToDisappear 里必须 stop()。
  */
 /**
- * 罗盘：@ohos.sensor 的 ORIENTATION（alpha 绕 z 轴逆时针，0=北）。
+ * 罗盘：@ohos.sensor 的 ORIENTATION。
+ * alpha 语义与 Android 方位角一致：0 = 正北，**顺时针递增**（东 = 90）。
+ * 所以朝向（顺时针从北算）= alpha 本身，不要再做 360-alpha ——
+ * 之前写成 360-alpha 会让「人向左转、地图向右转」，方向完全相反。
  * 地图「朝上」= 设备朝向，这样用户转身时地图跟着转。
  * ⚠️ 待 DevEco 验证：sensor.on(sensor.SensorId.ORIENTATION) 的 API 12 写法。
  */
@@ -97,7 +107,7 @@ export class CompassWatcher {
       if (typeof alpha !== 'number' || isNaN(alpha)) {
         return;
       }
-      const raw: number = ((360 - alpha) % 360 + 360) % 360;
+      const raw: number = ((alpha % 360) + 360) % 360;
       if (this.heading < 0) {
         this.heading = raw;
         this.emitted = raw;
@@ -164,8 +174,10 @@ export class GeoWatcher {
   private onLocation: (point: GeoPoint, accuracyMeters: number) => void;
   private fixFilter: WalkingFixFilter = new WalkingFixFilter();
 
-  /** 最近一次定位成功的时间戳（ms）；0 表示还没拿到过 */
+  /** 最近一次「收到定位」的时间戳（ms）；用于判断订阅是否还活着 */
   private lastFixAt: number = 0;
+  /** 最近一次「真正推给 UI」的时间戳（ms）；用于保证界面不会长时间冻结 */
+  private lastDeliveredAt: number = 0;
   /** 由最近两次定位点推算出的移动方向（度，0=北）；负值表示无法判断 */
   private moveHeading: number = -1;
   /** 上一次用于算方向的定位点 */
@@ -229,17 +241,28 @@ export class GeoWatcher {
       return;
     }
     const now: number = Date.now();
-    this.lastFixAt = now;
     const point: GeoPoint = {
       latitude: location.latitude,
       longitude: location.longitude
     };
     const filtered: GeoPoint | undefined = this.fixFilter.accept(point, accuracy, now);
-    if (filtered === undefined) {
+    if (filtered !== undefined) {
+      this.markDelivered(filtered, accuracy, now);
       return;
     }
-    this.updateMoveHeading(filtered);
-    this.onLocation(filtered, accuracy);
+    // 过滤器把它丢了（位移 < 3m 的抖动）——但界面不能因此长时间不更新：
+    // 超过 STALE_UI_MS 没有真正刷新，就把当前点直接推给 UI（不再等过滤器攒够位移）。
+    if (now - this.lastDeliveredAt >= STALE_UI_MS) {
+      this.markDelivered(point, accuracy, now);
+    }
+  }
+
+  /** 真正交付一次定位：刷新时间戳 + 通知 UI */
+  private markDelivered(point: GeoPoint, accuracyMeters: number, at: number): void {
+    this.lastFixAt = at;
+    this.lastDeliveredAt = at;
+    this.updateMoveHeading(point);
+    this.onLocation(point, accuracyMeters);
   }
 
   /** 用相邻两次定位点推算移动方向，写入 moveHeading */
@@ -264,8 +287,8 @@ export class GeoWatcher {
       if (!this.active) {
         return;
       }
-      // 已经有新鲜定位就不再打扰
-      if (this.lastFixAt > 0 && Date.now() - this.lastFixAt < 8000) {
+      // 已经有新鲜交付就不再打扰（4 秒内刷新过就跳过；原来是 8 秒，太慢）
+      if (this.lastDeliveredAt > 0 && Date.now() - this.lastDeliveredAt < POLL_SKIP_MS) {
         return;
       }
       try {
@@ -285,6 +308,6 @@ export class GeoWatcher {
       } catch (err) {
         const error = err as BusinessError;
       }
-    }, 5000);
+    }, POLL_INTERVAL_MS);
   }
 }

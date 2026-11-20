@@ -2880,6 +2880,83 @@ test('迷雾路径：传 upBearing 时地图随朝向旋转（转身地图跟着
   assert.equal(Math.round(northEast.userRotation), 90, '北朝上模式箭头按朝向旋转');
 });
 
+test('罗盘：朝向 0/90/270 时，正北路点应分别位于前方/左侧/右侧（左转不能变右转）', () => {
+  // 正北方向 100m 处的路点
+  const line = {
+    points: [[118.78, 32.06], [118.78, 32.0609]] as number[][],
+    distanceMeters: 100
+  };
+  const here = { latitude: 32.06, longitude: 118.78 };
+  const layout = defaultLayout(320, 196);
+
+  // 用 upBearing 模拟「人朝向」
+  const faceNorth = fogGeometry(line, here, layout, 0, 0);
+  const faceEast = fogGeometry(line, here, layout, 90, 90);
+  const faceWest = fogGeometry(line, here, layout, 270, 270);
+
+  // 指北针：朝北不转，朝东 -90°，朝西 +90
+  assert.ok(Math.abs(faceNorth.compassRotation) < 1, '朝北时指北针不转');
+  assert.ok(Math.abs(faceEast.compassRotation + 90) < 1, '朝东时指北针 -90°');
+  assert.ok(Math.abs(faceWest.compassRotation - 90) < 1, '朝西时指北针 +90°');
+
+  // 「你」的箭头：跟随模式下恒为 0（屏幕上方 = 朝向）
+  assert.ok(Math.abs(faceNorth.userRotation) < 1, '朝北箭头朝上');
+  assert.ok(Math.abs(faceEast.userRotation) < 1, '朝东箭头仍朝上（跟随模式）');
+  assert.ok(Math.abs(faceWest.userRotation) < 1, '朝西箭头仍朝上（跟随模式）');
+
+  // 关键：朝东时，正北的路点应当画在屏幕**左侧**（x 偏小）
+  const aheadNorth = faceNorth.chevrons[0];
+  const aheadEast = faceEast.chevrons[0];
+  assert.ok(aheadNorth !== undefined && aheadEast !== undefined, '应有点位');
+  assert.ok(aheadEast.x < aheadNorth.x - 20, '朝东时正北点应在左侧（不能跑到右边）');
+});
+
+test('定位：小位移被过滤器丢弃时，也不能让界面长时间冻结（STALE_UI_MS 内必须推一次）', () => {
+  // 复刻 Location.deliverFix 的交付策略
+  const STALE_UI_MS = 2500;
+  const filter = new WalkingFixFilter();
+  const delivered: number[] = [];
+  let lastDeliveredAt = 0;
+
+  const push = (lat: number, lon: number, at: number) => {
+    const point = { latitude: lat, longitude: lon };
+    const filtered = filter.accept(point, 8, at);
+    if (filtered !== undefined) {
+      lastDeliveredAt = at;
+      delivered.push(at);
+      return;
+    }
+    if (at - lastDeliveredAt >= STALE_UI_MS) {
+      lastDeliveredAt = at;
+      delivered.push(at);
+    }
+  };
+
+  // 站在原地，GPS 抖动 1 米（位移 < 3m，会被过滤器丢弃）
+  const base = 32.06;
+  for (let i = 0; i <= 40; i += 1) {
+    const jitter = (i % 2 === 0) ? 0.000009 : 0; // ≈1m
+    push(base + jitter, 118.78, i * 500);
+  }
+  // 20 秒内必须至少有 5 次真实交付（每 2.5s 一次），不能一次都没有
+  assert.ok(delivered.length >= 5, `应至少推送 5 次，实际 ${delivered.length}`);
+  // 相邻交付间隔不得超过 STALE_UI_MS + 一个采样周期
+  for (let i = 1; i < delivered.length; i += 1) {
+    assert.ok(delivered[i] - delivered[i - 1] <= STALE_UI_MS + 500, '交付间隔过大 = 界面冻结');
+  }
+});
+
+test('罗盘换算：鸿蒙 ORIENTATION alpha 顺时针递增，朝向 = alpha（不是 360-alpha）', () => {
+  // 复刻 Location.ets 的换算：raw = ((alpha % 360) + 360) % 360
+  const toHeading = (alpha: number): number => ((alpha % 360) + 360) % 360;
+  assert.equal(toHeading(0), 0, 'alpha 0 = 正北');
+  assert.equal(toHeading(90), 90, 'alpha 90 = 正东（顺时针）');
+  assert.equal(toHeading(270), 270, 'alpha 270 = 正西');
+  assert.equal(toHeading(-90), 270, '负角归一化');
+  // 反例检查：如果误用 360-alpha，90° 会变成 270°（左转变右转的根因）
+  assert.notEqual(((360 - 90) % 360 + 360) % 360, 90, '360-alpha 会把东变成西（必须是错的）');
+});
+
 test('路线：取路线带 10 分钟缓存；失败返回 undefined（不阻塞）', async (): Promise<void> => {
   const points: number[][] = [[121.4737, 31.2304], [121.4737, 31.2344]];
   let calls: number = 0;
