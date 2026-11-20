@@ -21,6 +21,7 @@ bash scripts/start-admin.sh
 | **分析判断** | 大模型评估「适不适合做盲盒目的地」（可达性/安全/独特/保密），给出 verdict |
 | **导出上架** | 审核通过的点导出成 `prototype/web/pois.json`，App 优先使用 |
 | **统一审核** | 主列表与详情同时管理地图 POI 和用户惊喜，明确区分 `curated` / `user` 类型；各自状态、存储和删除路径互不混用 |
+| **用户账号** | 直连账号库管理用户：搜索 / 停用 / 恢复 / 重置密码 / 删除账号（见 [docs/CONTRACT.md](docs/CONTRACT.md) §4.12） |
 
 ## 数据流
 

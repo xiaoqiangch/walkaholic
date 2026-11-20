@@ -19,7 +19,7 @@ struct BoxFailureView: View {
     var diagnostic: String? = nil
     var onRetryLocation: (() -> Void)? = nil
     var onOpenSettings: (() -> Void)? = nil
-    /// 这一次是走路还是远程漫游：文案必须说实话，别把「10 公里外没找到」说成「附近没有」
+    /// 这一次是走路还是远程漫游：文案必须准确描述对应距离范围
     var scope: ExploreScope = .walk
 
     private var reasonText: String {
@@ -32,7 +32,7 @@ struct BoxFailureView: View {
             return "现在还没有拿到你的真实位置，没法找附近可以走到的真实地点"
         default:
             return scope == .roam
-                ? "10 公里外的环带里暂时没有搜到适合走的地点"
+                ? "5–15 公里的环带里暂时没有搜到适合走的地点"
                 : "这一带暂时没有适合走过去的真实地点"
         }
     }

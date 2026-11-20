@@ -318,10 +318,19 @@ export function createServer(options = {}) {
     const token = sessionTokenFromRequest(req);
     const user = token === undefined ? null : store.findUserByToken(token, now());
     if (!user) throw new ApiError('未登录或会话已过期', 'UNAUTHENTICATED', 401);
+    // 后台停用的账号：会话可能还在（停用刻意不删会话），这里兜住，
+    // 让每条需要登录的接口都稳定返回 403，客户端才能如实提示「账号已被停用」。
+    if (store.isUserDisabled(user.id)) {
+      throw new ApiError('这个账号已被停用，请联系管理员', 'ACCOUNT_DISABLED', 403);
+    }
     return { user: user, token: token };
   }
 
   function createLoginResponse(req, res, user) {
+    // 登录类接口（密码 / 短信 / 微信 / Apple）都走这里：停用的账号不发新会话
+    if (store.isUserDisabled(user.id)) {
+      throw new ApiError('这个账号已被停用，请联系管理员', 'ACCOUNT_DISABLED', 403);
+    }
     const token = generateSessionToken();
     const createdAt = now();
     store.createSession(token, user.id, createdAt, createdAt + SESSION_TTL_MS);

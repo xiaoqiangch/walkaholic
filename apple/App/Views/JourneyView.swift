@@ -48,6 +48,8 @@ struct JourneyView: View {
     /// 步行路线（迷雾路径的形状来源；Valhalla）
     @State private var route: WalkingRoute?
     @State private var routeTarget: GeoPoint?
+    @State private var routeRequestOrigin: GeoPoint?
+    @State private var routeRequestedAt = Date.distantPast
     /// 用户主动选择「用演示模式继续」
     @State private var choseDemo = false
     /// 等太久没定位 → 先允许演示
@@ -56,6 +58,9 @@ struct JourneyView: View {
     @State private var canAdoptTarget = false
     /// 上次写入 store 的剩余距离（避免朝向变化时重复推进业务状态）
     @State private var lastSentRemaining: Double?
+    /// Arrival needs two distinct, accurate GPS fixes to avoid a single noisy fix revealing the place.
+    @State private var arrivalFixCount = 0
+    @State private var lastArrivalFixTimestamp: Date?
     /// 是否已经做过「首个定位点合理性检查」（目的地是否离当前位置离谱地远）
     @State private var didValidateFirstFix = false
     /// 定位状态的细节文案（信号弱 / 定位失败等）
@@ -655,16 +660,30 @@ struct JourneyView: View {
         }
     }
 
-    /// 拿到真实目的地后拉一次步行路线；失败不影响旅程（只显示「正在规划路径」）
+    /// 拿到真实目的地后拉一次步行路线；失败不影响旅程（只显示「正在规划路径」）。
+    /// 当前定位明显偏离已有路线时也会重算。
     private func loadRouteIfNeeded() {
         // 开车段不规划步行路线：20 公里的 pedestrian 路线既慢又会把终点形状拼出来
         guard !isDriveSegment else { return }
+        guard locationMode == .demo || lastReading?.origin != nil else { return }
         guard let target = store.session?.target, let here = currentPoint else { return }
-        if routeTarget == target, route != nil { return }
+        if routeTarget == target {
+            if let route {
+                let progress = RouteMath.progress(route: route, here: here)
+                let accuracy = lastReading?.horizontalAccuracy ?? 0
+                if abs(progress.lateral) <= max(45, accuracy * 1.5) { return }
+            } else if Date().timeIntervalSince(routeRequestedAt) < 20 {
+                return
+            }
+            if Date().timeIntervalSince(routeRequestedAt) < 12 { return }
+        }
         routeTarget = target
+        routeRequestOrigin = here
+        routeRequestedAt = Date()
+        route = nil
         Task { @MainActor in
             let fetched = await RouteService.shared.walkingRoute(from: here, to: target)
-            guard routeTarget == target else { return }
+            guard routeTarget == target, routeRequestOrigin == here else { return }
             route = fetched
             // 截图走查：`WA_START_AT=<米>` 把模拟定位沿路线前移，用来核对转向提示 / 已走进度
             if let fetched,
@@ -693,6 +712,27 @@ struct JourneyView: View {
                 }
             }
         }
+    }
+
+    /// The primary direction arrow follows the next road segment when route-matched,
+    /// otherwise it explicitly falls back to the straight bearing to the destination.
+    private func routeBearingForGuidance() -> Double? {
+        guard let route, let here = currentPoint else { return nil }
+        let progress = RouteMath.progress(route: route, here: here)
+        let accuracy = lastReading?.horizontalAccuracy ?? 0
+        guard abs(progress.lateral) <= max(45, accuracy * 1.5) else { return nil }
+        return progress.bearing
+    }
+
+    private func guidanceBearing(session: QuestSession) -> Double? {
+        routeBearingForGuidance() ?? session.currentBearing
+    }
+
+    /// 距离下一条线索还差多少米（没有未解锁线索时 nil）
+    private func nextClueGapMeters(in session: QuestSession) -> Int? {
+        guard session.unlockedHintCount < QuestSession.hintThresholds.count else { return nil }
+        let threshold = QuestSession.hintThresholds[session.unlockedHintCount]
+        return max(0, session.remainingMeters - threshold)
     }
 
     /// 这一趟是不是「远程漫游」：优先看会话自己记的范围（抽盒时选定），
@@ -875,9 +915,15 @@ struct JourneyView: View {
                     .font(WATheme.body(14))
                     .foregroundStyle(WATheme.ink2)
             } else {
-                Text(session.compassCopy)
+                Text(directionDescription(session: session))
                     .font(WATheme.body(14))
                     .foregroundStyle(WATheme.ink2)
+
+                if locationMode == .tracking {
+                    Text("距离为直线距离 · 暂无可靠步行路线时箭头指向目的地")
+                        .font(WATheme.caption(10))
+                        .foregroundStyle(WATheme.ink3)
+                }
             }
 
             GeometryReader { geo in
@@ -941,15 +987,15 @@ struct JourneyView: View {
         return "沿当前方向继续走"
     }
 
-    /// 真实定位 + 有手机朝向 → 相对方向（bearing - heading）；否则退回绝对/演示箭头
+    /// 真实定位 + 有手机朝向 → 相对方向（bearing - heading）；否则退回绝对/演示箭头。
+    /// Prefer the route's next segment so the arrow cannot contradict the drawn walking route.
     private func directionArrow(session: QuestSession) -> String {
+        guard let bearing = guidanceBearing(session: session) else { return session.arrowSymbol }
         if locationMode == .tracking,
-           let bearing = session.currentBearing,
            let heading = usableHeading {
-            // 「往前直走」= 箭头朝上：显示的是「目的地相对你」的角度
             return GeoMath.arrow(bearing - heading)
         }
-        return session.arrowSymbol
+        return GeoMath.arrow(bearing)
     }
 
     @ViewBuilder
@@ -963,10 +1009,12 @@ struct JourneyView: View {
 
     /// VoiceOver：把箭头翻译成可以听懂的方位
     private func directionAccessibilityLabel(session: QuestSession) -> String {
+        guard let bearing = guidanceBearing(session: session) else {
+            return "方向指示 \(session.arrowSymbol)"
+        }
         if locationMode == .tracking,
-           let bearing = session.currentBearing,
            let heading = usableHeading {
-            let relative = (bearing - heading + 360).truncatingRemainder(dividingBy: 360)
+            let relative = (bearing - heading + 720).truncatingRemainder(dividingBy: 360)
             let relativeCopy: String
             switch relative {
             case 337.5..., 0..<22.5: relativeCopy = "正前方"
@@ -978,9 +1026,19 @@ struct JourneyView: View {
             case 247.5..<292.5: relativeCopy = "左边"
             default: relativeCopy = "左前方"
             }
-            return "目的地在\(relativeCopy)，\(GeoMath.compassLabel(bearing))方向"
+            let subject = routeBearingForGuidance() == nil ? "目的地" : "路线下一段"
+            return "\(subject)在\(relativeCopy)，地理方向\(GeoMath.compassLabel(bearing))"
         }
-        return "方向指示 \(session.arrowSymbol)"
+        let subject = routeBearingForGuidance() == nil ? "目的地直线方位" : "路线下一段方向"
+        return "\(subject)：\(GeoMath.compassLabel(bearing))"
+    }
+
+    private func directionDescription(session: QuestSession) -> String {
+        guard let bearing = guidanceBearing(session: session) else { return session.compassCopy }
+        if routeBearingForGuidance() != nil {
+            return "沿步行路线下一段朝\(GeoMath.compassLabel(bearing))方向"
+        }
+        return "目的地直线方向：往\(GeoMath.compassLabel(bearing))"
     }
 
     // MARK: 权限降级卡
@@ -1515,9 +1573,26 @@ struct JourneyView: View {
             return
         }
 
-        guard let remaining = reading.remainingMeters else {
+        guard let measuredRemaining = reading.remainingMeters else {
             refreshMode()
             return
+        }
+        var remaining = measuredRemaining
+        if measuredRemaining <= Double(QuestSession.arriveThreshold) {
+            let accurateFix = (reading.horizontalAccuracy ?? .infinity) <= 25
+            if accurateFix, lastArrivalFixTimestamp.map({ reading.timestamp > $0 }) ?? true {
+                arrivalFixCount += 1
+                lastArrivalFixTimestamp = reading.timestamp
+            } else if !accurateFix {
+                arrivalFixCount = 0
+                lastArrivalFixTimestamp = nil
+            }
+            if arrivalFixCount < 2 {
+                remaining = Double(QuestSession.arriveThreshold + 1)
+            }
+        } else {
+            arrivalFixCount = 0
+            lastArrivalFixTimestamp = nil
         }
 
         // 首个定位点合理性检查（只在旅程刚开始的 3 分钟内做）：

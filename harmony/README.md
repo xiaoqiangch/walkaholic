@@ -1,12 +1,22 @@
 # 步迷 Walkaholic · HarmonyOS
 
-HarmonyOS NEXT（API 12）移植版，ArkTS + ArkUI 声明式。
+HarmonyOS NEXT（API 26）移植版，ArkTS + ArkUI 声明式。
 
-- **怎么在 DevEco Studio 里跑**：[docs/HARMONY.md](docs/HARMONY.md) §3
+- **怎么跑起来**：[docs/HARMONY.md](docs/HARMONY.md) §3（图形界面 / 纯命令行两条路）
 - **架构与移植对照**：[docs/HARMONY.md](docs/HARMONY.md) §1
 - **三端对齐规格**：[../docs/parity.md](../docs/parity.md)（唯一规格，改动需三端同步）
-- **本机可跑的校验**：`bash ../scripts/check-harmony.sh`
+- **本机开发环境**：[docs/HARMONY.md](docs/HARMONY.md) §11（版本、脚本、环境变量）
 - **立即可测路径**：鸿蒙浏览器打开 https://xiaoqiangch.github.io/walkaholic/ → 添加到桌面
+
+## 一键命令
+
+```bash
+bash ../scripts/check-harmony.sh      # 离线校验：tsc + 单测 + ArkTS 静态检查
+bash ../scripts/setup-deveco-cli.sh   # 部署 CLI 工具链（首次）
+bash ../scripts/gen-local-sign.sh     # 生成本地签名材料（首次）
+bash ../scripts/build-hap.sh          # 真编译 + 签名 + 验签 → .hap
+bash ../scripts/build-hap.sh --device # 再装到模拟器/真机
+```
 
 ```
 entry/src/main/ets/
@@ -25,12 +35,17 @@ entry/src/main/ets/
 └── theme/   设计 token（字号已按 parity.md §5 对齐 Web v32）
 ```
 
-## 本机校验结果
+## 校验结果（2026-11-19，真实运行）
 
 ```
-tsc --noEmit          0 error
-npm test              117/117 通过
-ArkTS 静态检查        26 个 .ets，0 error（含「附近惊喜保密」守卫）
+tsc --noEmit            0 error
+npm test                143/143 通过
+ArkTS 静态检查          31 个 .ets，0 error（含「附近惊喜保密」守卫）
+hvigor assembleHap      ✅ CompileArkTS 0 error / PackageHap 成功
+hap-sign-tool           本地签名 + verify-app ✅ Verify success
+模拟器（HarmonyOS 7.0）   ✅ 安装/启动/抽盒/路线/揭晓/四个 Tab 全通，0 崩溃
+产物                    entry-default-signed.hap (2.7 MB)
 ```
 
-> `.hap` 编译仍需 DevEco Studio；需要真机确认的 API 清单见 [docs/HARMONY.md](docs/HARMONY.md) §7。
+> 真机运行仍需模拟器或设备；运行时行为清单见 [docs/HARMONY.md](docs/HARMONY.md) §7、实测记录见 §12。
+> 本地自签名只用于调试，**上架必须用华为账号正式证书**（见 §3.1）。

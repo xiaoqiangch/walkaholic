@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# 鸿蒙移植版校验：逻辑层类型检查 + Node 测试 + ArkTS 静态检查
-# 本机没有 DevEco Studio，所以这里只做「能离线验证的部分」；
-# 真正的 .hap 编译需要 DevEco Studio（见 harmony/docs/HARMONY.md）。
+# 鸿蒙移植版校验：逻辑层类型检查 + Node 测试 + ArkTS 静态检查 + 真实编译（可选）
+# 前 4 步不依赖 IDE；第 5 步需要先跑 scripts/setup-deveco-cli.sh（见 harmony/docs/HARMONY.md §11）。
 set -uo pipefail
 cd "$(dirname "$0")/.."
 HARMONY="harmony"
@@ -46,5 +45,21 @@ for f in AppScope/app.json5 build-profile.json5 hvigorfile.ts oh-package.json5 \
 done
 
 echo
-if [ "$FAIL" -eq 0 ]; then echo "全部通过（.hap 编译仍需 DevEco Studio）"; exit 0
+echo "═══ 5. 真实 ArkTS 编译（可选）═══"
+DEVECO_CLI="${DEVECO_CLI_HOME:-$HOME/DevTools/deveco}"
+if [ -x "$DEVECO_CLI/tools/node/bin/node" ]; then
+  # SignHap 失败是预期（hvigor 要加密格式口令），只看 ArkTS 编译是否干净、unsigned 包是否产出
+  HAPLOG=$(cd "$HARMONY" && ./hvigorw assembleHap -p product=default --no-daemon 2>&1 || true)
+  ARKERR=$(echo "$HAPLOG" | grep -c "ArkTS:ERROR" || true)
+  if [ "$ARKERR" -eq 0 ] && ls "$HARMONY"/entry/build/*/outputs/*/*.hap >/dev/null 2>&1; then
+    echo "  ✅ CompileArkTS 0 error，已产出 $(basename "$(ls -t "$HARMONY"/entry/build/*/outputs/*/*.hap | head -1)")"
+  else
+    echo "  ❌ ArkTS 编译失败（$ARKERR 处错误）"; FAIL=1
+  fi
+else
+  echo "  ⚠️  未部署 CLI 工具链（bash scripts/setup-deveco-cli.sh），跳过"
+fi
+
+echo
+if [ "$FAIL" -eq 0 ]; then echo "全部通过"; exit 0
 else echo "存在失败项"; exit 1; fi

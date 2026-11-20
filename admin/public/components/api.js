@@ -140,6 +140,29 @@
     putLlmSettings: function (settings) { return request('PUT', '/api/llm/settings', { settings: settings }); },
     testLlm: function () { return request('POST', '/api/llm/test'); },
     accountSettings: function () { return request('GET', '/api/account/settings'); },
-    putAccountSettings: function (settings) { return request('PUT', '/api/account/settings', { settings: settings }); }
+    putAccountSettings: function (settings) { return request('PUT', '/api/account/settings', { settings: settings }); },
+
+    // 4.12 用户账号管理（读账号库的 users / profiles / sessions）
+    users: function (params) {
+      const query = buildQuery({
+        filter: params && params.filter ? params.filter : 'all',
+        q: params ? params.q : '',
+        limit: params && params.limit !== undefined ? params.limit : 50,
+        offset: params && params.offset !== undefined ? params.offset : 0
+      });
+      return request('GET', '/api/users' + query);
+    },
+    userStatus: function () { return request('GET', '/api/users/status'); },
+    user: function (id) { return request('GET', '/api/users/' + encodeURIComponent(id)); },
+    setUserDisabled: function (id, disabled, reason) {
+      return request('PUT', '/api/users/' + encodeURIComponent(id) + '/status', {
+        disabled: disabled,
+        reason: reason || ''
+      });
+    },
+    resetUserPassword: function (id, password) {
+      return request('PUT', '/api/users/' + encodeURIComponent(id) + '/password', { password: password });
+    },
+    removeUser: function (id) { return request('DELETE', '/api/users/' + encodeURIComponent(id)); }
   };
 })();

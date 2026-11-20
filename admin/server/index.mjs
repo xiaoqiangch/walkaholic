@@ -35,6 +35,7 @@ import {
 import { renderLoginPage, serveStatic } from './static.mjs';
 import { MapKeysService } from './mapkeys.mjs';
 import { SurpriseAdminService, SurpriseAdminError } from './surprises.mjs';
+import { UserAdminService, UserAdminError, USER_FILTERS } from './users.mjs';
 import { LlmSettings } from './llmsettings.mjs';
 import { AccountSettingsAdmin, AccountSettingsError } from './accountsettings.mjs';
 import { resolveAccountDbPath } from './surprises.mjs';
@@ -115,6 +116,10 @@ function sendError(res, error) {
     return;
   }
   if (error instanceof SurpriseAdminError) {
+    sendJson(res, error.status || 400, { error: error.message, code: error.code });
+    return;
+  }
+  if (error instanceof UserAdminError) {
     sendJson(res, error.status || 400, { error: error.message, code: error.code });
     return;
   }
@@ -323,6 +328,13 @@ export function createServer(options = {}) {
     env: options.env || process.env,
     dbPath: options.accountDbPath,
     adminDataDir: dataDir
+  });
+  // 用户账号管理：同一个账号库，见 admin/server/users.mjs
+  const users = options.users || new UserAdminService({
+    env: options.env || process.env,
+    dbPath: options.accountDbPath,
+    adminDataDir: dataDir,
+    now: options.now
   });
   const geocode = options.geocodeAddress || ((address) => resolveAddress(address, {
     fetchImpl: options.geocodeFetch || fetchImpl,
@@ -718,6 +730,63 @@ export function createServer(options = {}) {
       return;
     }
 
+    // ---------- 用户账号管理（读账号库，见 admin/server/users.mjs） ----------
+    if (pathname === '/api/users' && method === 'GET') {
+      const filter = searchParams.get('filter') || 'all';
+      if (USER_FILTERS.indexOf(filter) < 0) {
+        throw new PoiError('filter 只能是 all / active / disabled', 'BAD_REQUEST');
+      }
+      const q = searchParams.get('q') || '';
+      if (q.length > 200) throw new PoiError('q 最多 200 个字符', 'BAD_REQUEST');
+      const limit = searchParams.get('limit');
+      const offset = searchParams.get('offset');
+      sendJson(res, 200, users.list({
+        q: q.trim(),
+        filter,
+        limit: limit === null ? undefined : limit,
+        offset: offset === null ? undefined : offset
+      }));
+      return;
+    }
+    if (pathname === '/api/users/status' && method === 'GET') {
+      sendJson(res, 200, users.status());
+      return;
+    }
+
+    const userMatch = pathname.match(/^\/api\/users\/([^/]+)$/);
+    if (userMatch) {
+      const id = decodeURIComponent(userMatch[1]);
+      if (method === 'GET') {
+        sendJson(res, 200, users.get(id));
+        return;
+      }
+      if (method === 'DELETE') {
+        sendJson(res, 200, users.remove(id));
+        return;
+      }
+      throw new PoiError('不支持的请求方法：' + method, 'BAD_REQUEST');
+    }
+
+    const userActionMatch = pathname.match(/^\/api\/users\/([^/]+)\/(status|password)$/);
+    if (userActionMatch) {
+      if (method !== 'PUT' && method !== 'POST') {
+        throw new PoiError('不支持的请求方法：' + method, 'BAD_REQUEST');
+      }
+      const id = decodeURIComponent(userActionMatch[1]);
+      const action = userActionMatch[2];
+      const body = await readBody(req);
+      if (action === 'status') {
+        const disabled = body.disabled === true || body.disabled === 1 || body.disabled === '1';
+        if (body.disabled === undefined) {
+          throw new PoiError('disabled 必填（true = 停用，false = 恢复）', 'BAD_REQUEST');
+        }
+        sendJson(res, 200, users.setDisabled(id, disabled, body.reason));
+        return;
+      }
+      sendJson(res, 200, users.resetPassword(id, body.password));
+      return;
+    }
+
     // ---------- 地图 Key（管理员） ----------
     if (pathname === '/api/mapkeys' && method === 'GET') {
       sendJson(res, 200, mapKeys.adminView());
@@ -834,10 +903,12 @@ export function createServer(options = {}) {
   server.auth = auth;
   server.mapKeys = mapKeys;
   server.llmSettings = llmSettings;
+  server.users = users;
   server.paths = { dataDir, dbPath: store.dbPath, publicDir, exportPath, backupPath };
   server.on('close', () => {
     auth.stopPruneTimer();
     surprises.close();
+    users.close();
     store.close();
   });
   return server;

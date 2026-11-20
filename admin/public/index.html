@@ -76,6 +76,23 @@
     </div>
   </section>
 
+  <section class="mapkeys" id="users-panel" hidden aria-label="用户账号管理" role="dialog" aria-modal="true">
+    <div class="mapkeys__scrim" data-users-close aria-hidden="true"></div>
+    <div class="mapkeys__card mapkeys__card--wide">
+      <header class="mapkeys__head">
+        <div>
+          <p class="mapkeys__eyebrow">User accounts</p>
+          <h2 class="mapkeys__title">用户账号</h2>
+          <p class="mapkeys__sub">直接读写账号服务的 users 表：停用、重置密码、删除账号。</p>
+        </div>
+        <button type="button" class="btn btn--icon" data-users-close aria-label="关闭用户管理">
+          <span aria-hidden="true" style="font-size:18px;line-height:1">×</span>
+        </button>
+      </header>
+      <div class="mapkeys__body" id="users-body"></div>
+    </div>
+  </section>
+
   <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
   <div class="modal-root" id="modal-root"></div>
 
@@ -83,6 +100,7 @@
   <script src="components/ui.js"></script>
   <script src="components/api.js"></script>
   <script src="components/settings.js"></script>
+  <script src="components/users.js"></script>
   <script src="admin.js"></script>
 </body>
 </html>

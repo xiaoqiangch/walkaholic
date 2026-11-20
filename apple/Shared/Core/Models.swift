@@ -93,7 +93,7 @@ public enum Mood: String, Codable, CaseIterable, Identifiable, Sendable {
 public enum ExploreScope: String, Codable, CaseIterable, Identifiable, Sendable {
     /// 步行：3 公里内，抬脚就走
     case walk
-    /// 远程漫游：10–45 公里，先开车到附近停车
+    /// 远程漫游：5–15 公里，先开车到附近停车
     case roam
 
     public var id: String { rawValue }
@@ -108,7 +108,7 @@ public enum ExploreScope: String, Codable, CaseIterable, Identifiable, Sendable 
     public var subtitle: String {
         switch self {
         case .walk: return "3 公里内，抬脚就走"
-        case .roam: return "10–45 公里 · 先开车到附近停车，再走过去"
+        case .roam: return "5–15 公里 · 先开车到附近停车，再走过去"
         }
     }
 
@@ -120,9 +120,9 @@ public enum ExploreScope: String, Codable, CaseIterable, Identifiable, Sendable 
     }
 
     /// 远程漫游的下限：低于它就不该用漫游（直接走过去就行）
-    public static let roamMinMeters: Double = 10_000
+    public static let roamMinMeters: Double = 5_000
     /// 远程漫游的上限：再远就不适合一日往返
-    public static let roamMaxMeters: Double = 45_000
+    public static let roamMaxMeters: Double = 15_000
     /// 停车圈：进入这个半径才开始步行探索，也是线索开始解锁的地方
     public static let parkingRadiusMeters: Double = 1_000
     /// 手动「已停车」的容忍半径：GPS 在停车场里常常漂几百米，收紧到 1 公里会让用户

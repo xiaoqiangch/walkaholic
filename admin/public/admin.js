@@ -122,6 +122,8 @@
         UI.icon('capture') + '<span>抓取附近</span></button>' +
       '<button type="button" class="btn" data-action="user-points" aria-label="查看用户惊喜">' +
         '<span aria-hidden="true">🎁</span><span>用户惊喜</span></button>' +
+      '<button type="button" class="btn" data-action="users" aria-label="管理用户账号">' +
+        '<span aria-hidden="true">👤</span><span>用户账号</span></button>' +
       '<span class="toolbar-sep" aria-hidden="true"></span>' +
       '<button type="button" class="btn" data-action="normalize" title="' + UI.escapeHtml(ruleHint) + '" aria-label="用 AI 整理当前兴趣点">' +
         UI.icon('sparkles') + '<span>AI 整理</span></button>' +
@@ -1400,6 +1402,7 @@
           });
         }
         else if (action === 'settings') { if (window.WASettings) window.WASettings.open(); }
+        else if (action === 'users') { if (window.WAUsers) window.WAUsers.open(); }
         else if (action === 'mapkeys') openMapKeysPanel();
         else if (action === 'export') runExport(button);
       });
@@ -2294,6 +2297,7 @@
     bindTopActions();
     bindMapKeysPanel();
     if (window.WASettings) window.WASettings.bind();
+    if (window.WAUsers) window.WAUsers.bind();
     renderLlmBadge();
     renderFilters();
     renderList();

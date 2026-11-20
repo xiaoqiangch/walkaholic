@@ -89,6 +89,80 @@ public enum GeoMath {
     }
 }
 
+/// Filters CoreLocation fixes before they affect route guidance or arrival detection.
+///
+/// Poor-accuracy fixes and isolated jumps are ignored. A stable new location is
+/// accepted after two matching fixes, which also lets the filter recover after
+/// the user legitimately resumes far from the last fix.
+struct NavigationFixFilter {
+
+    static let maximumAccuracyMeters = 50.0
+    private let maximumWalkingSpeedMetersPerSecond = 8.0
+    private let maximumContinuousGap: TimeInterval = 120
+    private let minimumMovementMeters = 2.0
+
+    private(set) var lastPoint: GeoPoint?
+    private var lastTimestamp: Date?
+    private var jumpCandidate: GeoPoint?
+    private var jumpCandidateCount = 0
+
+    mutating func accept(_ point: GeoPoint, accuracy: Double, timestamp: Date) -> GeoPoint? {
+        guard point.latitude.isFinite, (-90...90).contains(point.latitude),
+              point.longitude.isFinite, (-180...180).contains(point.longitude),
+              accuracy.isFinite, (0...Self.maximumAccuracyMeters).contains(accuracy)
+        else {
+            return nil
+        }
+        if let lastTimestamp, timestamp < lastTimestamp { return nil }
+
+        guard let previousPoint = lastPoint, let previousFixTime = lastTimestamp,
+              timestamp.timeIntervalSince(previousFixTime) <= maximumContinuousGap
+        else {
+            return commit(point, at: timestamp)
+        }
+
+        let elapsed = max(0.5, timestamp.timeIntervalSince(previousFixTime))
+        let displacement = GeoMath.distance(from: previousPoint, to: point)
+        let plausibleDistance = max(20, elapsed * maximumWalkingSpeedMetersPerSecond + min(accuracy, 20))
+
+        if displacement > plausibleDistance {
+            if let candidate = jumpCandidate,
+               GeoMath.distance(from: candidate, to: point) <= max(20, accuracy) {
+                jumpCandidateCount += 1
+            } else {
+                jumpCandidate = point
+                jumpCandidateCount = 1
+            }
+            guard jumpCandidateCount >= 2 else { return nil }
+            return commit(point, at: timestamp)
+        }
+
+        jumpCandidate = nil
+        jumpCandidateCount = 0
+        guard displacement >= minimumMovementMeters else {
+            lastTimestamp = timestamp
+            return previousPoint
+        }
+
+        let alpha = min(0.8, max(0.45, 30 / (accuracy + 10)))
+        return commit(
+            GeoPoint(
+                latitude: previousPoint.latitude + (point.latitude - previousPoint.latitude) * alpha,
+                longitude: previousPoint.longitude + (point.longitude - previousPoint.longitude) * alpha
+            ),
+            at: timestamp
+        )
+    }
+
+    private mutating func commit(_ point: GeoPoint, at timestamp: Date) -> GeoPoint {
+        lastPoint = point
+        lastTimestamp = timestamp
+        jumpCandidate = nil
+        jumpCandidateCount = 0
+        return point
+    }
+}
+
 /// 抽盒时给目标分配的「真实坐标 + 行走参数」
 public struct GeoQuestPlan: Hashable, Sendable {
     public let origin: GeoPoint
