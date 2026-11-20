@@ -176,10 +176,27 @@
       return { ok: false, reason: 'NOT_IMAGE', detail: '无法读取文件' };
     }
 
-    // PNG/HEIC 暂不支持（PNG 本来就没有 EXIF；HEIC 需要额外解析）
+    // PNG：本来就不存 EXIF
     var b0 = reader.u8(0), b1 = reader.u8(1);
     if (b0 === 0x89 && b1 === 0x50) {
       return { ok: false, reason: 'PNG_NO_EXIF', detail: 'PNG 格式不保存位置信息，请用相机拍的照片' };
+    }
+    // HEIC/HEIF：ISO BMFF 容器，EXIF 在 meta box 里，本解析器不支持。
+    // 必须**明确告诉用户是格式问题**，否则用户会以为是相机没开定位。
+    if (buffer.byteLength >= 12) {
+      try {
+        var brand = reader.str(4, 4);
+        if (brand === 'ftyp') {
+          var sub = reader.str(8, 4);
+          if (/^(heic|heix|hevc|hevx|heim|heis|hevm|hevs|mif1|msf1|avif)$/i.test(sub)) {
+            return {
+              ok: false,
+              reason: 'HEIC_UNSUPPORTED',
+              detail: '这是 HEIF/' + sub.toUpperCase() + ' 格式的照片，当前读不到里面的位置信息'
+            };
+          }
+        }
+      } catch (e) { /* 不是 ISO BMFF，继续走 JPEG 流程 */ }
     }
 
     var seg;
@@ -304,6 +321,7 @@
       UNREADABLE_GPS: '照片的位置数据读不出来',
       INVALID_GPS: '照片坐标不合法',
       PNG_NO_EXIF: 'PNG 照片不保存位置信息',
+      HEIC_UNSUPPORTED: '这是 HEIF 格式的照片',
       BROKEN_EXIF: '照片信息损坏',
       NOT_IMAGE: '这不是有效的照片文件',
       TOO_FAR: '拍摄地点离目的地太远',
@@ -317,6 +335,8 @@
       UNREADABLE_GPS: '请重新用相机拍一张',
       INVALID_GPS: '请重新用相机拍一张',
       PNG_NO_EXIF: '请用相机拍 JPEG 照片，不要用截图或 PNG',
+      HEIC_UNSUPPORTED: '请到 相机设置 → 格式 → 选择「兼容性最佳 / JPEG」，或换一张 JPEG 照片重拍。' +
+        '（iPhone 默认用 HEIF 格式，鸿蒙部分机型也可能如此）',
       BROKEN_EXIF: '请重新用相机拍一张',
       NOT_IMAGE: '请选择一张照片',
       TOO_FAR: '走近一点再拍一张',

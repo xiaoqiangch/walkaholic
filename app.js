@@ -7,7 +7,7 @@
 
   var D = window.WA_DATA;
   var STORE_KEY = 'walkaholic:v1';
-  var APP_VERSION = 'v54';
+  var APP_VERSION = 'v55';
   var APP_BUILT_AT = '2026-11-09 14:10';
 
   var ROUTES = ['/home', '/setup', '/journey', '/reveal', '/cards', '/social', '/profile', '/debug',
