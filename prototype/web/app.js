@@ -7,7 +7,7 @@
 
   var D = window.WA_DATA;
   var STORE_KEY = 'walkaholic:v1';
-  var APP_VERSION = 'v53';
+  var APP_VERSION = 'v54';
   var APP_BUILT_AT = '2026-11-09 14:10';
 
   var ROUTES = ['/home', '/setup', '/journey', '/reveal', '/cards', '/social', '/profile', '/debug',
@@ -1064,13 +1064,36 @@
       '</div></div>';
   }
 
+  /**
+   * 把拍照验证弹层挂到 overlayRoot 上。
+   * 为什么不用 main：揭晓卡渲染在 overlayRoot（z-index 70），挂 main 会被它盖住。
+   */
+  function mountPhotoVerifySheet() {
+    if (!state.pendingPhotoVerify) return;
+    var host = dom.overlayRoot;
+    if (!host) return;
+    var old = host.querySelector('.photoverify');
+    if (old) old.parentNode.removeChild(old);
+    var wrap = document.createElement('div');
+    wrap.innerHTML = photoVerifySheetHTML();
+    var node = wrap.firstChild;
+    if (node) host.appendChild(node);
+  }
+
+  /** 关闭拍照验证弹层（留在 DOM 里会挡住揭晓页） */
+  function closePhotoVerifySheet() {
+    state.pendingPhotoVerify = null;
+    var el = document.querySelector('.photoverify');
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+  }
+
   /** 开始拍照验证流程 */
   function startPhotoVerify() {
     var reveal = state.reveal;
     var place = reveal ? placeOf(reveal.placeID) : null;
     if (!place || !place.coordinate) {
       // 演示地点没有真实坐标，不需要验证
-      state.pendingPhotoVerify = null;
+      closePhotoVerifySheet();
       return doCollect();
     }
     state.pendingPhotoVerify = { placeId: place.id, lastFail: null };
@@ -1084,7 +1107,7 @@
     reveal.photoGps = result.photoGps;
     reveal.photoDistanceMeters = result.distanceMeters;
     reveal.photoData = result.dataURL;
-    state.pendingPhotoVerify = null;
+    closePhotoVerifySheet();
     doCollect();
   }
 
@@ -2743,6 +2766,7 @@
     }
 
     dom.overlayRoot.innerHTML = revealCardHTML();
+    mountPhotoVerifySheet();
     bindRevealPhoto();
   }
 
@@ -4469,8 +4493,9 @@
       html = debugHTML();
     }
 
-    dom.main.innerHTML = html + (state.pendingPhotoVerify ? photoVerifySheetHTML() : '');
+    dom.main.innerHTML = html;
     dom.main.scrollTop = 0;
+    mountPhotoVerifySheet();
 
     if (state.updatePending && route === '/home' && !window.__bwReloading) {
       state.updatePending = false;
@@ -5009,15 +5034,16 @@
       case 'photo-verify-capture': {
         var reveal0 = state.reveal;
         var place0 = reveal0 ? placeOf(reveal0.placeID) : null;
-        if (!place0 || !place0.coordinate) { state.pendingPhotoVerify = null; doCollect(); break; }
+        if (!place0 || !place0.coordinate) { closePhotoVerifySheet(); doCollect(); break; }
         captureWithGps(place0.coordinate, function (result) {
           onPhotoVerified(result);
         }, function (fail) {
           var msg = photoVerifyFailText(fail);
-          if (!msg) return;   // 用户取消
+          if (!msg) { closePhotoVerifySheet(); render(); return; }   // 用户取消
           if (state.pendingPhotoVerify) state.pendingPhotoVerify.lastFail = msg;
           else state.pendingPhotoVerify = { placeId: place0.id, lastFail: msg };
           render();
+          mountPhotoVerifySheet();
           showToast(msg.title, '⚠️', { duration: 3200 });
         });
         break;
