@@ -52,7 +52,9 @@
     routeManeuversStart: null,
     routeOffRoute: 0,
     locationBlocked: false,
-    locationReason: ''
+    locationReason: '',
+    /* 账号：密码登录收进「其他方式」，点了才展开（主入口只留 Apple / 微信） */
+    accountMore: false
   };
   var timers = { journey: null, reveal: [] };
 
@@ -1758,6 +1760,33 @@
   }
 
 
+  /**
+   * 主登录入口：Apple / 微信。
+   *
+   * Web 版的两个限制必须如实说明，不能画一个点了没反应的按钮：
+   *   - Apple：网页端要「Sign in with Apple JS」+ 已验证域名 + Service ID，
+   *     目前服务端只配了 iOS 的 clientId，网页端点不了；
+   *   - 微信：网页端走「网站应用」扫码（服务端 wechat.enabled=false，缺 appid/secret）。
+   * 两者都不可用时明确标注「暂不可用」，并把账号密码作为兜底入口保留。
+   */
+  function accountOAuthHTML() {
+    var appleEnabled = false;   // 服务端 /api/auth/providers 的 apple 只对 iOS 有效
+    var wechatEnabled = !!(window.WA_ACCOUNT_PROVIDERS && window.WA_ACCOUNT_PROVIDERS.wechat);
+    var html = '<div class="dbg__actions">' +
+      '<button type="button" class="btn btn--block" data-action="account-apple"' +
+        (appleEnabled ? '' : ' disabled aria-disabled="true"') + '>' +
+        (appleEnabled ? '通过 Apple 登录' : '通过 Apple 登录（暂不可用）') + '</button>' +
+      '<button type="button" class="btn btn--block" data-action="account-wechat"' +
+        (wechatEnabled ? '' : ' disabled aria-disabled="true"') + '>' +
+        (wechatEnabled ? '微信登录' : '微信登录（暂不可用）') + '</button>' +
+      '</div>' +
+      (!appleEnabled || !wechatEnabled
+        ? '<p class="dbg__hint">Apple 网页登录需要已验证域名与 Service ID；微信网页登录需要服务端配置 appid/secret。' +
+          '两者都就绪前，请用下面的账号密码登录。</p>'
+        : '');
+    return html;
+  }
+
   /** 账号页：登录 / 注册 / 同步 / 退出 / 删号 */
   function accountHTML() {
     var cfg = accountConfig();
@@ -1778,20 +1807,21 @@
           '<button type="button" class="btn btn--quiet btn--block" data-action="account-delete">删除账号</button>' +
         '</div>'
       : '<div class="acc__form">' +
-          '<label class="acc__label" for="acc-base">账号服务地址</label>' +
-          '<input class="acc__input" id="acc-base" type="url" value="' + esc(cfg.baseUrl) + '" placeholder="http://127.0.0.1:8803">' +
-          '<label class="acc__label" for="acc-user">用户名</label>' +
-          '<input class="acc__input" id="acc-user" type="text" autocomplete="username" placeholder="3–24 个字符">' +
-          '<label class="acc__label" for="acc-pass">密码</label>' +
-          '<input class="acc__input" id="acc-pass" type="password" autocomplete="current-password" placeholder="至少 6 位">' +
-          '<div class="dbg__actions">' +
-            '<button type="button" class="btn btn--primary btn--block" data-action="account-login">登录</button>' +
-            '<button type="button" class="btn btn--ghost btn--block" data-action="account-register">注册并登录</button>' +
-          '</div>' +
+          /* 主入口只留 Apple / 微信；账号密码是兜底（Apple 需付费开发者账号、
+             微信需服务端 appid + SDK，两者未就绪时不能把用户堵死） */
+          accountOAuthHTML() +
+          (ui.accountMore
+            ? '<label class="acc__label" for="acc-user">用户名</label>' +
+              '<input class="acc__input" id="acc-user" type="text" autocomplete="username" placeholder="3–24 个字符">' +
+              '<label class="acc__label" for="acc-pass">密码</label>' +
+              '<input class="acc__input" id="acc-pass" type="password" autocomplete="current-password" placeholder="至少 6 位">' +
+              '<div class="dbg__actions">' +
+                '<button type="button" class="btn btn--primary btn--block" data-action="account-login">登录</button>' +
+                '<button type="button" class="btn btn--ghost btn--block" data-action="account-register">注册并登录</button>' +
+              '</div>'
+            : '<button type="button" class="btn btn--quiet btn--block" data-action="account-more">用账号密码登录</button>') +
           '<p class="dbg__hint">账号是可选的。不登录也能用，数据留在本机。<br>' +
-          '默认已连公网账号服务 <code>' + esc(cfg.baseUrl) + '</code>，直接注册即可。<br>' +
-          '如果浏览器禁用了第三方 Cookie（Safari 默认如此），跨域登录会失败 —— ' +
-          '此时用 <code>https://xqlounge.top</code> 打开 App 即为同源登录。</p>' +
+          '注册后资料会同步到账号，换设备也能恢复。</p>' +
         '</div>';
 
     return '<div class="page dbg">' +
@@ -5081,11 +5111,22 @@
       case 'go-profile':
         navigate('/profile');
         break;
+      case 'account-more': {
+        ui.accountMore = !ui.accountMore;
+        render();
+        break;
+      }
+      case 'account-apple': {
+        showToast('Apple 网页登录还没配置（需要已验证域名与 Service ID）', '⚠️', { duration: 3200 });
+        break;
+      }
+      case 'account-wechat': {
+        showToast('微信网页登录还没配置（服务端缺 appid/secret）', '⚠️', { duration: 3200 });
+        break;
+      }
       case 'account-login': {
         var loginName = document.getElementById('acc-user').value.trim();
         var loginPass = document.getElementById('acc-pass').value;
-        var baseEl = document.getElementById('acc-base');
-        if (baseEl) { var cfg0 = accountConfig(); cfg0.baseUrl = baseEl.value.trim() || cfg0.baseUrl; saveAccountConfig(cfg0); }
         if (!loginName || !loginPass) { showToast('用户名和密码都要填', '✍️'); break; }
         showToast('正在登录…', '🔐', { duration: 1600 });
         accountApi('/api/auth/login', { method: 'POST', body: { username: loginName, password: loginPass } })
@@ -5096,8 +5137,6 @@
       case 'account-register': {
         var regName = document.getElementById('acc-user').value.trim();
         var regPass = document.getElementById('acc-pass').value;
-        var baseEl2 = document.getElementById('acc-base');
-        if (baseEl2) { var cfg1 = accountConfig(); cfg1.baseUrl = baseEl2.value.trim() || cfg1.baseUrl; saveAccountConfig(cfg1); }
         if (!regName || !regPass) { showToast('用户名和密码都要填', '✍️'); break; }
         showToast('正在注册…', '🆕', { duration: 1600 });
         accountApi('/api/auth/register', { method: 'POST', body: { username: regName, password: regPass } })
