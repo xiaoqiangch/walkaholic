@@ -19,15 +19,22 @@
      - 之下设「士」，之上设「王」（加分项，需极大疆域）
      每个爵位有面积门槛（平方公里）与色值、印章字
      ============================================================ */
+  // minPoints：该爵位要求疆域内**至少有多少个探索点**。
+  // 为什么需要：否则在远处「打四个角」就能用 4 个点围出几十平方公里。
+  // 数值怎么来的：用诚实玩家行为模型（5 种画像 × 400 样本/种）跑蒙特卡洛，
+  //   取「达到该面积门槛的诚实玩家的点位数 p5」，再向下取整到友好数字。
+  //   代价：偶尔散步型玩家有 13.8% 会在高爵位被打回（合理，他们确实没探索那么大）。
+  //   收益：4 点围 30km 半径（1163 km²）从「王」直接降到「士」。
+  // 详细推演见 docs/territory.md「点数门槛」一节。
   var RANKS = [
-    { key: 'commoner', order: 0, title: '白身',   seal: '民', thresholdKm2: 0,      color: '#9CA3AF', desc: '还没有自己的疆域' },
-    { key: 'shi',      order: 1, title: '士',     seal: '士', thresholdKm2: 0.05,   color: '#64748B', desc: '初立门户，方寸之地' },
-    { key: 'nan',      order: 2, title: '男爵',   seal: '男', thresholdKm2: 0.3,    color: '#0EA5E9', desc: '一街一巷，始有封地' },
-    { key: 'zi',       order: 3, title: '子爵',   seal: '子', thresholdKm2: 1.2,    color: '#14B8A6', desc: '数坊之间，渐成版图' },
-    { key: 'bo',       order: 4, title: '伯爵',   seal: '伯', thresholdKm2: 4,      color: '#5B6CFF', desc: '半城风物，已在掌中' },
-    { key: 'hou',      order: 5, title: '侯爵',   seal: '侯', thresholdKm2: 12,     color: '#8B5CF6', desc: '纵横十余里，一方之望' },
-    { key: 'gong',     order: 6, title: '公爵',   seal: '公', thresholdKm2: 30,     color: '#F59E0B', desc: '半壁城池，位极人臣' },
-    { key: 'wang',     order: 7, title: '王',     seal: '王', thresholdKm2: 80,     color: '#EF4444', desc: '一城之主，疆域无出其右' }
+    { key: 'commoner', order: 0, title: '白身',   seal: '民', thresholdKm2: 0,      minPoints: 0,  color: '#9CA3AF', desc: '还没有自己的疆域' },
+    { key: 'shi',      order: 1, title: '士',     seal: '士', thresholdKm2: 0.05,   minPoints: 3,  color: '#64748B', desc: '初立门户，方寸之地' },
+    { key: 'nan',      order: 2, title: '男爵',   seal: '男', thresholdKm2: 0.3,    minPoints: 5,  color: '#0EA5E9', desc: '一街一巷，始有封地' },
+    { key: 'zi',       order: 3, title: '子爵',   seal: '子', thresholdKm2: 1.2,    minPoints: 7,  color: '#14B8A6', desc: '数坊之间，渐成版图' },
+    { key: 'bo',       order: 4, title: '伯爵',   seal: '伯', thresholdKm2: 4,      minPoints: 9,  color: '#5B6CFF', desc: '半城风物，已在掌中' },
+    { key: 'hou',      order: 5, title: '侯爵',   seal: '侯', thresholdKm2: 12,     minPoints: 12, color: '#8B5CF6', desc: '纵横十余里，一方之望' },
+    { key: 'gong',     order: 6, title: '公爵',   seal: '公', thresholdKm2: 30,     minPoints: 15, color: '#F59E0B', desc: '半壁城池，位极人臣' },
+    { key: 'wang',     order: 7, title: '王',     seal: '王', thresholdKm2: 80,     minPoints: 21, color: '#EF4444', desc: '一城之主，疆域无出其右' }
   ];
 
   /* ============================================================
@@ -149,29 +156,71 @@
      4. 爵位判定 + 进度
      ============================================================ */
 
-  function rankFor(areaKm2) {
+  /**
+   * 爵位判定
+   * @param {number} areaKm2 疆域面积
+   * @param {number} [pointCount] 疆域内的探索点数；不传则只按面积算（兼容旧调用）
+   */
+  function rankFor(areaKm2, pointCount) {
     var area = typeof areaKm2 === 'number' && isFinite(areaKm2) ? Math.max(0, areaKm2) : 0;
-    var current = RANKS[0];
-    var next = null;
+    var points = typeof pointCount === 'number' && isFinite(pointCount) ? Math.max(0, pointCount) : null;
+
+    // 1) 面积够格的最高一档
+    var areaRank = RANKS[0];
     for (var i = 0; i < RANKS.length; i += 1) {
-      if (area >= RANKS[i].thresholdKm2) {
-        current = RANKS[i];
-        next = RANKS[i + 1] || null;
+      if (area >= RANKS[i].thresholdKm2) areaRank = RANKS[i];
+    }
+
+    // 2) 扣除点数门槛：从面积档往下找第一个点数也够的
+    var current = RANKS[0];
+    if (points === null) {
+      current = areaRank;
+    } else {
+      for (var k = areaRank.order; k >= 0; k -= 1) {
+        if (points >= RANKS[k].minPoints) { current = RANKS[k]; break; }
       }
     }
+
+    // 3) 目标档：
+    //    - 若是被点数卡住 → 目标就是被卡的那一档（提示"再探索 N 个点"）
+    //    - 否则 → 面积上的下一档（提示"再扩 X km²"）
+    var blockedBy = (areaRank.order > current.order) ? areaRank : null;
+    var next = null;
+    if (blockedBy) {
+      next = blockedBy;
+    } else if (current.order + 1 < RANKS.length) {
+      next = RANKS[current.order + 1];
+    }
+
     var progress = 1;
     var toNextKm2 = 0;
+    var pointsNeeded = 0;
     if (next) {
-      var span = next.thresholdKm2 - current.thresholdKm2;
-      progress = span > 0 ? Math.min(1, Math.max(0, (area - current.thresholdKm2) / span)) : 1;
-      toNextKm2 = Math.max(0, next.thresholdKm2 - area);
+      if (blockedBy) {
+        // 被点数卡住：进度按点数算
+        var span = Math.max(1, next.minPoints - current.minPoints);
+        progress = Math.min(1, Math.max(0, (points - current.minPoints) / span));
+        pointsNeeded = Math.max(0, next.minPoints - points);
+        toNextKm2 = 0;
+      } else {
+        var spanKm = next.thresholdKm2 - current.thresholdKm2;
+        progress = spanKm > 0 ? Math.min(1, Math.max(0, (area - current.thresholdKm2) / spanKm)) : 1;
+        toNextKm2 = Math.max(0, next.thresholdKm2 - area);
+        pointsNeeded = points !== null ? Math.max(0, next.minPoints - points) : 0;
+      }
     }
+
     return {
       rank: current,
       next: next,
       progress: progress,
       toNextKm2: toNextKm2,
-      areaKm2: area
+      areaKm2: area,
+      pointCount: points,
+      blockedBy: blockedBy,
+      pointsNeeded: pointsNeeded,
+      /** 是否因为探索点太少被降级 */
+      capped: !!blockedBy
     };
   }
 
