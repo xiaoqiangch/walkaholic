@@ -98,6 +98,57 @@ CREATE TABLE IF NOT EXISTS place_photos (
   PRIMARY KEY (user_id, place_id)
 );
 
+
+-- ============================================================
+-- 探索基金（金币经济）
+-- ============================================================
+
+-- 每个用户的金币余额与累计统计
+CREATE TABLE IF NOT EXISTS wallets (
+  user_id TEXT PRIMARY KEY,
+  coins INTEGER NOT NULL DEFAULT 0,
+  total_earned INTEGER NOT NULL DEFAULT 0,
+  total_spent INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL
+);
+
+-- 金币流水（审计 + 日上限计算 + 反作弊取证）
+CREATE TABLE IF NOT EXISTS coin_ledger (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  amount INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  ref_id TEXT,
+  counterparty_id TEXT,
+  day TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ledger_user_day ON coin_ledger(user_id, day);
+CREATE INDEX IF NOT EXISTS idx_ledger_counterparty ON coin_ledger(counterparty_id);
+
+-- 注册 IP 记录（防同 IP 批量注册刷号）
+CREATE TABLE IF NOT EXISTS register_ips (
+  ip TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (ip, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_register_ips_time ON register_ips(ip, created_at);
+
+-- 惊喜结算记录（记录一次「被找到」的经济结果；一个惊喜最多一条）
+CREATE TABLE IF NOT EXISTS surprise_settlements (
+  surprise_id TEXT PRIMARY KEY,
+  finder_id TEXT NOT NULL,
+  author_id TEXT NOT NULL,
+  finder_coins INTEGER NOT NULL,
+  author_coins INTEGER NOT NULL,
+  elapsed_ms INTEGER NOT NULL,
+  distance_meters REAL,
+  blocked_reason TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_settlement_pair ON surprise_settlements(finder_id, author_id);
+
 -- 用户管理状态（后台封禁 / 解封）。单独一张表而不是给 users 加列：
 -- 老库已经在跑，CREATE TABLE IF NOT EXISTS 是纯增量操作，不需要 ALTER TABLE 迁移。
 CREATE TABLE IF NOT EXISTS user_admin (
@@ -369,6 +420,157 @@ export class AccountStore {
     const row = this.db.prepare('SELECT COUNT(*) AS c FROM surprises').get();
     return row ? Number(row.c) : 0;
   }
+
+  // ---------- 探索基金（金币经济） ----------
+
+  /** 读钱包；不存在则按初始资金创建 */
+  getWallet(userId, initialCoins, now) {
+    const row = this.db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(userId);
+    if (!row) {
+      this.db.prepare(
+        'INSERT INTO wallets (user_id, coins, total_earned, total_spent, updated_at) VALUES (?, ?, ?, 0, ?)'
+      ).run(userId, initialCoins, initialCoins, now);
+      return { userId, coins: initialCoins, totalEarned: initialCoins, totalSpent: 0 };
+    }
+    return {
+      userId: String(row.user_id),
+      coins: Number(row.coins),
+      totalEarned: Number(row.total_earned),
+      totalSpent: Number(row.total_spent)
+    };
+  }
+
+  /** 直接改余额（delta 正负）；返回新余额 */
+  adjustWallet(userId, delta, now) {
+    const d = Math.trunc(Number(delta) || 0);
+    if (d > 0) {
+      this.db.prepare(
+        'UPDATE wallets SET coins = coins + ?, total_earned = total_earned + ?, updated_at = ? WHERE user_id = ?'
+      ).run(d, d, now, userId);
+    } else if (d < 0) {
+      this.db.prepare(
+        'UPDATE wallets SET coins = MAX(0, coins + ?), total_spent = total_spent + ?, updated_at = ? WHERE user_id = ?'
+      ).run(d, -d, now, userId);
+    }
+    const row = this.db.prepare('SELECT coins FROM wallets WHERE user_id = ?').get(userId);
+    return row ? Number(row.coins) : 0;
+  }
+
+  /** 记一条金币流水 */
+  addLedgerEntry(entry) {
+    this.db.prepare(
+      `INSERT INTO coin_ledger (id, user_id, amount, kind, ref_id, counterparty_id, day, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      entry.id, entry.userId, entry.amount, entry.kind,
+      entry.refId || null, entry.counterpartyId || null, entry.day, entry.createdAt
+    );
+  }
+
+  /**
+   * 某用户某天的「劳动收益」（用于日上限）。
+   * 必须排除 initial_grant —— 启动资金不是赚的，算进去会让新用户当天就虚拟消耗 100 额度。
+   */
+  earnedOnDay(userId, day) {
+    const row = this.db.prepare(
+      `SELECT COALESCE(SUM(amount), 0) AS s FROM coin_ledger
+       WHERE user_id = ? AND day = ? AND amount > 0
+         AND kind IN ('find_reward', 'bury_reward')`
+    ).get(userId, day);
+    return row ? Number(row.s) : 0;
+  }
+
+  /**
+   * 某用户某天埋了几个。
+   * 注意：不能从 coin_ledger 数 —— 埋盒已改为零成本，不再写押金流水。
+   * 必须直接数 surprises 表（按本地日期）。
+   */
+  buriedOnDay(userId, day) {
+    const row = this.db.prepare(
+      `SELECT COUNT(*) AS c FROM surprises
+       WHERE user_id = ? AND date(created_at / 1000, 'unixepoch', 'localtime') = ?`
+    ).get(userId, day);
+    return row ? Number(row.c) : 0;
+  }
+
+  /** 一对用户某天结算了几次（防互刷） */
+  pairSettledOnDay(finderId, authorId, day) {
+    const row = this.db.prepare(
+      `SELECT COUNT(*) AS c FROM surprise_settlements
+       WHERE finder_id = ? AND author_id = ? AND date(created_at / 1000, 'unixepoch', 'localtime') = ?`
+    ).get(finderId, authorId, day);
+    return row ? Number(row.c) : 0;
+  }
+
+  /** 记结算 */
+  addSettlement(item) {
+    this.db.prepare(
+      `INSERT OR REPLACE INTO surprise_settlements
+       (surprise_id, finder_id, author_id, finder_coins, author_coins, elapsed_ms, distance_meters, blocked_reason, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      item.surpriseId, item.finderId, item.authorId, item.finderCoins, item.authorCoins,
+      item.elapsedMs, item.distanceMeters || null, item.blockedReason || null, item.createdAt
+    );
+  }
+
+  /** 附近该用户的其它惊喜，最近的一个距离（防垃圾点） */
+  nearestOwnSurpriseMeters(userId, lat, lon) {
+    const rows = this.db.prepare('SELECT lat, lon FROM surprises WHERE user_id = ?').all(userId);
+    let best = Infinity;
+    for (const row of rows) {
+      const dLat = (Number(row.lat) - lat) * 111320;
+      const dLon = (Number(row.lon) - lon) * 111320 * Math.cos(lat * Math.PI / 180);
+      const d = Math.sqrt(dLat * dLat + dLon * dLon);
+      if (d < best) best = d;
+    }
+    return best === Infinity ? null : best;
+  }
+
+  /** 记录注册 IP */
+  recordRegisterIp(ip, userId, createdAt) {
+    if (!ip) return;
+    this.db.prepare(
+      'INSERT OR IGNORE INTO register_ips (ip, user_id, created_at) VALUES (?, ?, ?)'
+    ).run(ip, userId, createdAt);
+  }
+
+  /** 某 IP 在时间窗口内注册了几个号 */
+  countRegistrationsFromIp(ip, sinceAt) {
+    const row = this.db.prepare(
+      'SELECT COUNT(*) AS c FROM register_ips WHERE ip = ? AND created_at >= ?'
+    ).get(ip, sinceAt);
+    return row ? Number(row.c) : 0;
+  }
+
+  /** 两个用户的注册 IP 是否有交集（同 IP 互刷判定） */
+  sharesRegisterIp(userA, userB) {
+    const row = this.db.prepare(
+      `SELECT 1 AS hit FROM register_ips a
+       JOIN register_ips b ON a.ip = b.ip
+       WHERE a.user_id = ? AND b.user_id = ? LIMIT 1`
+    ).get(userA, userB);
+    return !!row;
+  }
+
+  /** 金币排行榜（探索基金榜） */
+  topWallets(limit) {
+    return this.db.prepare(
+      `SELECT w.user_id, w.coins, u.username
+       FROM wallets w JOIN users u ON u.id = w.user_id
+       ORDER BY w.coins DESC LIMIT ?`
+    ).all(Math.max(1, Math.min(100, limit || 20))).map((row) => ({
+      userId: String(row.user_id),
+      username: String(row.username),
+      coins: Number(row.coins)
+    }));
+  }
+
+  countWallets() {
+    const row = this.db.prepare('SELECT COUNT(*) AS c FROM wallets').get();
+    return row ? Number(row.c) : 0;
+  }
+
 
   // MARK: - 到达照片（check-in photo）
 

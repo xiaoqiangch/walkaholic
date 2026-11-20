@@ -46,6 +46,17 @@ import {
   claimSurprise
 } from './surprises.mjs';
 import {
+  EconomyError,
+  ECONOMY,
+  ensureWallet,
+  chargeBuryDeposit,
+  settleFind,
+  checkRegisterIpAllowed,
+  checkBuryEligibility,
+  deviceSignature,
+  dayKey
+} from './economy.mjs';
+import {
   WeChatError,
   exchangeCode as wechatExchangeCode,
   fetchProfile as wechatFetchProfile,
@@ -183,6 +194,14 @@ function sendJson(req, res, status, payload, extraHeaders) {
   res.end(body);
 }
 
+/** 惊喜作者当时的设备指纹（存在 coin_ledger 里不方便，改用 surprises 没有该字段 →
+ *  简化方案：用作者注册 IP 与寻找者比对即可，这里返回空串表示"无法比对" */
+function surpriseDeviceSignature(store, surprise) {
+  if (!surprise || !surprise.userId) return '';
+  // 没存作者的 UA 指纹，返回一个不可能匹配的值（不会误判为同设备）
+  return 'unknown-device-' + surprise.userId;
+}
+
 function sendError(req, res, error) {
   if (error instanceof ApiError) {
     const payload = { error: error.message, code: error.code };
@@ -191,6 +210,10 @@ function sendError(req, res, error) {
     return;
   }
   if (error instanceof SurpriseError) {
+    sendJson(req, res, error.status, { error: error.message, code: error.code });
+    return;
+  }
+  if (error instanceof EconomyError) {
     sendJson(req, res, error.status, { error: error.message, code: error.code });
     return;
   }
@@ -211,6 +234,9 @@ function sendError(req, res, error) {
     return;
   }
   const message = error && error.message ? String(error.message) : '服务器内部错误';
+  if (process.env.WA_DEBUG_ERRORS) {
+    console.error('[500]', req.method, req.url, '\n', error && error.stack);
+  }
   sendJson(req, res, 500, { error: message, code: 'INTERNAL' });
 }
 
@@ -557,6 +583,11 @@ export function createServer(options = {}) {
     if (pathname === '/api/auth/register' && method === 'POST') {
       const body = await readBody(req);
       const username = validateUsername(body.username);
+      // 防批量刷号：同 IP 24h 注册上限
+      const ipCheck = checkRegisterIpAllowed(store, clientIP(req, trustProxy), now());
+      if (!ipCheck.allowed) {
+        throw new ApiError(ipCheck.reason, ipCheck.code, 429);
+      }
       const password = validatePassword(body.password);
       if (store.findUserByUsername(username)) {
         throw new ApiError('用户名已被占用', 'USERNAME_TAKEN', 409);
@@ -571,6 +602,8 @@ export function createServer(options = {}) {
         }
         throw error;
       }
+      store.recordRegisterIp(clientIP(req, trustProxy), user.id, now());
+      ensureWallet(store, user.id, now());   // 发放 100 金币启动资金
       createLoginResponse(req, res, user);
       return;
     }
@@ -725,6 +758,59 @@ export function createServer(options = {}) {
       return;
     }
 
+    // ---------- 探索基金（金币） ----------
+    if (pathname === '/api/wallet' && method === 'GET') {
+      const current = requireUser(req);
+      const user = current.user;
+      const wallet = ensureWallet(store, user.id, now());
+      const today = dayKey(now());
+      sendJson(req, res, 200, {
+        ok: true,
+        wallet: {
+          coins: wallet.coins,
+          totalEarned: wallet.totalEarned,
+          totalSpent: wallet.totalSpent,
+          earnedToday: store.earnedOnDay(user.id, today),
+          dailyCap: ECONOMY.DAILY_EARN_CAP,
+          buriedToday: store.buriedOnDay(user.id, today),
+          dailyBuryLimit: ECONOMY.DAILY_BURY_LIMIT
+        },
+        economy: {
+          initialCoins: ECONOMY.INITIAL_COINS,
+          buryDeposit: ECONOMY.BURY_DEPOSIT,
+          buryReward: ECONOMY.BURY_REWARD,
+          findBaseReward: ECONOMY.FIND_BASE_REWARD,
+          findMaxReward: ECONOMY.FIND_MAX_REWARD
+        }
+      });
+      return;
+    }
+
+    if (pathname === '/api/wallet/ledger' && method === 'GET') {
+      const current = requireUser(req);
+      const user = current.user;
+      const rows = store.db.prepare(
+        'SELECT * FROM coin_ledger WHERE user_id = ? ORDER BY created_at DESC LIMIT 60'
+      ).all(user.id);
+      sendJson(req, res, 200, {
+        ok: true,
+        entries: rows.map((r) => ({
+          id: String(r.id),
+          amount: Number(r.amount),
+          kind: String(r.kind),
+          refId: r.ref_id ? String(r.ref_id) : null,
+          day: String(r.day),
+          createdAt: Number(r.created_at)
+        }))
+      });
+      return;
+    }
+
+    if (pathname === '/api/wallet/leaderboard' && method === 'GET') {
+      sendJson(req, res, 200, { ok: true, items: store.topWallets(20) });
+      return;
+    }
+
     if (pathname === '/api/surprises/mine' && method === 'GET') {
       // 登录用户按账号查；匿名用户按设备标识查（他们埋的惊喜也能收到「被找到」回执）
       let current = null;
@@ -741,7 +827,26 @@ export function createServer(options = {}) {
     if (pathname.startsWith('/api/surprises/') && pathname.endsWith('/find') && method === 'POST') {
       const current = requireUser(req);
       const id = decodeURIComponent(pathname.slice('/api/surprises/'.length, -'/find'.length));
-      sendJson(req, res, 200, claimSurprise(store, current.user, id, now));
+      // 先取出惊喜（结算需要 authorId / createdAt），再认领
+      const surpriseRow = store.getSurprise(id);
+      claimSurprise(store, current.user, id, now);
+      let economy = null;
+      if (surpriseRow) {
+        const finderIp = clientIP(req, trustProxy);
+        economy = settleFind(store, {
+          surprise: {
+            id: surpriseRow.id,
+            userId: surpriseRow.userId,
+            createdAt: surpriseRow.createdAt
+          },
+          finderId: current.user.id,
+          distanceMeters: Number((req.headers && req.headers['x-travel-meters']) || 0),
+          sameDevice: false,
+          sameIp: store.sharesRegisterIp(current.user.id, surpriseRow.userId),
+          firstFind: true
+        }, now());
+      }
+      sendJson(req, res, 200, { ok: true, id, economy });
       return;
     }
 
