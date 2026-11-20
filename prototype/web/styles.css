@@ -3918,3 +3918,110 @@ body[data-sheet="1"] .toast,
   font-size: 12px;
   color: var(--ink-3, #9CA3AF);
 }
+
+/* ============================================================
+   41. 我的城市（个人地图）
+   ============================================================ */
+
+.territory__actions { display: flex; gap: 6px; flex: none; }
+
+.territory__map {
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(91, 108, 255, .22);
+  background: #FFFFFF;
+  color: var(--ink-2, #4B5563);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.mymap__card {
+  margin: 8px 0 0;
+  padding: 14px;
+  border-radius: var(--radius-card);
+  border: 1px solid var(--line);
+  background: linear-gradient(160deg, #FFFFFF 0%, #F7F9FF 100%);
+}
+
+.mymap__head {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin-bottom: 6px;
+}
+
+.mymap__rank {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.mymap__desc {
+  margin: 2px 0 0;
+  font-size: 11.5px;
+  color: var(--ink-3, #9CA3AF);
+}
+
+.mymap__svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1 / 1;
+}
+
+.mymap__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 260px;
+  color: var(--ink-3, #9CA3AF);
+  font-size: 13px;
+}
+
+.mymap__empty span { font-size: 34px; opacity: .55; }
+
+.mymap__empty p { margin: 0; }
+
+.mymap__empty-sub { font-size: 11.5px; opacity: .85; }
+
+.mymap__stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.mymap__stats > div { display: flex; flex-direction: column; gap: 2px; }
+
+.mymap__stats b {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.mymap__stats b i {
+  font-style: normal;
+  font-size: 10.5px;
+  color: var(--ink-3, #9CA3AF);
+  margin-left: 1px;
+}
+
+.mymap__stats span {
+  font-size: 10.5px;
+  color: var(--ink-3, #9CA3AF);
+}
+
+.mymap__note {
+  margin: 12px 0 0;
+  text-align: center;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--ink-3, #9CA3AF);
+}
