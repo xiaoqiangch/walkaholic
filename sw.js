@@ -5,7 +5,7 @@
  *   - 其他同源请求：网络优先，失败回落缓存
  *   - 跨域请求一律不碰
  */
-const VERSION = "walkaholic-v49-territory"
+const VERSION = "walkaholic-v50-mymap"
 const SHELL = [
   "./",
   "./index.html",

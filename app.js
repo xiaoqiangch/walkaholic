@@ -7,11 +7,11 @@
 
   var D = window.WA_DATA;
   var STORE_KEY = 'walkaholic:v1';
-  var APP_VERSION = 'v49';
+  var APP_VERSION = 'v50';
   var APP_BUILT_AT = '2026-11-09 14:10';
 
   var ROUTES = ['/home', '/setup', '/journey', '/reveal', '/cards', '/social', '/profile', '/debug',
-    '/achievements', '/watch', '/bury', '/seek', '/seek-detail', '/surprises', '/account', '/datasource'];
+    '/achievements', '/watch', '/bury', '/seek', '/seek-detail', '/surprises', '/account', '/datasource', '/mymap'];
   var TAB_ROUTES = ['/home', '/cards', '/social', '/profile'];
   var LEVEL_NAMES = ['出门新手', '街角观察员', '城市漫游者', '惊喜收藏家', '迷雾探险家',
     '黄昏猎人', '夜路诗人', '步迷大师', '城市传说', '盲盒之神'];
@@ -3046,7 +3046,10 @@
       '<p class="territory__rank">' + esc(rankInfo.rank.title) + '</p>' +
       '<p class="territory__desc">' + esc(rankInfo.rank.desc) + '</p>' +
       '</div>' +
+      '<div class="territory__actions">' +
+      '<button type="button" class="territory__map" data-action="open-mymap" aria-label="查看我的城市地图">地图</button>' +
       '<button type="button" class="territory__share" data-action="share-territory" aria-label="分享身份卡牌">分享</button>' +
+      '</div>' +
       '</div>' +
       body +
       '</section>';
@@ -3269,6 +3272,113 @@
       '<div class="section-head"><h2>设置</h2></div>' +
       settings +
       '<p class="version">步迷 Walkaholic ' + APP_VERSION + '</p>' +
+      '</div>';
+  }
+
+
+  /* ============================================================
+     我的城市（个人地图）
+     - 画疆域多边形（凸包）+ 已占领地点
+     - 不画轨迹（Web 端不记录轨迹，只画已开盒的真实地点）
+     - 没有疆域时显示空状态，绝不画假多边形
+     ============================================================ */
+  function myMapHTML() {
+    var info = territoryInfo();
+    if (!info) {
+      return '<div class="page"><div class="page__bar">' +
+        '<button class="iconbtn" data-action="back-profile" aria-label="返回">' + ICON.back + '</button></div>' +
+        '<div class="empty"><p>地图加载失败</p></div></div>';
+    }
+    var T = window.BW_TERRITORY;
+    var stats = info.stats;
+    var rankInfo = info.rank;
+    var color = rankInfo.rank.color;
+    var hasTerritory = stats.hull && stats.hull.length >= 3;
+
+    // 视野：取所有占领点（含非凸包点）的包围盒
+    var pts = info.points;
+    var mapSvg = '';
+    if (!pts.length) {
+      mapSvg = '<div class="mymap__empty"><span aria-hidden="true">🗺️</span>' +
+        '<p>地图还是空的</p><p class="mymap__empty-sub">开一个盲盒走完，地点会自己长在这张图上</p></div>';
+    } else {
+      var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      var sumLat = 0;
+      pts.forEach(function (p) { sumLat += p.lat; });
+      var meanLat = sumLat / pts.length;
+      var kx = Math.cos(meanLat * Math.PI / 180) * 111320;
+      var ky = 110540;
+      var origin = pts[0];
+      var projected = pts.map(function (p) {
+        return { x: (p.lon - origin.lon) * kx, y: (p.lat - origin.lat) * ky, name: p.name };
+      });
+      projected.forEach(function (p) {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+      });
+      var spanX = Math.max(1, maxX - minX);
+      var spanY = Math.max(1, maxY - minY);
+      var VW = 320, VH = 320, PAD = 34;
+      var scale = Math.min((VW - PAD * 2) / spanX, (VH - PAD * 2) / spanY);
+      var offX = VW / 2 - (minX + maxX) / 2 * scale;
+      var offY = VH / 2 + (minY + maxY) / 2 * scale;
+
+      function toSvg(x, y) {
+        return { x: offX + x * scale, y: offY - y * scale };
+      }
+
+      var polyPath = '';
+      if (hasTerritory) {
+        polyPath = stats.hull.map(function (h, i) {
+          var sp = toSvg(h.x, h.y);
+          return (i === 0 ? 'M ' : ' L ') + sp.x.toFixed(1) + ' ' + sp.y.toFixed(1);
+        }).join('') + ' Z';
+      }
+
+      var dots = projected.map(function (p) {
+        var sp = toSvg(p.x, p.y);
+        return '<circle cx="' + sp.x.toFixed(1) + '" cy="' + sp.y.toFixed(1) + '" r="4.5" fill="' + color + '" opacity=".85"/>';
+      }).join('');
+
+      var hullDots = '';
+      if (hasTerritory) {
+        hullDots = stats.hull.map(function (h) {
+          var sp = toSvg(h.x, h.y);
+          return '<circle cx="' + sp.x.toFixed(1) + '" cy="' + sp.y.toFixed(1) + '" r="6.5" fill="#FFFFFF" stroke="' + color + '" stroke-width="2.5"/>';
+        }).join('');
+      }
+
+      mapSvg = '<svg class="mymap__svg" viewBox="0 0 ' + VW + ' ' + VH + '" role="img" aria-label="我的疆域地图">' +
+        '<rect x="0" y="0" width="' + VW + '" height="' + VH + '" fill="none"/>' +
+        (polyPath ? '<path d="' + polyPath + '" fill="' + color + '" fill-opacity=".18" stroke="' + color + '" stroke-width="2.5" stroke-linejoin="round"/>' : '') +
+        dots + hullDots +
+        '</svg>';
+    }
+
+    var statsRow = pts.length ? '<div class="mymap__stats">' +
+      '<div><b>' + esc(T.formatArea(stats.areaKm2)) + '</b><span>疆域面积</span></div>' +
+      '<div><b>' + stats.pointCount + '</b><span>占领地点</span></div>' +
+      '<div><b>' + Math.round(stats.spanM) + '<i>m</i></b><span>最长跨度</span></div>' +
+      '</div>' : '';
+
+    return '<div class="page">' +
+      '<div class="page__bar"><button class="iconbtn" data-action="back-profile" aria-label="返回">' + ICON.back + '</button></div>' +
+      '<header class="pagehead"><h1>我的城市</h1></header>' +
+      '<section class="mymap__card">' +
+      '<div class="mymap__head">' +
+      '<span class="territory__seal" style="--rank-color:' + color + '">' + esc(rankInfo.rank.seal) + '</span>' +
+      '<div><p class="mymap__rank">' + esc(rankInfo.rank.title) + '</p>' +
+      '<p class="mymap__desc">' + esc(rankInfo.rank.desc) + '</p></div>' +
+      '</div>' +
+      mapSvg +
+      statsRow +
+      '</section>' +
+      (hasTerritory
+        ? '<p class="mymap__note">' + esc(T.formatArea(stats.areaKm2)) + ' 的疆域由 ' + stats.hullPointCount +
+          ' 个边界点围成 · 再开新地点可以扩大范围</p>'
+        : '<p class="mymap__note">至少 3 个真实地点才能围成一片疆域</p>') +
       '</div>';
   }
 
@@ -4102,6 +4212,9 @@
       case '/profile':
         html = profileHTML();
         break;
+      case '/mymap':
+        html = myMapHTML();
+        break;
       case '/achievements':
         html = achievementsHTML();
         break;
@@ -4670,6 +4783,12 @@
         showToast('正在重新获取定位…', '📡', { duration: 1600 });
         break;
       }
+      case 'open-mymap':
+        navigate('/mymap');
+        break;
+      case 'back-profile':
+        navigate('/profile');
+        break;
       case 'share-territory':
         openTerritoryShare();
         break;
