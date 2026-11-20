@@ -637,6 +637,59 @@ export function photoFailHowto(reason: PhotoGpsFailure): string {
   return '请重新拍一张';   // noData
 }
 
+/**
+ * 分步操作指引。
+ * 设计原则（用户明确反馈过）：只说「没有位置信息」而不告诉用户怎么改，是最差的体验。
+ */
+export function photoFailSteps(reason: PhotoGpsFailure): string[] {
+  if (reason === 'noExif') {
+    return [
+      '这是截图，或从微信/QQ 转发保存的图 —— 这类图片会被去掉位置信息',
+      '请用手机「自带的相机 App」直接拍一张（不要截图）',
+      '拍之前确认相机界面有「定位箭头」图标（没有说明相机没拿到定位权限）',
+      '从相册选图时，选「原始照片 / 实际大小」，不要选压缩过的版本'
+    ];
+  }
+  if (reason === 'noGpsTag') {
+    return [
+      '打开手机「设置」',
+      '设置 → 应用 → 相机 → 权限 → 打开「位置信息 / 记录位置信息」',
+      '回到相机 App，确认界面出现「定位箭头」图标',
+      '重新拍一张'
+    ];
+  }
+  if (reason === 'heicUnsupported') {
+    return [
+      '当前照片是 HEIC/HEIF 格式，读不到里面的位置信息',
+      '请到 相机设置 → 格式 → 选「兼容性最佳 / JPEG」',
+      '重新拍一张 JPEG 照片再选'
+    ];
+  }
+  if (reason === 'pngNoExif') {
+    return [
+      'PNG 格式本身不保存位置信息',
+      '请用相机拍 JPEG 照片；如果是截图，请改用相机直接拍'
+    ];
+  }
+  if (reason === 'tooFar') {
+    return [
+      '这张照片的拍摄位置离目的地超过了允许范围',
+      '走到目的地 120 米以内',
+      '在目的地附近重新拍一张'
+    ];
+  }
+  if (reason === 'incompleteGps' || reason === 'invalidGps') {
+    return [
+      '这张照片的位置数据不完整或超出有效范围（可能被修图软件改过）',
+      '请用手机自带相机 App 重新拍一张，不要用修图软件另存'
+    ];
+  }
+  return [
+    '这个文件不是可识别的照片（可能已损坏，或是暂不支持的格式）',
+    '请用手机自带相机 App 重新拍一张 JPEG 照片'
+  ];
+}
+
 /** 失败原因 → 是否值得直接引导用户去改设置（UI 可以高亮这类） */
 export function photoFailNeedsSettings(reason: PhotoGpsFailure): boolean {
   return reason === 'noGpsTag' || reason === 'noExif';

@@ -111,7 +111,9 @@ test('EXIF：有 EXIF 但无 GPS 标签 → NO_GPS_TAG（提示去开相机定�
   const r = E.readGpsFromBuffer(toArrayBuffer(buildExif({ lat: 32, lon: 118, withGpsTag: false })));
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'NO_GPS_TAG');
-  assert.ok(E.REASON_HOWTO[r.reason].includes('位置信息'), '应告诉用户去开启位置信息');
+  var steps = E.stepsFor(r.reason).join(' ');
+  assert.ok(steps.includes('定位服务') || steps.includes('位置信息'),
+    '应告诉用户去哪个设置项开启定位，实际：' + steps);
 });
 
 test('EXIF：无 EXIF 段 → NO_EXIF', () => {
@@ -223,4 +225,34 @@ test('EXIF：HEIC/HEIF 明确识别为格式问题（不能误报「相机没开
     assert.ok(E.REASON_HOWTO[r.reason].includes('兼容性最佳') || E.REASON_HOWTO[r.reason].includes('JPEG'),
       '指引应告诉用户切到 JPEG 格式');
   }
+});
+
+test('失败提示必须是可分步照做的（不能只说"没有位置信息"就结束）', () => {
+  const reasons = ['NO_EXIF', 'NO_GPS_TAG', 'INCOMPLETE_GPS', 'UNREADABLE_GPS',
+    'INVALID_GPS', 'PNG_NO_EXIF', 'HEIC_UNSUPPORTED', 'BROKEN_EXIF', 'NOT_IMAGE',
+    'TOO_FAR', 'NO_DATA'];
+  for (const r of reasons) {
+    const steps = E.stepsFor(r);
+    assert.ok(Array.isArray(steps) && steps.length >= 2,
+      `${r} 必须至少给 2 步可操作指引，实际 ${steps.length} 步`);
+    const joined = steps.join(' ');
+    // 必须包含具体动作词（设置/打开/走近/拍/选/换 之类），不能是空话
+    assert.ok(/设置|打开|走近|拍|选|换|确认|检查|走到/.test(joined),
+      `${r} 的指引必须包含具体动作，实际：${joined}`);
+    // 不能只是重复标题
+    assert.ok(joined.length > E.REASON_TEXT[r].length + 8,
+      `${r} 的指引不能只是重复标题`);
+  }
+});
+
+test('iPhone 场景：无 EXIF 时必须提到「不要用截图/转发图」', () => {
+  const joined = E.stepsFor('NO_EXIF').join(' ');
+  assert.ok(joined.includes('截图'), '必须提醒不要用截图');
+  assert.ok(joined.includes('相机'), '必须提醒用相机直接拍');
+});
+
+test('iPhone 场景：相机没开定位时必须给出具体设置路径', () => {
+  const joined = E.stepsFor('NO_GPS_TAG').join(' ');
+  assert.ok(joined.includes('定位服务'), '必须提到「定位服务」这个设置项');
+  assert.ok(joined.includes('相机'), '必须提到「相机」权限');
 });

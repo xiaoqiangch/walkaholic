@@ -5,7 +5,7 @@
  *   - 其他同源请求：网络优先，失败回落缓存
  *   - 跨域请求一律不碰
  */
-const VERSION = "walkaholic-v55-heic"
+const VERSION = "walkaholic-v56-steps"
 const SHELL = [
   "./",
   "./index.html",

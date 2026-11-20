@@ -31,6 +31,7 @@ import {
   photoFailHowto,
   photoFailNeedsSettings,
   photoFailText,
+  photoFailSteps,
   tooFarCopy,
   verifyPhotoAt
 } from '../entry/src/main/ets/core/photo-gps';
@@ -5073,4 +5074,27 @@ test('拍照验证：HEIC/HEIF 明确识别为格式问题（不能误报「相�
     assert.ok(photoFailHowto(r.reason as PhotoGpsFailure).includes('JPEG'),
       brand + ' 指引应告诉用户切到 JPEG');
   }
+});
+
+test('拍照验证：失败提示必须是可分步照做的（不能只说「没有位置信息」）', () => {
+  const reasons: PhotoGpsFailure[] = ['noExif', 'noGpsTag', 'pngNoExif', 'heicUnsupported',
+    'tooFar', 'incompleteGps', 'invalidGps', 'notImage', 'brokenExif', 'noData'];
+  for (const r of reasons) {
+    const steps: string[] = photoFailSteps(r);
+    assert.ok(steps.length >= 2, r + ' 必须至少给 2 步可操作指引，实际 ' + String(steps.length));
+    const joined: string = steps.join(' ');
+    assert.ok(/设置|打开|走近|拍|选|换|确认|走到/.test(joined),
+      r + ' 的指引必须包含具体动作，实际：' + joined);
+    assert.ok(joined.length > photoFailText(r).length + 8,
+      r + ' 的指引不能只是重复标题');
+  }
+});
+
+test('拍照验证：iPhone 关键场景的指引要对', () => {
+  const noExif: string = photoFailSteps('noExif').join(' ');
+  assert.ok(noExif.includes('截图'), '无 EXIF 必须提醒别用截图');
+  assert.ok(noExif.includes('相机'), '无 EXIF 必须提醒用相机');
+  const noGps: string = photoFailSteps('noGpsTag').join(' ');
+  assert.ok(noGps.includes('位置信息') || noGps.includes('定位'),
+    '相机没开定位必须提到位置信息/定位设置项');
 });

@@ -962,11 +962,32 @@ enum PhotoVerifyIssue {
     var message: String {
         switch self {
         case .needsPhoto:
-            return "到达验证需要照片本身带 GPS：请用手机相机拍一张（不要用截图），或从相册选择一张原图。"
+            return "到达验证需要照片本身带 GPS。"
         case .gps(let reason):
             return PhotoGps.reasonHowto(reason)
         case .tooFar(let distance):
             return PhotoGps.tooFarText(distance: distance)
+        }
+    }
+
+    /// 分步操作指引（不能只说「没有位置信息」就结束）
+    var steps: [String] {
+        switch self {
+        case .needsPhoto:
+            return [
+                "请用手机「自带的相机 App」直接拍一张（不要用截图）",
+                "拍之前确认相机界面有「定位箭头」图标",
+                "若相机没有定位权限：设置 → 隐私与安全性 → 定位服务 → 相机 → 使用 App 期间",
+                "也可以从相册选一张「原始照片 / 实际大小」（不要选压缩版）"
+            ]
+        case .gps(let reason):
+            return PhotoGps.reasonSteps(reason)
+        case .tooFar(let distance):
+            return [
+                "这张照片拍在离目的地 \(Int(distance)) 米处，需要在 \(Int(PhotoGps.radiusMeters)) 米内",
+                "走到目的地附近（地图上「你」和「?」几乎重合的位置）",
+                "在目的地旁边重新拍一张"
+            ]
         }
     }
 }
@@ -995,10 +1016,26 @@ struct PhotoVerificationSheet: View {
                         .foregroundStyle(WATheme.ink)
                 }
 
-                Text(issue.message)
-                    .font(.body)
-                    .foregroundStyle(WATheme.ink2)
-                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 9) {
+                    Text("照下面这样做：")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(WATheme.ink2)
+                    ForEach(Array(issue.steps.enumerated()), id: \.offset) { index, step in
+                        HStack(alignment: .top, spacing: 8) {
+                            Text("\(index + 1)")
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(WATheme.ember)
+                                .frame(width: 18, height: 18)
+                                .background(WATheme.ember.opacity(0.12))
+                                .clipShape(Circle())
+                            Text(step)
+                                .font(.subheadline)
+                                .foregroundStyle(WATheme.ink2)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                        }
+                    }
+                }
 
                 Text("验证规则：照片 EXIF 里的拍摄点与目的地直线距离 ≤ \(Int(PhotoGps.radiusMeters)) 米。")
                     .font(.caption)
@@ -1038,7 +1075,7 @@ struct PhotoVerificationSheet: View {
                 }
             }
         }
-        .presentationDetents([.medium])
+        .presentationDetents([.medium, .large])
     }
 }
 

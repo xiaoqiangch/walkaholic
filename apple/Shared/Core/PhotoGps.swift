@@ -126,23 +126,62 @@ public enum PhotoGps {
         }
     }
 
-    public static func reasonHowto(_ reason: PhotoGpsFailure) -> String {
+    /// 分步操作指引。
+    /// 设计原则（用户明确反馈过）：只说「没有位置信息」而不告诉用户怎么改，是最差的体验。
+    public static func reasonSteps(_ reason: PhotoGpsFailure) -> [String] {
         switch reason {
         case .noExif:
-            return "请用手机自带相机 App 拍一张新照片（不要用截图，也不要转发微信里的图）"
+            return [
+                "这是截图，或从微信/QQ 转发保存的图 —— 这类图片会被去掉位置信息",
+                "请用手机「自带的相机 App」直接拍一张（不要截图）",
+                "拍之前确认相机界面有「定位箭头」图标（没有说明相机没拿到定位权限）",
+                "从相册选图时，选「原始照片 / 实际大小」，不要选压缩过的版本"
+            ]
         case .noGpsTag:
-            // 任务给定的精确文案（B3）
-            return "请到 设置 → 相机 → 打开「位置信息」或「地点标记」，然后重新拍一张"
+            return [
+                "打开 iPhone「设置」",
+                "设置 → 隐私与安全性 → 定位服务 → 找到「相机」→ 选「使用 App 期间」",
+                "回到相机 App，确认界面出现「定位箭头」图标",
+                "重新拍一张"
+            ]
         case .incompleteGps:
-            return "这张图的位置信息被改过或不完整，请重新用相机拍一张"
+            return [
+                "这张照片的位置字段不完整（可能被修图软件改过）",
+                "请用手机自带相机 App 重新拍一张，不要用修图软件另存"
+            ]
         case .invalidGps:
-            return "请重新用相机拍一张"
+            return [
+                "照片里的坐标超出有效范围（可能被篡改）",
+                "请用手机自带相机 App 重新拍一张"
+            ]
         case .notImage:
-            return "请选择一张照片"
+            return [
+                "这个文件不是可识别的图片，或是 HEIC/HEIF 等暂不支持的格式",
+                "请用相机拍一张 JPEG 照片（设置 → 相机 → 格式 → 兼容性最佳）"
+            ]
         case .brokenExif:
-            return "请重新用相机拍一张"
+            return [
+                "这张照片的文件结构异常（可能没下载完整，或被其他软件改过）",
+                "请用手机自带相机 App 重新拍一张"
+            ]
         case .pngNoExif:
-            return "请用相机拍 JPEG 照片，不要用截图或 PNG"
+            return [
+                "PNG 格式本身不保存位置信息",
+                "请用相机拍 JPEG 照片；如果是截图，请改用相机直接拍"
+            ]
+        }
+    }
+
+    /// 一句话摘要（用于 toast 等短提示）
+    public static func reasonHowto(_ reason: PhotoGpsFailure) -> String {
+        switch reason {
+        case .noExif: return "请用手机自带相机拍新照片，不要用截图或转发的图"
+        case .noGpsTag: return "请到 设置 → 隐私与安全性 → 定位服务 → 相机 → 选「使用 App 期间」"
+        case .incompleteGps: return "请用相机重新拍一张"
+        case .invalidGps: return "请用相机重新拍一张"
+        case .notImage: return "请选择一张相机拍的 JPEG 照片"
+        case .brokenExif: return "请用相机重新拍一张"
+        case .pngNoExif: return "请用相机拍 JPEG，不要用截图"
         }
     }
 

@@ -37,6 +37,7 @@ import {
   PHOTO_RADIUS_METERS,
   checkPhotoArrival,
   photoFailHowto,
+  photoFailSteps,
   photoFailText
 } from '../core/photo-gps';
 import {
@@ -97,6 +98,7 @@ export struct RevealView {
   @State private verifyFailTitle: string = '';
   /** 验证失败：操作指引 */
   @State private verifyFailHowto: string = '';
+  @State private verifyFailSteps: string[] = [];
   /** 验证失败原因（用于区分「去改设置」和「走近一点」） */
   @State private verifyFailReason: string = '';
 
@@ -179,6 +181,7 @@ export struct RevealView {
   private clearVerifyFail(): void {
     this.verifyFailTitle = '';
     this.verifyFailHowto = '';
+    this.verifyFailSteps = [];
     this.verifyFailReason = '';
   }
 
@@ -203,6 +206,7 @@ export struct RevealView {
       this.verifyFailReason = 'notImage';
       this.verifyFailTitle = photoFailText('notImage');
       this.verifyFailHowto = photoFailHowto('notImage');
+      this.verifyFailSteps = photoFailSteps('notImage');
       return;
     }
 
@@ -235,6 +239,7 @@ export struct RevealView {
     this.verifyFailReason = check.reason === undefined ? 'noData' : check.reason;
     this.verifyFailTitle = check.title;
     this.verifyFailHowto = check.howto;
+    this.verifyFailSteps = photoFailSteps((check.reason !== undefined ? check.reason : 'notImage') as PhotoGpsFailure);
   }
 
   /** 收录后再补挂一次验证凭证（先拍后收录的顺序） */
@@ -336,11 +341,39 @@ export struct RevealView {
       .width('100%')
       .alignItems(VerticalAlign.Top)
 
-      Text(this.verifyFailHowto)
-        .fontSize(WAFont.microSm)
-        .fontColor(WAColor.ink2)
-        .lineHeight(17)
-        .width('100%')
+      if (this.verifyFailSteps.length > 0) {
+        Text('照下面这样做：')
+          .fontSize(WAFont.microSm)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(WAColor.ink2)
+          .width('100%')
+        ForEach(this.verifyFailSteps, (step: string, index: number) => {
+          Row({ space: 6 }) {
+            Text(String(index + 1))
+              .fontSize(WAFont.microSm)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(WAColor.ember)
+              .textAlign(TextAlign.Center)
+              .width(16)
+              .height(16)
+              .borderRadius(8)
+              .backgroundColor('#1AFA2A2D')
+            Text(step)
+              .fontSize(WAFont.microSm)
+              .fontColor(WAColor.ink2)
+              .lineHeight(17)
+              .layoutWeight(1)
+          }
+          .width('100%')
+          .alignItems(VerticalAlign.Top)
+        }, (step: string, index: number) => String(index) + step)
+      } else {
+        Text(this.verifyFailHowto)
+          .fontSize(WAFont.microSm)
+          .fontColor(WAColor.ink2)
+          .lineHeight(17)
+          .width('100%')
+      }
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
