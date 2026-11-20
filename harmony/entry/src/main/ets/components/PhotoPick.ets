@@ -12,9 +12,9 @@
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { camera, cameraPicker } from '@kit.CameraKit';
 import { image } from '@kit.ImageKit';
+import { abilityAccessCtrl, common, Permissions } from '@kit.AbilityKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { util } from '@kit.ArkTS';
-import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { computeDHash } from '../core/surprise';
 
@@ -24,6 +24,31 @@ const HASH_HEIGHT: number = 8;
 
 /** 沙箱内照片存放目录（相对 filesDir） */
 const PHOTO_DIR: string = 'surprises';
+
+/**
+ * 相册读取需要的「地理信息」权限。
+ *
+ * 为什么必须申请：Media Library Kit 在应用只读打开图片时会**脱敏**，
+ * 直接抹掉 EXIF 里的 GPS 字段（官方 FAQ medialibrary-asset-hidesensitive-faq）。
+ * 拿到 `ohos.permission.MEDIA_LOCATION` 后脱敏级别变为「不脱敏」，
+ * 照片里的经纬度才读得到 —— 否则「照片明明带 GPS」也会被判成 noGpsTag。
+ */
+const MEDIA_LOCATION_PERMISSION: Permissions = 'ohos.permission.MEDIA_LOCATION';
+
+/** 申请相册地理信息权限；已授权时直接返回 true（系统不会重复弹窗）。 */
+export async function requestMediaLocationPermission(context: common.UIAbilityContext): Promise<boolean> {
+  try {
+    const atManager: abilityAccessCtrl.AtManager = abilityAccessCtrl.createAtManager();
+    const result = await atManager.requestPermissionsFromUser(context, [MEDIA_LOCATION_PERMISSION]);
+    if (result === undefined || result.authResults === undefined || result.authResults.length === 0) {
+      return false;
+    }
+    return result.authResults[0] === 0;
+  } catch (err) {
+    const error = err as BusinessError;
+    return false;
+  }
+}
 
 export class PickedPhoto {
   /** 沙箱内文件路径（photoUri 字段用） */
@@ -259,9 +284,13 @@ export async function takeAndAdoptPhoto(context: common.UIAbilityContext): Promi
 
 /**
  * 从相册选一张并落到沙箱。
- * 失败返回 undefined。
+ *
+ * 选图前先申请 `MEDIA_LOCATION`：否则系统会对照片做 EXIF 脱敏、
+ * 把 GPS 字段抹掉，拍照验证就永远「读不到位置信息」。
+ * 用户拒绝授权时仍然能选图，只是照片可能没有坐标（由调用方按失败文案提示）。
  */
 export async function pickAndAdoptPhoto(context: common.UIAbilityContext): Promise<PickedPhoto | undefined> {
+  await requestMediaLocationPermission(context);
   const uri: string | undefined = await pickPhotoFromAlbum();
   if (uri === undefined) return undefined;
   return adoptPhoto(context, uri);

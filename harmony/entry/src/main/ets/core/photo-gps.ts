@@ -51,6 +51,14 @@ export type PhotoGpsFailure =
   /** Web 端还有一个 UNREADABLE_GPS：坐标能定位到标签但值读不出来 */
   | 'unreadableGps';
 
+/**
+ * 经纬度点（ArkTS 不允许把对象字面量当类型用，所以显式声明接口）。
+ */
+export interface PhotoGpsPoint {
+  lat: number;
+  lon: number;
+}
+
 export interface PhotoGpsResult {
   ok: boolean;
   lat?: number;
@@ -553,7 +561,7 @@ export interface PhotoVerifyResult {
  */
 export function verifyPhotoAt(
   target: GeoPoint,
-  photo: { lat: number; lon: number },
+  photo: PhotoGpsPoint,
   radiusMeters?: number
 ): PhotoVerifyResult {
   const radius: number = radiusMeters !== undefined && radiusMeters > 0
@@ -719,7 +727,7 @@ export interface PhotoArrivalCheck {
   /** 演示地点 / 目的地无坐标 → 跳过验证 */
   demoSkip: boolean;
   /** 照片里的坐标 */
-  photoGps?: { lat: number; lon: number };
+  photoGps?: PhotoGpsPoint;
   /** 与目的地的实测距离（米） */
   distanceMeters?: number;
   /** 失败原因 */
@@ -760,7 +768,7 @@ export function checkPhotoArrival(
   target: GeoPoint | undefined,
   base64: string,
   radiusMeters?: number,
-  fallbackGps?: { lat: number; lon: number }
+  fallbackGps?: PhotoGpsPoint
 ): PhotoArrivalCheck {
   // 演示地点无坐标：按规格跳过验证（绝不因为「没有坐标」而判用户失败）
   if (target === undefined || !isFinite(target.latitude) || !isFinite(target.longitude)) {
@@ -778,15 +786,15 @@ export function checkPhotoArrival(
   const hasPhotoGps: boolean =
     parsed.ok && parsed.lat !== undefined && parsed.lon !== undefined;
 
-  let coordinate: { lat: number; lon: number } | undefined = undefined;
+  let coordinate: PhotoGpsPoint | undefined = undefined;
   let source: ArrivalSource = 'photo';
   if (hasPhotoGps) {
-    coordinate = { lat: parsed.lat as number, lon: parsed.lon as number };
+    coordinate = { lat: parsed.lat as number, lon: parsed.lon as number } as PhotoGpsPoint;
     source = 'photo';
   } else if (fallbackGps !== undefined &&
     isFinite(fallbackGps.lat) && isFinite(fallbackGps.lon)) {
     // 鸿蒙 App 内拍照：CameraPicker 永远不带 GPS，用拍照瞬间的设备定位兜底
-    coordinate = { lat: fallbackGps.lat, lon: fallbackGps.lon };
+    coordinate = { lat: fallbackGps.lat, lon: fallbackGps.lon } as PhotoGpsPoint;
     source = 'device';
   }
 

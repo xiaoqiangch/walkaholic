@@ -4965,7 +4965,55 @@ test('到达验证：完整链路（真照片坐标 → 通过 / 太远 → 失�
   );
   assert.equal(noGps.ok, false);
   assert.equal(noGps.reason, 'noGpsTag');
+  assert.equal(noGps.source, 'photo', '没有兜底坐标时来源应是 photo（表示照片路径失败）');
   assert.ok(noGps.howto.indexOf('记录位置信息') >= 0 || noGps.howto.indexOf('位置信息') >= 0);
+});
+
+test('到达验证：鸿蒙相机不写 GPS 时用设备定位兜底，且标注来源为 device', (): void => {
+  // CameraPicker 的隐私规格决定它拍的照片永远不带 GPS（华为 FAQ faqs-camera-58）。
+  // 这条路径只能用拍照瞬间的设备定位兜底，但必须让 UI 分得清凭据来源。
+  const alphabet: string = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  function toBase64(bytes: Uint8Array): string {
+    let out: string = '';
+    for (let i = 0; i < bytes.length; i += 3) {
+      const b0: number = bytes[i];
+      const b1: number = i + 1 < bytes.length ? bytes[i + 1] : 0;
+      const b2: number = i + 2 < bytes.length ? bytes[i + 2] : 0;
+      out += alphabet.charAt(b0 >> 2);
+      out += alphabet.charAt(((b0 & 0x03) << 4) | (b1 >> 4));
+      out += i + 1 < bytes.length ? alphabet.charAt(((b1 & 0x0F) << 2) | (b2 >> 6)) : '=';
+      out += i + 2 < bytes.length ? alphabet.charAt(b2 & 0x3F) : '=';
+    }
+    return out;
+  }
+
+  const target: GeoPoint = { latitude: 32.06, longitude: 118.77 };
+  const noGpsPhoto: string = toBase64(buildExifJpeg(0, 0, false, false));
+
+  const viaDevice: PhotoArrivalCheck = checkPhotoArrival(
+    target, noGpsPhoto, 120, { lat: 32.0602, lon: 118.7705 }
+  );
+  assert.equal(viaDevice.ok, true, viaDevice.title);
+  assert.equal(viaDevice.demoSkip, false);
+  assert.equal(viaDevice.source, 'device', '照片无 GPS 时应标注来源为设备定位');
+  assert.ok(viaDevice.howto.indexOf('设备定位') >= 0, '文案必须说明是设备定位，不能冒充照片坐标');
+  assert.ok((viaDevice.distanceMeters ?? 999) < 120);
+
+  // 设备定位太远 → 仍然要拒绝，不能因为「有兜底」就放行
+  const farDevice: PhotoArrivalCheck = checkPhotoArrival(
+    target, noGpsPhoto, 120, { lat: 32.20, lon: 118.90 }
+  );
+  assert.equal(farDevice.ok, false);
+  assert.equal(farDevice.reason, 'tooFar');
+  assert.equal(farDevice.source, 'device');
+
+  // 照片自己带 GPS 时，设备定位必须被忽略（照片坐标更可信）
+  const photoWins: PhotoArrivalCheck = checkPhotoArrival(
+    target, toBase64(buildExifJpeg(32.0602, 118.7705, false, true)), 120,
+    { lat: 30.0, lon: 120.0 }
+  );
+  assert.equal(photoWins.source, 'photo', '照片有 GPS 时来源必须是 photo');
+  assert.ok(photoWins.ok, '不能被错误的兜底坐标带偏');
 });
 
 // ============================================================

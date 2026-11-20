@@ -34,6 +34,7 @@ import {
 import {
   PhotoArrivalCheck,
   PhotoGpsFailure,
+  PhotoGpsPoint,
   PHOTO_RADIUS_METERS,
   checkPhotoArrival,
   photoFailHowto,
@@ -55,6 +56,10 @@ import {
 } from '../theme/Theme';
 import { clockHHMM } from '../components/Format';
 import { categorySymbol } from '../components/WaSymbol';
+import { getCurrentLocationOnce } from '../components/Location';
+
+/** 拍照兜底定位的超时（毫秒）：太短拿不到点，太长用户会以为卡住 */
+const PHOTO_LOCATION_TIMEOUT_MS: number = 4000;
 
 const PARTICLE_INDEXES: number[] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
@@ -101,6 +106,11 @@ export struct RevealView {
   @State private verifyFailSteps: string[] = [];
   /** 验证失败原因（用于区分「去改设置」和「走近一点」） */
   @State private verifyFailReason: string = '';
+  /** 验证凭据来源：photo = 照片 EXIF，device = 拍照瞬间的设备定位 */
+  @State private verifySource: string = '';
+  /** 已验证的坐标与距离（收录后再补挂凭证时复用，不重算） */
+  private verifiedGps: PhotoGpsPoint | undefined = undefined;
+  private verifiedDistance: number = 0;
 
   private stageTimers: number[] = [];
   private toastTimer: number = -1;
@@ -190,8 +200,12 @@ export struct RevealView {
    *
    * 为什么必须**在原图上读**：canvas 重编码 / 社交软件转发都会丢 EXIF。
    * 这里读的是 picker 给的原图（落沙箱时逐字节复制，EXIF 完整保留）。
+   *
+   * `fallbackGps`：App 内拍照时拍照瞬间的设备定位。鸿蒙 CameraPicker 受隐私规格限制
+   * **永远不写 GPS**（华为官方 FAQ faqs-camera-58），所以这条路径只能用设备定位兜底；
+   * 相册选图走照片自己的 EXIF，更可信。
    */
-  private verifyArrivalPhoto(uri: string): void {
+  private verifyArrivalPhoto(uri: string, fallbackGps?: PhotoGpsPoint): void {
     const target: GeoPoint | undefined = this.targetCoordinate();
     if (target === undefined) {
       // 演示地点：跳过验证，照片只作纪念
@@ -210,7 +224,9 @@ export struct RevealView {
       return;
     }
 
-    const check: PhotoArrivalCheck = checkPhotoArrival(target, base64, PHOTO_RADIUS_METERS);
+    const check: PhotoArrivalCheck = checkPhotoArrival(
+      target, base64, PHOTO_RADIUS_METERS, fallbackGps
+    );
     if (check.demoSkip) {
       this.verifiedArrival = true;
       this.clearVerifyFail();
@@ -218,6 +234,9 @@ export struct RevealView {
     }
     if (check.ok) {
       this.verifiedArrival = true;
+      this.verifySource = check.source;
+      this.verifiedGps = check.photoGps;
+      this.verifiedDistance = check.distanceMeters === undefined ? 0 : check.distanceMeters;
       this.clearVerifyFail();
       // 记录验证凭证（疆域计算优先用照片坐标，比手机 GPS 可信）
       const placeID: string = this.currentPlaceID();
@@ -226,7 +245,7 @@ export struct RevealView {
           getStore().attachCardPhotoGps(
             placeID,
             { latitude: check.photoGps.lat, longitude: check.photoGps.lon },
-            check.distanceMeters === undefined ? 0 : check.distanceMeters
+            this.verifiedDistance
           );
         } catch (err) {
           // 卡片还没收录时挂不上，收录后再补
@@ -236,27 +255,23 @@ export struct RevealView {
     }
 
     this.verifiedArrival = false;
+    this.verifiedGps = undefined;
     this.verifyFailReason = check.reason === undefined ? 'noData' : check.reason;
     this.verifyFailTitle = check.title;
     this.verifyFailHowto = check.howto;
     this.verifyFailSteps = photoFailSteps((check.reason !== undefined ? check.reason : 'notImage') as PhotoGpsFailure);
   }
 
-  /** 收录后再补挂一次验证凭证（先拍后收录的顺序） */
+  /** 收录后再补挂一次验证凭证（先拍后收录的顺序）：直接复用已验证的坐标，不重算 */
   private attachGpsIfVerified(placeID: string): void {
     if (!this.verifiedArrival || placeID.length === 0) return;
-    const target: GeoPoint | undefined = this.targetCoordinate();
-    if (target === undefined) return;
-    if (this.checkInUri.length === 0) return;
-    const base64: string = readPhotoAsBase64(this.checkInUri);
-    if (base64.length === 0) return;
-    const check: PhotoArrivalCheck = checkPhotoArrival(target, base64, PHOTO_RADIUS_METERS);
-    if (!check.ok || check.demoSkip || check.photoGps === undefined) return;
+    const gps: PhotoGpsPoint | undefined = this.verifiedGps;
+    if (gps === undefined) return;
     try {
       getStore().attachCardPhotoGps(
         placeID,
-        { latitude: check.photoGps.lat, longitude: check.photoGps.lon },
-        check.distanceMeters === undefined ? 0 : check.distanceMeters
+        { latitude: gps.lat, longitude: gps.lon },
+        this.verifiedDistance
       );
     } catch (err) {
       // 忽略
@@ -267,6 +282,18 @@ export struct RevealView {
   private async capturePhoto(fromCamera: boolean): Promise<void> {
     if (this.uploadingPhoto) return;
     const context: common.UIAbilityContext = getContext() as common.UIAbilityContext;
+
+    // 先取一次当前定位：相机路径（见下）需要它在照片没有 GPS 时兜底。
+    // 取不到就让 fallback 为空，验证会走「照片无坐标」的失败文案，绝不虚构坐标。
+    let devicePoint: GeoPoint | undefined = undefined;
+    if (fromCamera) {
+      try {
+        devicePoint = await getCurrentLocationOnce(PHOTO_LOCATION_TIMEOUT_MS);
+      } catch (err) {
+        devicePoint = undefined;
+      }
+    }
+
     let picked: PickedPhoto | undefined = undefined;
     try {
       picked = fromCamera ? await takeAndAdoptPhoto(context) : await pickAndAdoptPhoto(context);
@@ -277,8 +304,16 @@ export struct RevealView {
 
     this.checkInUri = picked.uri;
     this.checkInRemotePath = '';
-    // 到达验证：读这张照片自己的 EXIF GPS，与目的地比对（docs §四）
-    this.verifyArrivalPhoto(picked.uri);
+    // 到达验证：照片 EXIF 优先；鸿蒙 CameraPicker 不写 GPS，相机路径用设备定位兜底
+    let fallback: PhotoGpsPoint | undefined = undefined;
+    if (devicePoint !== undefined) {
+      const point: PhotoGpsPoint = {
+        lat: devicePoint.latitude,
+        lon: devicePoint.longitude
+      };
+      fallback = point;
+    }
+    this.verifyArrivalPhoto(picked.uri, fallback);
     const placeID: string = this.currentPlaceID();
     if (placeID.length > 0) {
       try {
@@ -383,7 +418,7 @@ export struct RevealView {
     .border({ width: 1, color: '#33FA2A2D', radius: WASize.cardRadiusSm })
   }
 
-  /** 验证通过的小标识（让用户知道这张照片算数） */
+  /** 验证通过的小标识（让用户知道这张照片算数，并说清凭据来源） */
   @Builder
   verifyPassBadge() {
     Row({ space: 5 }) {
@@ -391,14 +426,29 @@ export struct RevealView {
         .fontSize(WAFont.microSm)
         .fontColor([WAColor.teal])
         .renderingStrategy(SymbolRenderingStrategy.SINGLE)
-      Text(this.requiresPhotoVerification()
-        ? '位置已验证 · 照片就在目的地附近'
-        : '演示地点 · 照片只作纪念')
+      Text(this.verifyPassText())
         .fontSize(WAFont.microSm)
         .fontColor(WAColor.teal)
-        .maxLines(1)
+        .maxLines(2)
     }
     .width('100%')
+    .alignItems(VerticalAlign.Top)
+  }
+
+  /**
+   * 验证通过文案。
+   *
+   * `photo` 是照片自己带的坐标（最可信）；`device` 是鸿蒙 App 内拍照时
+   * 用拍照瞬间的设备定位兜底 —— 必须让用户知道差别，不能冒充「照片坐标已验证」。
+   */
+  private verifyPassText(): string {
+    if (!this.requiresPhotoVerification()) {
+      return '演示地点 · 照片只作纪念';
+    }
+    if (this.verifySource === 'device') {
+      return '位置已验证 · 拍照时你在目的地 ' + String(PHOTO_RADIUS_METERS) + ' 米内（相机不写坐标，按拍照时的定位判定）';
+    }
+    return '位置已验证 · 照片就在目的地附近';
   }
 
   /** 到达实拍区块（与 iOS RevealView.checkInPhotoSection 同语义） */

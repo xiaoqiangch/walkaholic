@@ -257,7 +257,24 @@ progress  = capped ? 按点数算 : 按面积算
 |---|---|---|
 | Web | 自己解析 JPEG APP1 段（`prototype/web/exif.js`） | **必须在 canvas 压缩前读**，压缩会丢 EXIF |
 | iOS | `CGImageSourceCreateWithData` → `CGImageSourceCopyPropertiesAtIndex` → `kCGImagePropertyGPSDictionary` | ImageIO，系统 API，最可靠 |
-| 鸿蒙 | `image.createImageSource(fd)` → `getImageProperty('GPSLatitude'/'GPSLongitude')` | 部分机型只给字符串，需自己解析度分秒 |
+| 鸿蒙 | 自己解析 JPEG APP1 段（`core/photo-gps.ts`，与 Web 同一套） | 相册读图会被系统**脱敏**抹掉 GPS，必须先申请 `ohos.permission.MEDIA_LOCATION` |
+
+### 鸿蒙的平台例外：CameraPicker 不带 GPS
+
+鸿蒙 `cameraPicker` 是系统相机组件，**隐私规格决定它拍出的照片永远不写地理位置信息**
+（华为官方 FAQ `faqs-camera-58`），申请任何权限都改不了。真机实测：同一台设备上，
+系统相机 App 拍的照片带 GPS，`cameraPicker` 拍的没有。
+
+所以鸿蒙的坐标来源分两档，UI 必须标注清楚，不能混淆：
+
+| 来源 | 触发路径 | 可信度 | 判定 |
+|---|---|---|---|
+| `photo` | 系统相机 App 拍 → 相册选图 | 高（EXIF 由相机写入） | 距离 ≤ 120m |
+| `device` | App 内「拍一张」（CameraPicker） | 中（拍照那一刻的设备定位） | 距离 ≤ 120m |
+
+两者都不满足时按失败文案拒绝，**绝不虚构坐标**。Web / iOS 仍只有 `photo` 一档；
+iOS 的 App 内相机同理拿不到 EXIF，会直接提示改用系统相机拍再选图。
+
 
 ## 失败原因 → 用户提示（文案必须一致）
 
