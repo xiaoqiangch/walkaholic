@@ -37,6 +37,11 @@
         "name": "ohos.permission.APPROXIMATELY_LOCATION",
         "reason": "$string:reason_location",
         "usedScene": { "abilities": ["EntryAbility"], "when": "inuse" }
+      },
+      {
+        "name": "ohos.permission.MEDIA_LOCATION",
+        "reason": "$string:reason_media_location",
+        "usedScene": { "abilities": ["EntryAbility"], "when": "inuse" }
       }
     ]
   }

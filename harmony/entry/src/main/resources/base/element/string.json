@@ -3,6 +3,7 @@
     { "name": "module_desc", "value": "步迷：散步盲盒" },
     { "name": "EntryAbility_desc", "value": "步迷主入口" },
     { "name": "EntryAbility_label", "value": "步迷" },
-    { "name": "reason_location", "value": "用于计算你与目的地的真实距离与方位，地点在到达前保持保密" }
+    { "name": "reason_location", "value": "用于计算你与目的地的真实距离与方位，地点在到达前保持保密" },
+    { "name": "reason_media_location", "value": "用于读取你为探索验证拍摄的照片里的拍摄位置，判断是否真的到达了目的地" }
   ]
 }

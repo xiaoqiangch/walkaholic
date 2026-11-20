@@ -728,7 +728,25 @@ export interface PhotoArrivalCheck {
   title: string;
   /** UI 正文文案 */
   howto: string;
+  /**
+   * 坐标来自哪里（决定 UI 怎么说）。
+   * - `photo` = 照片 EXIF 里的坐标（Web / iOS 的唯一路径，最可信）
+   * - `device` = 照片没有 GPS 时，用拍照那一刻 App 自己的定位兜底（仅鸿蒙）
+   * - `demo` = 演示地点，跳过验证
+   */
+  source: ArrivalSource;
 }
+
+/**
+ * 坐标来源。
+ *
+ * 为什么鸿蒙需要多一档（`device`）：鸿蒙 `cameraPicker` 是系统相机组件，
+ * **隐私规格决定它拍出来的照片永远不带地理位置信息**（官方 FAQ faqs-camera-58），
+ * 申请什么权限都改不了。所以 App 内「拍一张」这条路径拿不到照片坐标，
+ * 只能用拍照瞬间 App 自己的定位兜底；而「系统相机 App 拍 → 相册选图」这条
+ * 路径照片本身带 EXIF，仍走 `photo`。
+ */
+export type ArrivalSource = 'photo' | 'device' | 'demo';
 
 /**
  * 到达验证：照片 base64 + 目的地坐标 → 结论 + 文案。
@@ -736,17 +754,20 @@ export interface PhotoArrivalCheck {
  * @param target 目的地真实坐标；undefined = 演示地点（无坐标）→ 跳过验证
  * @param base64 照片 base64
  * @param radiusMeters 允许半径，默认 120m
+ * @param fallbackGps 照片没有 GPS 时的兜底坐标（鸿蒙 App 内拍照用拍照瞬间的定位）
  */
 export function checkPhotoArrival(
   target: GeoPoint | undefined,
   base64: string,
-  radiusMeters?: number
+  radiusMeters?: number,
+  fallbackGps?: { lat: number; lon: number }
 ): PhotoArrivalCheck {
   // 演示地点无坐标：按规格跳过验证（绝不因为「没有坐标」而判用户失败）
   if (target === undefined || !isFinite(target.latitude) || !isFinite(target.longitude)) {
     const skipped: PhotoArrivalCheck = {
       ok: true,
       demoSkip: true,
+      source: 'demo',
       title: '演示地点 · 跳过位置验证',
       howto: '这个地点没有真实坐标，照片只作为纪念。'
     };
@@ -754,11 +775,27 @@ export function checkPhotoArrival(
   }
 
   const parsed: PhotoGpsResult = parseExifGpsFromBase64(base64);
-  if (!parsed.ok || parsed.lat === undefined || parsed.lon === undefined) {
+  const hasPhotoGps: boolean =
+    parsed.ok && parsed.lat !== undefined && parsed.lon !== undefined;
+
+  let coordinate: { lat: number; lon: number } | undefined = undefined;
+  let source: ArrivalSource = 'photo';
+  if (hasPhotoGps) {
+    coordinate = { lat: parsed.lat as number, lon: parsed.lon as number };
+    source = 'photo';
+  } else if (fallbackGps !== undefined &&
+    isFinite(fallbackGps.lat) && isFinite(fallbackGps.lon)) {
+    // 鸿蒙 App 内拍照：CameraPicker 永远不带 GPS，用拍照瞬间的设备定位兜底
+    coordinate = { lat: fallbackGps.lat, lon: fallbackGps.lon };
+    source = 'device';
+  }
+
+  if (coordinate === undefined) {
     const reason: PhotoGpsFailure = parsed.reason === undefined ? 'noData' : parsed.reason;
     const failed: PhotoArrivalCheck = {
       ok: false,
       demoSkip: false,
+      source: 'photo',
       reason: reason,
       title: photoFailText(reason),
       howto: photoFailHowto(reason)
@@ -766,25 +803,29 @@ export function checkPhotoArrival(
     return failed;
   }
 
-  const photoGps: { lat: number; lon: number } = { lat: parsed.lat, lon: parsed.lon };
-  const verified: PhotoVerifyResult = verifyPhotoAt(target, photoGps, radiusMeters);
+  const verified: PhotoVerifyResult = verifyPhotoAt(target, coordinate, radiusMeters);
+  const distance: number = verified.distanceMeters === undefined ? 0 : verified.distanceMeters;
+  const meters: string = String(Math.round(distance));
   if (verified.ok) {
     const passed: PhotoArrivalCheck = {
       ok: true,
       demoSkip: false,
-      photoGps: photoGps,
+      source: source,
+      photoGps: coordinate,
       distanceMeters: verified.distanceMeters,
       title: '位置验证通过',
-      howto: '照片拍摄点距目的地 ' + String(Math.round(verified.distanceMeters === undefined ? 0 : verified.distanceMeters)) + ' 米'
+      howto: (source === 'device'
+        ? '拍照时的设备定位距目的地 ' + meters + ' 米'
+        : '照片拍摄点距目的地 ' + meters + ' 米')
     };
     return passed;
   }
 
-  const distance: number = verified.distanceMeters === undefined ? 0 : verified.distanceMeters;
   const tooFar: PhotoArrivalCheck = {
     ok: false,
     demoSkip: false,
-    photoGps: photoGps,
+    source: source,
+    photoGps: coordinate,
     distanceMeters: distance,
     reason: 'tooFar',
     title: photoFailText('tooFar'),
