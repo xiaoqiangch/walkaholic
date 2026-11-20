@@ -11,6 +11,12 @@
  *   - 地点标记直接显示名字（最多 12 个，避免糊成一片）
  *   - 比例尺
  *
+ * 疆域（docs/territory.md §展示要求 2）：
+ *   - 已收录的**真实地点**凸包 = 疆域，叠在轨迹和地点**之上**
+ *   - 填充爵位色 20% + 描边爵位色 2.5 + 凸包顶点小圆
+ *   - **无疆域时不画任何多边形**（不画假多边形），只在统计卡里说明还差几个点
+ *   - 面积/爵位计算全部在 core/territory.ts（纯 TS，有单测）
+ *
  * 边界：
  * - 只在本地画，不上传任何坐标（与「隐私与安全」的承诺一致）。
  * - 轨迹按天分线，最近一天最亮，越久越淡。
@@ -29,6 +35,18 @@ import { getStoreInstance } from '../core/store';
 import { decimal1 } from '../components/Format';
 import { wgs84ToGcj02 } from '../core/geo';
 import { loadMapKeys } from '../core/mapkeys';
+import {
+  MIN_POINTS_FOR_TERRITORY,
+  TerritoryRankResult,
+  TerritoryStats,
+  formatTerritoryArea,
+  formatTerritorySpan,
+  hullToGeoPoints,
+  occupiedPoints,
+  progressCopy,
+  territoryRank,
+  territoryStats
+} from '../core/territory';
 import {
   MAX_ZOOM,
   MIN_ZOOM,
@@ -128,6 +146,20 @@ export struct CityMapView {
   @State private previewCenterLon: number = 0;
   /** 屏幕上要显示的地点文字标签 */
   @State private labels: PlaceLabel[] = [];
+  /** 疆域统计（页面刷新时重算） */
+  @State private territoryAreaText: string = '0 m²';
+  @State private territoryPointText: string = '0';
+  @State private territorySpanText: string = '0 m';
+  @State private territoryRankTitle: string = '白身';
+  @State private territoryRankDesc: string = '还没有自己的疆域';
+  @State private territoryRankColor: string = '#9CA3AF';
+  @State private territorySeal: string = '民';
+  @State private territoryProgress: number = 0;
+  @State private territoryProgressText: string = '';
+  @State private territoryHullCount: number = 0;
+  @State private territoryHasArea: boolean = false;
+  /** 是否被点数门槛卡住（docs §三） */
+  @State private territoryCapped: boolean = false;
   /** 是否需要「重新框选」（用户手动缩放/拖动后就不再自动复位） */
   private userMoved: boolean = false;
   /** 高德 Key（拉不到就退化为手绘网格） */
@@ -175,12 +207,63 @@ export struct CityMapView {
 
   private load(): void {
     this.snapshot = readSnapshot(this.snapshot);
+    this.refreshTerritory();
     this.draw();
   }
 
   // ============================================================
   // 数据
   // ============================================================
+
+  // ============================================================
+  // 疆域（docs/territory.md）
+  // ============================================================
+
+  /** 疆域统计：只统计真实来源 + 有坐标的已收录地点 */
+  private territory(): TerritoryStats {
+    const ids: string[] = [];
+    for (let i = 0; i < this.snapshot.profile.cards.length; i += 1) {
+      ids.push(this.snapshot.profile.cards[i].placeID);
+    }
+    return territoryStats(occupiedPoints(ids, this.snapshot.places));
+  }
+
+  /** 把疆域结果同步到 @State（UI 与 Canvas 共用同一份，避免两处各算一遍） */
+  private refreshTerritory(): void {
+    const stats: TerritoryStats = this.territory();
+    const rank: TerritoryRankResult = territoryRank(stats.areaKm2, stats.pointCount);
+    this.territoryAreaText = formatTerritoryArea(stats.areaKm2);
+    this.territoryPointText = String(stats.pointCount);
+    this.territorySpanText = formatTerritorySpan(stats.spanM);
+    this.territoryRankTitle = rank.rank.title;
+    this.territoryRankDesc = rank.rank.desc;
+    this.territoryRankColor = rank.rank.color;
+    this.territorySeal = rank.rank.seal;
+    this.territoryProgress = rank.progress;
+    this.territoryProgressText = stats.pointCount >= MIN_POINTS_FOR_TERRITORY
+      ? progressCopy(rank)
+      : '至少 3 个真实地点才能围成一片疆域';
+    this.territoryCapped = rank.capped;
+    this.territoryHullCount = stats.hullPointCount;
+    this.territoryHasArea = stats.hull.length >= 3;
+  }
+
+  /** 疆域凸包 → 画布像素（走与地点圆点完全相同的投影，保证严丝合缝） */
+  private territoryHullPixels(): MapPixel[] {
+    const out: MapPixel[] = [];
+    const ids: string[] = [];
+    for (let i = 0; i < this.snapshot.profile.cards.length; i += 1) {
+      ids.push(this.snapshot.profile.cards[i].placeID);
+    }
+    const points: GeoPoint[] = occupiedPoints(ids, this.snapshot.places);
+    const stats: TerritoryStats = territoryStats(points);
+    if (stats.hull.length < 3) return out;
+    const hullGeo: GeoPoint[] = hullToGeoPoints(stats.hull, points);
+    for (let i = 0; i < hullGeo.length; i += 1) {
+      out.push(this.project(hullGeo[i]));
+    }
+    return out;
+  }
 
   private track() {
     return getStoreInstance().track();
@@ -243,6 +326,7 @@ export struct CityMapView {
     }
     return this.visited().length === 0;
   }
+
 
   private statsItems(): StatItem[] {
     let days: number = 0;
@@ -531,6 +615,46 @@ export struct CityMapView {
       ctx.fill();
     }
 
+    // ---------- 疆域多边形（docs/territory.md §展示要求 2） ----------
+    //
+    // 顺序：轨迹 → 地点圆点 → **疆域多边形**（叠在上面）。
+    // 填充爵位色 20%、描边 2.5、凸包顶点画白底小圆（与 Web mymapHTML 一致）。
+    // 无疆域时**一个点都不画**，绝不画假多边形。
+    const hullPixels: MapPixel[] = this.territoryHullPixels();
+    if (hullPixels.length >= 3) {
+      const rankColor: string = this.territoryRankColor;
+
+      // ① 面：爵位色 20%（#RRGGBB + '33' = 20% alpha）
+      ctx.beginPath();
+      for (let i = 0; i < hullPixels.length; i += 1) {
+        if (i === 0) {
+          ctx.moveTo(hullPixels[i].x, hullPixels[i].y);
+        } else {
+          ctx.lineTo(hullPixels[i].x, hullPixels[i].y);
+        }
+      }
+      ctx.closePath();
+      ctx.fillStyle = rankColor + '33';
+      ctx.fill();
+
+      // ② 描边：爵位色，线宽 2.5
+      ctx.strokeStyle = rankColor;
+      ctx.lineWidth = 2.5;
+      ctx.lineJoin = 'round';
+      ctx.stroke();
+
+      // ③ 凸包顶点：白底 + 爵位色描边（与「占领点」区分开）
+      for (let i = 0; i < hullPixels.length; i += 1) {
+        ctx.beginPath();
+        ctx.arc(hullPixels[i].x, hullPixels[i].y, 6.5, 0, Math.PI * 2);
+        ctx.fillStyle = WAColor.paper;
+        ctx.fill();
+        ctx.strokeStyle = rankColor;
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+      }
+    }
+
     // 圆点画完再算文字标签（标签用组件叠层渲染，不画在 Canvas 里）
     this.refreshLabels();
   }
@@ -605,6 +729,126 @@ export struct CityMapView {
     .backgroundColor(WAColor.paper)
     .borderRadius(WASize.cardRadius)
     .border({ width: 1, color: WAColor.line, radius: WASize.cardRadius })
+  }
+
+  /**
+   * 疆域卡（统计卡下方）
+   *
+   * 有疆域：印章 + 爵位 + 面积/地点/跨度 + 进度
+   * 无疆域：明确说「还差几个点」，**不显示 0 m² 的假数据行**
+   */
+  @Builder
+  territoryCard() {
+    Column({ space: 10 }) {
+      Row({ space: 10 }) {
+        Stack({ alignContent: Alignment.Center }) {
+          Circle()
+            .width(44)
+            .height(44)
+            .fill(this.territoryRankColor)
+          Text(this.territorySeal)
+            .fontSize(21)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(WAColor.iconOnBrand)
+        }
+
+        Column({ space: 2 }) {
+          Text(this.territoryRankTitle)
+            .fontSize(WAFont.titleSm)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(WAColor.ink)
+            .maxLines(1)
+          Text(this.territoryRankDesc)
+            .fontSize(WAFont.microSm)
+            .fontColor(WAColor.ink2)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+
+      if (this.territoryHasArea) {
+        // 三项数据（内联，不用 WaStatsRow：那个组件自带白底卡片，嵌在卡里会双重描边）
+        Row() {
+          this.territoryMetric(this.territoryAreaText, '疆域面积')
+          Divider().vertical(true).height(24).strokeWidth(1).color(WAColor.line)
+          this.territoryMetric(this.territoryPointText, '占领地点')
+          Divider().vertical(true).height(24).strokeWidth(1).color(WAColor.line)
+          this.territoryMetric(this.territorySpanText, '最长跨度')
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
+
+        Column({ space: 5 }) {
+          WaProgressBar({
+            progress: this.territoryProgress,
+            barColor: this.territoryRankColor,
+            trackColor: WAColor.line,
+            barHeight: 6
+          })
+          // 被点数卡住时文案较长，允许 2 行并用警示色（docs §三 UI 要求）
+          Text(this.territoryProgressText)
+            .fontSize(WAFont.microSm)
+            .fontColor(this.territoryCapped ? WAColor.ember : WAColor.ink2)
+            .maxLines(this.territoryCapped ? 2 : 1)
+            .lineHeight(15)
+            .width('100%')
+        }
+        .width('100%')
+
+        Text(this.formatHullNote())
+          .fontSize(WAFont.micro)
+          .fontColor(WAColor.ink3)
+          .maxLines(2)
+          .lineHeight(15)
+          .width('100%')
+      } else {
+        Text(this.territoryProgressText)
+          .fontSize(WAFont.caption)
+          .fontColor(WAColor.ink2)
+          .width('100%')
+          .lineHeight(18)
+        Text('开盒后去「我的城市」看看，真实地点会一块块连起来。')
+          .fontSize(WAFont.microSm)
+          .fontColor(WAColor.ink3)
+          .width('100%')
+          .lineHeight(16)
+      }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .padding(16)
+    .backgroundColor(WAColor.paper)
+    .borderRadius(WASize.cardRadius)
+    .border({ width: 1, color: WAColor.line, radius: WASize.cardRadius })
+  }
+
+  /** 疆域数据行里的一个指标 */
+  @Builder
+  territoryMetric(value: string, label: string) {
+    Column({ space: 2 }) {
+      Text(value)
+        .fontSize(WAFont.titleSm)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(WAColor.ink)
+        .maxLines(1)
+      Text(label)
+        .fontSize(WAFont.micro)
+        .fontColor(WAColor.ink3)
+        .maxLines(1)
+    }
+    .layoutWeight(1)
+    .alignItems(HorizontalAlign.Center)
+  }
+
+  /** 「X 的疆域由 N 个边界点围成」（与 Web mymapHTML 的 note 一致） */
+  private formatHullNote(): string {
+    if (!this.territoryHasArea) return '至少 3 个真实地点才能围成一片疆域';
+    return this.territoryAreaText + ' 的疆域由 ' + String(this.territoryHullCount) +
+      ' 个边界点围成 · 再开新地点可以扩大范围';
   }
 
   @Builder
@@ -881,6 +1125,11 @@ export struct CityMapView {
             this.statsCard()
           }
           .margin({ top: 6 })
+
+          Column() {
+            this.territoryCard()
+          }
+          .margin({ top: 12 })
 
           Column() {
             if (this.isEmpty()) {

@@ -236,6 +236,13 @@ export interface WalkaholicStoreApi {
   // ---------- 到达实拍 ----------
   /** 把到达时拍的照片挂到卡片上（先拍照再收录 / 先收录再补拍都走这里） */
   attachCardPhoto(placeID: string, photoName?: string, remotePath?: string): void;
+  /**
+   * 记录到达验证凭证（docs/territory.md §四「数据存储」）。
+   * @returns 是否找到了这张卡（卡片还没收录时返回 false）
+   */
+  attachCardPhotoGps(placeID: string, photoGps: GeoPoint, distanceMeters: number): boolean;
+  /** 这张卡的到达验证凭证；没有返回 undefined */
+  cardPhotoGps(placeID: string): CardPhotoGps | undefined;
   /** 这张卡到达时拍的照片；没有返回 undefined */
   cardPhoto(placeID: string): CardPhoto | undefined;
 
@@ -290,6 +297,15 @@ export interface CollectResult {
 export interface CardPhoto {
   local?: string;
   remote?: string;
+}
+
+/**
+ * 到达验证凭证（docs/territory.md §四「数据存储」）。
+ * 照片 EXIF 里的坐标 + 与目的地的实测距离。
+ */
+export interface CardPhotoGps {
+  location: GeoPoint;
+  distanceMeters: number;
 }
 
 export interface BuryParams {

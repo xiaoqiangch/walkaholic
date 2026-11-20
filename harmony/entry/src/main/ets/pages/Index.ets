@@ -21,6 +21,13 @@ import { WaSeekPanel } from '../components/SeekPanel';
 import { BurySurprisePanel } from '../components/BurySurprisePanel';
 import { SurprisesPanel } from '../components/SurprisesPanel';
 import { CityMapView } from '../views/CityMapView';
+import { TerritoryShareCard } from '../components/TerritoryShareCard';
+import {
+  TerritoryRankResult,
+  TerritoryStats,
+  territoryFromCards,
+  territoryRank
+} from '../core/territory';
 import { AccountConfig, readDeviceID } from '../core/account';
 import {
   claimSurprise,
@@ -66,6 +73,7 @@ const OVERLAY_SEEK: string = 'seek';
 const OVERLAY_BURY: string = 'bury';
 const OVERLAY_SURPRISES: string = 'surprises';
 const OVERLAY_CITYMAP: string = 'citymap';
+const OVERLAY_TERRITORY_CARD: string = 'territorycard';
 
 @Entry
 @Component
@@ -107,6 +115,9 @@ struct Index {
   private nearbyLoading: boolean = false;
   /** 上次附近检索的位置（偏差 300m 以上才重查） */
   private nearbyAnchor: GeoPoint | undefined = undefined;
+  /** 疆域分享卡：统计与爵位的 JSON 快照（打开时算一次，避免面板里反复算） */
+  @State private territoryStatsJson: string = '';
+  @State private territoryRankJson: string = '';
 
   aboutToAppear(): void {
     // 地图朝向开关：AppStorage 全局共享 + 持久化（重启后保持）
@@ -514,6 +525,29 @@ struct Index {
     this.planRouteInBackground();
   }
 
+  /**
+   * 打开疆域身份卡（分享卡）。
+   * 只把「统计 + 爵位」两个纯数据 JSON 交给面板，面板自己画 —— 不传 snapshot。
+   */
+  private openTerritoryCard(): void {
+    try {
+      const snapshot = getStore().snapshot();
+      const placeIDs: string[] = [];
+      for (let i = 0; i < snapshot.profile.cards.length; i += 1) {
+        placeIDs.push(snapshot.profile.cards[i].placeID);
+      }
+      const stats: TerritoryStats = territoryFromCards(placeIDs, snapshot.places);
+      const rank: TerritoryRankResult = territoryRank(stats.areaKm2, stats.pointCount);
+      this.territoryStatsJson = JSON.stringify(stats);
+      this.territoryRankJson = JSON.stringify(rank);
+    } catch (err) {
+      this.territoryStatsJson = '';
+      this.territoryRankJson = '';
+    }
+    this.activeOverlay = OVERLAY_TERRITORY_CARD;
+    this.refresh();
+  }
+
   /** 打开账号面板（我的 → 设置 → 账号） */
   private openAccount(): void {
     this.activeOverlay = OVERLAY_ACCOUNT;
@@ -601,6 +635,9 @@ struct Index {
             this.syncSurprises();
             this.refresh();
           },
+          onShareTerritory: () => {
+            this.openTerritoryCard();
+          },
           onOpenSeek: (surpriseID: string) => {
             this.openSeek(surpriseID);
           }
@@ -670,6 +707,9 @@ struct Index {
             this.activeOverlay = OVERLAY_SURPRISES;
             this.syncSurprises();
             this.refresh();
+          },
+          onShareTerritory: () => {
+            this.openTerritoryCard();
           },
           onChanged: () => {
             this.refresh();
@@ -868,6 +908,36 @@ struct Index {
             this.refresh();
           }
         })
+      }
+
+      if (this.ready && this.activeOverlay === OVERLAY_TERRITORY_CARD) {
+        Stack({ alignContent: Alignment.Center }) {
+          Column()
+            .width('100%')
+            .height('100%')
+            .backgroundColor(WAColor.scrim)
+            .onClick(() => {
+              this.activeOverlay = OVERLAY_NONE;
+              this.refresh();
+            })
+
+          Column() {
+            TerritoryShareCard({
+              statsJson: this.territoryStatsJson,
+              rankJson: this.territoryRankJson,
+              nowMs: Date.now(),
+              onClose: () => {
+                this.activeOverlay = OVERLAY_NONE;
+                this.refresh();
+              }
+            })
+          }
+          .width('100%')
+          .constraintSize({ maxWidth: WASize.contentMaxWidth })
+          .padding({ top: 24, bottom: 24 })
+        }
+        .width('100%')
+        .height('100%')
       }
 
       if (this.ready && this.activeOverlay === OVERLAY_ACCOUNT) {

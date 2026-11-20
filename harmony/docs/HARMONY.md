@@ -1,6 +1,6 @@
 # 步迷 Walkaholic · HarmonyOS 移植
 
-> 状态：v0.9 与 iOS 1:1 对齐（2026-11-14）；**已在本机完成真实 `.hap` 编译 + 本地签名**（2026-11-19）
+> 状态：v0.11 点数门槛 + 拍照 EXIF GPS 到达验证（2026-11-20）；v0.9 已与 iOS 1:1 对齐（2026-11-14）
 > 目标平台：**HarmonyOS NEXT**（API 26 / 26.0.1），ArkTS + ArkUI 声明式
 > 本机工具链：DevEco Studio 26.0.1 + SDK 26（已部署，见 §11「本机开发环境」）
 
@@ -38,6 +38,9 @@ entry/src/main/ets/
 │   ├── search.ts        三档搜索编排 + 策展优先 + **明确失败**（绝不虚构）
 │   ├── flow.ts          抽盒完整编排（Key→策展→搜索）+ 路线规划
 │   ├── route.ts         Valhalla 步行路线（polyline6 解码）
+│   ├── territory.ts     疆域凸包 + 爵位判定（docs/territory.md 唯一实现）
+│   ├── sharecard.ts     疆域分享卡布局（720×960，纯计算）
+│   ├── photo-gps.ts     照片 EXIF GPS 自解析 + 120m 到达验证（纯计算）
 │   ├── fog.ts           迷雾路径几何（parity.md §3，纯函数可测）
 │   ├── geocode.ts       地址 → 坐标（GPS 不可用时的真实地点出口）
 │   ├── hints.ts         图鉴「附近惊喜」隐晦提示 + 探寻页线索解锁（保密铁律）
@@ -76,6 +79,11 @@ entry/src/main/ets/
 | **图鉴「附近惊喜」隐晦提示**（对齐 Web v46） | ✅ v0.8 完成，纯 TS 单测 + 静态守卫双重保密 |
 | **探寻面板**（三阶线索按距离解锁） | ✅ v0.8 完成（拍照/对比待相机接入） |
 | **字号对齐 Web v32**（无 <10pt） | ✅ v0.7 完成 |
+| **疆域爵位卡**（对齐 Web v46 / docs/territory.md） | ✅ v0.10 完成：印章 + 爵位 + 三数据 + 进度 + 地图/分享入口 |
+| **「我的城市」疆域地图**（新建页） | ✅ v0.10 完成：Canvas 凸包多边形（爵位色 20% + 描边 2.5 + 顶点圆）+ 统计卡；**无疆域不画假多边形** |
+| **疆域分享卡**（720×960） | ✅ v0.10 完成：色带/印章/爵位/形状/三数据/页脚 + 保存到相册（失败降级为提示截屏） |
+| **点数门槛**（防「四个角」刷面积） | ✅ v0.11 完成：8 档 minPoints + capped/blockedBy/pointsNeeded +「边界够了，但只有 N 个探索点」文案 |
+| **拍照 + EXIF GPS 到达验证** | ✅ v0.11 完成：自解析 JPEG APP1（II+MM）/ 120m 判定 / 9 种失败文案逐字对齐 docs / 记录 photoGps + photoDistance |
 
 ---
 
@@ -297,6 +305,33 @@ bash scripts/check-harmony.sh
 | 探寻页线索按距离解锁 | 需要真实走动 | 起点 1/3 → 走近到 180m 内 2/3 → 60m 内 3/3 |
 | 账号 CORS/地址 | 鸿蒙无 CORS，但要注意「真机不能访问 127.0.0.1」 | 把服务地址改成电脑局域网 IP（如 `http://192.168.1.5:8803`） |
 
+### v0.10 新增、需要 DevEco 验证的 API（疆域分享卡）
+
+| API | 位置 | 说明 |
+|---|---|---|
+| `componentSnapshot.get(nodeId)` | `components/TerritoryShareCard.ets` | 组件截图；若该版本要求 options 参数，改成 `getWithOptions(id, { scale: 2 })` |
+| `image.createImagePacker().packing(pixelMap, opts)` | 同上 | PNG 编码；`release()` 必须调（否则泄漏） |
+| `photoAccessHelper.showAssetsCreationDialog([沙盒uri], configs)` | 同上 | **收的是源文件 uri 数组**，不是 buffer；返回相册目标 uri 数组 |
+| `fs.OpenMode.TRUNC` | 同上 | 覆盖写沙箱临时文件 |
+| `fs.statSync(fd)` / `fs.readSync(fd, buffer)` | 同上 | 读回 PNG 字节写进相册 uri |
+
+> 这一整条链路**任何一步失败都会提示「可以直接截屏保存」**，不会崩、不会假装保存成功。
+> 真机上要确认的是：截图清晰度、相册里图片的尺寸与内容、取消授权时的表现。
+
+### v0.11 新增、需要真机/DevEco 验证的行为
+
+| 行为 | 本机无法验证的原因 | 真机上怎么确认 |
+|---|---|---|
+| 相机拍照后照片**保留 EXIF** | 需要真实相机 | 拍完照看是否提示「位置验证通过」；关闭相机位置信息后应提示去设置开启 |
+| 「先拍后收」门禁 | 需要真实地点旅程 | 真实地点未拍照时点「收进图鉴」应被拦住并提示先拍照 |
+| `photoGps` 持久化 | 需要真实落盘 | 拍完收进图鉴 → 杀进程重开 → 图鉴卡片仍有照片、`cardPhotoGps` 有值 |
+| 演示地点跳过验证 | 需要渲染 | 演示态（内置地点无坐标）拍照后应显示「演示地点 · 照片只作纪念」，不报错 |
+| `componentSnapshot` / `photoAccessHelper` 保存卡 | 需要相册权限 | 分享卡「保存到相册」能落盘；取消授权时降级为提示截屏 |
+
+> **注意**：`core/photo-gps.ts` 是纯 TS（不 import `@ohos.*`），EXIF 解析部分已用构造的
+> 真实 JPEG 字节在 Node 里跑过单测与 Web 交叉验证；未验证的只是「真机相机拍出来的照片
+> 字节长什么样」这一环 —— 如果某机型写的是 HEIC，会走 `notImage` 分支（UI 会提示重拍）。
+
 ### v0.9（本轮）与 iOS 1:1 对齐的清单（2026-11-14）
 
 产品侧把 iOS 上一轮（`10f0246`）的深水区优化全部搬到鸿蒙，逻辑层可单测、UI 层有入口：
@@ -340,9 +375,11 @@ bash scripts/check-harmony.sh
 | v0.6 | 工程骨架 + 逻辑层（含测试）+ 7 个主界面 + 真实定位 |
 | v0.7 | 功能对齐 Web v32：多数据源真实 POI、三档放宽、明确失败面板、迷雾路径、账号、字号 |
 | v0.8 | 图鉴「附近惊喜」隐晦提示 + 探寻面板（对齐 Web v46） |
-| **v0.9（本轮）** | **与 iOS `10f0246` 1:1 对齐**：时段 / 远程漫游 / 城市地图 / 惊喜回执 / 到达实拍 / 图鉴进度 / 先拍后看 / 短信登录 |
-| v0.10 | 华为账号登录（替代自建账号）、微信登录（OpenSDK）、桌面服务卡片 |
-| v0.11+ | 折叠屏/平板适配（GridRow 断点）、深色模式、无障碍 |
+| v0.9 | 与 iOS `10f0246` 1:1 对齐：时段 / 远程漫游 / 城市地图 / 惊喜回执 / 到达实拍 / 图鉴进度 / 先拍后看 / 短信登录 |
+| v0.10 | 疆域 + 爵位 + 我的城市疆域地图 + 分享卡（对齐 Web v46 / docs/territory.md） |
+| **v0.11（本轮）** | **点数门槛 + 拍照 EXIF GPS 到达验证**（docs/territory.md §三 §四） |
+| v0.12 | 华为账号登录（替代自建账号）、微信登录（OpenSDK）、桌面服务卡片 |
+| v0.13+ | 折叠屏/平板适配（GridRow 断点）、深色模式、无障碍 |
 
 ### v0.8 图鉴「附近惊喜」（对齐 Web v46 / iOS）
 
@@ -493,6 +530,180 @@ sign-app / verify-app             ✅ Verify success
 | `getContext` has been deprecated | `pages/Index.ets:133/434` | 可换 `this.getUIContext()`；不影响运行 |
 
 > 这两类警告**不阻塞出包**，按优先级低于功能验证，本轮未改（避免为了消警告引入回归）。
+
+---
+
+## 11.1 v0.10 疆域与爵位（2026-11-20）
+
+三端统一规格：`docs/territory.md`；Web 参考实现：`prototype/web/territory.js`。
+
+### 分层
+
+| 层 | 文件 | 职责 |
+|---|---|---|
+| 逻辑 | `core/territory.ts` | 等距圆柱投影 / Andrew 单调链凸包（**叉积容差 0.5 m²**）/ 鞋带公式 / 爵位判定 / 格式化 / 真实来源提取 / 凸包↔经纬度反算 |
+| 逻辑 | `core/sharecard.ts` | 分享卡 720×960 的**全部坐标与文案**（弹框只负责画） |
+| UI | `views/ProfileView.ets` | 等级卡下方疆域爵位卡（印章/爵位/释义 + 地图·分享 + 三数据 + 进度 or「再开 N 个」） |
+| UI | `views/CityMapView.ets` | 统计卡下方疆域卡 + **Canvas 疆域多边形**（叠在轨迹与地点之上） |
+| UI | `components/TerritoryShareCard.ets` | 720×960 分享卡 Canvas + 保存到相册 |
+| 路由 | `pages/Index.ets` | `OVERLAY_TERRITORY_CARD`（分享卡）；`OVERLAY_CITYMAP`（我的城市，原已有） |
+
+### 关键算法细节（踩过的坑）
+
+1. **共线容差 `COLLINEAR_EPS_M2 = 0.5`（单位 m²，作用在叉积上）**
+   不加这个，浮点误差会让共线三点偶尔被判成左转，凸包里留下面积约 1e-12 m² 的退化细三角 ——
+   面积看着对，但顶点数、跨度、画出来的形状全错。
+   注意容差作用在**叉积**（= 2 × 三角形面积）上，所以能保留的最小三角形面积约 0.25 m²。
+   单测用「底边 0.857m × 高 0.088m → 叉积 0.076 ≤ 0.5 → 判共线」和「高 0.586m → 叉积 0.514 > 0.5 → 保留」两侧卡住。
+
+2. **只统计真实来源 + 有坐标的地点**
+   内置演示地点（`source = 'catalog'`）没有坐标，自然被排除 → 演示态疆域恒为 0，
+   爵位显示「白身」+「再开 3 个盲盒就能围出你的第一块疆域」。
+   **这是「不造假」原则的直接体现，不是 bug。**
+
+3. **凸包要能回到经纬度**
+   `hullToGeoPoints()` 是 `projectMeters()` 的逆运算（相对第一个点 + 平均纬度）。
+   个人地图必须走这条：先还原 WGS 经纬度，再套用和地点圆点**完全相同**的「WGS→GCJ→画布像素」投影，
+   多边形才能和底图路网、地点圆点严丝合缝对齐（否则整体偏几百米）。
+   单测断言往返误差 < 1 米。
+
+4. **无疆域绝不画假多边形**
+   地图页 `hullPixels.length >= 3` 才进绘制分支；分享卡 `layout.polygon.length >= 3` 才画。
+   两处都有**静态检查守卫**（做变异测试确认会红）：把 `>= 3` 改成 `>= 0` 立刻报错。
+
+5. **真实来源白名单有两份，且不该「统一」**
+   `core/store.ts` 的 `isRealPlaceSource`（放行 curated/amap/baidu/osm/wiki）用于「能否开始真实旅程」；
+   `core/territory.ts` 的额外放行 `wikipedia`（历史语料里的维基别名）。
+   疆域统计宁可多算一个真实点，也不能少算用户的地盘。单测显式断言了这个差异。
+
+### 新增 22 项单测（144 → 166 区间）
+
+| 分组 | 覆盖 |
+|---|---|
+| 爵位表 | 8 档 key/印章/名称/门槛/色值/释义**逐字逐值**对齐 docs；门槛严格递增；未知 key 回退白身 |
+| 凸包 | 正方形 1 km²（内部点/边上点被剔除）、共线面积 0、容差两侧边界、点数 <3 无凸包、逆时针且首尾不重复 |
+| 非法坐标 | NaN / Infinity / 纬度 91 / 经度 181 全丢弃；全非法 → 无疆域 |
+| 爵位判定 | 0/0.05/0.3/1.2/4/12/30/80 八个门槛边界值；负数/NaN → 白身；最高档 next 为空 |
+| 进度 | `progress = (area-cur)/(next-cur)`；`toNextKm2`；「再扩 0.45 km² 晋 子爵」/「已是最高爵位」 |
+| 格式化 | 四档（m² / 2 位 / 1 位 / 取整）+ 跨度（m / km） |
+| 来源过滤 | 6 个真实来源放行、catalog/manual 排除、无坐标排除；Store 演示态 18 张卡 → 疆域 0 |
+| 投影 | 以平均纬度为基准、单位为米、origin 归零 |
+| 反算 | `hullToGeoPoints` 往返误差 < 1 米；空输入 |
+| 分享卡 | 720×960 元素纵向有序、三等分居中、多边形不越界、无疆域 polygon 为空、`fitHullToBox` 等比+翻转+退化兜底、页脚品牌与日期补零 |
+
+---
+
+## 11.2 v0.11 点数门槛 + 拍照 EXIF GPS（2026-11-20）
+
+规格：`docs/territory.md` §三「点数门槛」、§四「探索验证：拍照 + EXIF GPS」。
+
+### A. 点数门槛（防「四个角」刷面积）
+
+问题：凸包只看面积 → 在远处 4 个角各开一个盲盒就能围出上千 km² 直接封王。
+
+| 爵位 | 面积门槛 | 最少点数 |
+|---|---|---|
+| 白身 | 0 | 0 |
+| 士 | 0.05 km² | 3 |
+| 男爵 | 0.3 km² | 5 |
+| 子爵 | 1.2 km² | 7 |
+| 伯爵 | 4 km² | 9 |
+| 侯爵 | 12 km² | 12 |
+| 公爵 | 30 km² | 15 |
+| 王 | 80 km² | 21 |
+
+判定（`territoryRank(areaKm2, pointCount?)`，三端一致）：
+
+```
+areaRank  = 面积够格的最高一档
+current   = 从 areaRank 往下找第一个「点数也够」的档
+blockedBy = areaRank（若 areaRank.order > current.order）
+capped    = blockedBy !== undefined
+next      = capped ? blockedBy : current 的下一档
+progress  = capped ? 按点数算 : 按面积算
+```
+
+**返回结构新增** `blockedBy / capped / pointsNeeded / pointCount`。
+**不传 `pointCount` 时完全保持旧行为**（capped 恒 false）—— 老调用方不会被悄悄打回。
+
+**招牌例子**：4 点围 1163 km² → 「士」，文案
+「边界够了，但只有 4 个探索点 · 再探索 17 个点才能晋 王」。
+
+UI：`ProfileView` / `CityMapView` 的疆域卡在 `capped` 时进度文案用警示色 + 允许折 2 行 ——
+**必须让玩家看懂为什么升不上去**（docs §三 UI 要求）。
+
+### B. 拍照 + EXIF GPS 到达验证
+
+**为什么**：手机 GPS 可伪造（开发者工具 / 模拟定位），坐着不动也能"到达"。
+改成「在目的地 120 米内拍一张**照片自带 GPS** 的照片」。
+
+**为什么自己解析 EXIF**：鸿蒙 `image.ImageSource.getImageProperty('GPSLatitude')`
+在部分机型只返回字符串、格式不统一、有时直接空/抛异常。所以直接拿字节自己解析
+JPEG APP1 段 —— 与 Web `prototype/web/exif.js` 同一套逻辑，行为可预测、可单测。
+
+| 能力 | 实现 |
+|---|---|
+| 字节序 | `II`（小端）+ `MM`（大端）双支持 |
+| 南纬/西经 | `S` / `W` 参考位 → 取负号 |
+| 度分秒 | 3 个 rational 合成十进制度 |
+| 判定半径 | `PHOTO_RADIUS_METERS = 120` |
+| PNG | 明确 `pngNoExif`（PNG 本身不存 EXIF） |
+| 截图/转发图 | `noExif` + 指引「请用手机自带相机拍新照片」 |
+| 相机没开定位 | `noGpsTag` + 指引「设置 → 应用 → 相机 → 打开「记录位置信息」」 |
+| 太远 | `tooFar` + 「照片拍摄点离目的地 N 米，需要在 120 米内拍摄。走近一点再拍一张。」 |
+| 演示地点 | `demoSkip = true`，**跳过验证**（不因为「没有坐标」判用户失败） |
+
+**接入点**（两处，都不是 no-op 了）：
+
+1. `views/RevealView.ets`（收进图鉴的主入口）
+   - 拍完照 → `readPhotoAsBase64()` 读**原图**字节（不能压缩后再读，canvas 重编码会丢 EXIF）
+     → `checkPhotoArrival(target, base64)` → 通过才置 `verifiedArrival = true`
+   - **收录门禁**：真实地点且未验证 → 拦截并提示「先拍一张照片才能收进来」
+   - 通过后 `attachCardPhotoGps()` 把 `photoGps` / `photoDistance` 记到卡片
+2. `components/SeekPanel.ets`（寻惊喜「这样拍一张」）
+   - 取图后先做 GPS 位置验证，位置不对直接给指引，**不进入 dHash 比对**
+     （照片都没拍对地方，比相似度没意义）
+
+**数据存储**（docs §四）：`PlaceCard.photoGps: { latitude, longitude }` + `photoDistance: number`，
+随卡片持久化（`core/persistence.ts` 的 `decodeCard`）。用途：事后审计 + 疆域计算
+（**疆域点应优先用 photoGps 而不是手机 GPS**）。
+
+### 新增 25 项单测（170 → 195）
+
+| 分组 | 覆盖 |
+|---|---|
+| minPoints | 8 档逐值 + 严格单调 + 面积门槛同步单调 |
+| 招牌例子 | 4 点围 1163 km² → 士 / capped / blockedBy=王 / pointsNeeded=17 / 文案逐字 |
+| 不传点数 | 9 组面积全部保持旧行为（rank 与 capped 都不变） |
+| 各档边界 | 每档「点数刚好」达标；王 20→公爵（差1）、公爵 14→侯爵、伯爵 8→子爵 |
+| 进度 | capped 按点数算 / uncapped 按面积算 / 文案带「还需 N 个探索点」 |
+| 异常输入 | NaN 视为未传、负数夹 0、小数不崩 |
+| EXIF | 小端 + 大端解析、南纬西经负号、无 GPS 标签、无 EXIF 段、PNG、极小文件、坏字节序 |
+| base64 | 与原始字节路径结果一致、`data:` 前缀、解码长度 |
+| 失败文案 | 10 种 reason 都有标题+指引、标题互不相同、逐字核对 docs 表格 |
+| 距离 | 120m 内/外、111m vs 133m 边界、自定义半径、haversine 南京→北京 |
+| 完整链路 | 真照片坐标→通过 / 太远→失败 / 无 GPS→指引 / 演示地点→跳过 |
+| 凭证持久化 | 记录后重启仍在；不存在的卡片安全返回 false |
+
+### 与 Web 实现的交叉验证（实测跑过）
+
+```
+rankFor 交叉验证（13 面积 × 13 点数 = 169 组合）: ✅ 全部一致
+不传点数（旧行为）:                              ✅ 与 web 一致
+EXIF 解析（8 例：小端/大端/南纬/西经/无极值/无GPS标签）: ✅ 全部一致
+距离验证（120m 内外 + 边界）:                     ✅ 全部一致
+```
+
+### 静态守卫（第 14 分区「拍照验证」，做了变异测试）
+
+守：minPoints 8 档常量、EXIF 自解析关键代码（`sig === 'Exif'` / `II` / `MM` / `magic !== 42`）、
+120m 半径、南纬西经负号、9 条失败文案逐字、**禁止依赖 `@ohos.*`**（必须纯 TS 可单测）、
+**禁止使用 `getImageProperty`**、UI 三个接入点（`checkPhotoArrival` / `attachCardPhotoGps` /
+`verifiedArrival` / `readPhotoAsBase64`）必须真实存在、收录门禁条件必须存在、
+SeekPanel 必须真的取图 + 验证。
+
+变异测试：把 `this.verifyArrivalPhoto()` 调用删掉 → 立刻报「拍完照后没有调用（验证没接上）」；
+把 `minPoints: 21` 改成 20 → 静态检查 + 4 项单测同时红。
 
 ---
 

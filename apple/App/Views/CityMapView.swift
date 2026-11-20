@@ -51,8 +51,27 @@ struct CityMapView: View {
         }
     }
 
+    /// 疆域：已开盒的真实地点凸包（docs/territory.md）
+    private var territoryStats: TerritoryStats {
+        TerritoryDataSource.stats(store: store)
+    }
+
+    private var territoryHull: [GeoPoint] {
+        territoryStats.hullCoordinates
+    }
+
+    private var territoryRank: TerritoryRank {
+        TerritoryMath.rank(for: territoryStats.areaKm2, pointCount: territoryStats.pointCount).rank
+    }
+
+    private var territoryColor: Color {
+        TerritoryStyle.color(for: territoryRank)
+    }
+
     private var allCoordinates: [GeoPoint] {
-        dayTracks.flatMap { $0.points } + visited.compactMap { $0.place.coordinate }
+        dayTracks.flatMap { $0.points }
+            + visited.compactMap { $0.place.coordinate }
+            + territoryHull
     }
 
     private var isEmpty: Bool {
@@ -135,6 +154,22 @@ struct CityMapView: View {
     private var mapCard: some View {
         ZStack(alignment: .topTrailing) {
             Map(position: $camera, interactionModes: [.pan, .zoom]) {
+                // 疆域多边形必须在轨迹 / 地点之前，否则会被后画的图层盖住
+                if territoryHull.count >= 3 {
+                    MapPolygon(coordinates: territoryHull.map(Self.coordinate))
+                        .foregroundStyle(territoryColor.opacity(0.20))
+                        .stroke(territoryColor, lineWidth: 2.5)
+
+                    ForEach(Array(territoryHull.enumerated()), id: \.offset) { _, point in
+                        Annotation("", coordinate: Self.coordinate(point)) {
+                            Circle()
+                                .fill(territoryColor)
+                                .frame(width: 7, height: 7)
+                                .overlay(Circle().stroke(WATheme.paper, lineWidth: 1.5))
+                        }
+                    }
+                }
+
                 ForEach(Array(dayTracks.enumerated()), id: \.offset) { index, entry in
                     if entry.points.count >= 2 {
                         MapPolyline(coordinates: entry.points.map(Self.coordinate))
@@ -180,10 +215,13 @@ struct CityMapView: View {
     }
 
     private var legend: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 12) {
             legendDot(color: WATheme.amber, text: "最近走过")
             legendDot(color: WATheme.amber.opacity(0.35), text: "更早的")
             legendDot(color: WATheme.ink3.opacity(0.6), text: "收下的地点")
+            if territoryHull.count >= 3 {
+                legendDot(color: territoryColor, text: "我的疆域")
+            }
             Spacer(minLength: 0)
         }
     }

@@ -15,6 +15,8 @@
  *   8. 功能对齐：parity.md 的关键常量/入口存在（三档/硬帽/失败文案/迷雾参数）
  *   9. 反虚构兜底：真实模式下不得调用 startQuest()（内置地点抽盒）
  *  10. 附近惊喜保密：图鉴提示/探寻面板不得渲染 areaWord / hints / photoUri / 坐标
+ *  13. 疆域对齐（docs/territory.md）：爵位表 8 档 + 共线容差 + 无疆域不画假多边形
+ *  14. 点数门槛 + 拍照验证：minPoints 8 档 + EXIF 自解析（不用 getImageProperty）+ 失败文案
  *
  * 用法：node harmony/scripts/check-arkts.mjs
  */
@@ -785,6 +787,256 @@ function checkIosParity() {
 }
 
 // ============================================================
+// 13) 疆域对齐（docs/territory.md）
+// ============================================================
+
+/**
+ * 疆域是三端统一契约，文案与算法必须逐字/逐值一致。这里守住四件事：
+ *   A. core/territory.ts 存在且含 8 档爵位文案、共线容差 0.5 m²、真实来源白名单
+ *   B. 图鉴页/我的页/城市页都有疆域入口或疆域卡
+ *   C. 无疆域时不许画假多边形（UI 必须走 hull.length >= 3 的判断）
+ *   D. 分享卡布局来自 core/sharecard.ts（不要在 UI 里另写一套坐标）
+ */
+function checkTerritory() {
+  const territory = coreText('territory.ts');
+  if (territory.length === 0) {
+    fail('疆域对齐', '缺少 core/territory.ts（docs/territory.md 的唯一实现）');
+  } else {
+    // A. 8 档爵位（逐字）
+    expectIn('疆域对齐', 'core/territory.ts', territory, [
+      "key: 'commoner'", "title: '白身'", "seal: '民'", "desc: '还没有自己的疆域'",
+      "key: 'shi'", "title: '士'", "seal: '士'", "desc: '初立门户，方寸之地'",
+      "key: 'nan'", "title: '男爵'", "seal: '男'", "desc: '一街一巷，始有封地'",
+      "key: 'zi'", "title: '子爵'", "seal: '子'", "desc: '数坊之间，渐成版图'",
+      "key: 'bo'", "title: '伯爵'", "seal: '伯'", "desc: '半城风物，已在掌中'",
+      "key: 'hou'", "title: '侯爵'", "seal: '侯'", "desc: '纵横十余里，一方之望'",
+      "key: 'gong'", "title: '公爵'", "seal: '公'", "desc: '半壁城池，位极人臣'",
+      "key: 'wang'", "title: '王'", "seal: '王'", "desc: '一城之主，疆域无出其右'",
+      // 点数门槛（docs §三）：防「四个角」刷面积
+      'minPoints: 0', 'minPoints: 3', 'minPoints: 5', 'minPoints: 7',
+      'minPoints: 9', 'minPoints: 12', 'minPoints: 15', 'minPoints: 21',
+      'blockedBy', 'pointsNeeded', 'capped',
+      // 算法关键常量
+      'COLLINEAR_EPS_M2: number = 0.5',
+      '111320',
+      '110540',
+      'export function territoryStats',
+      'export function territoryRank',
+      'export function formatTerritoryArea',
+      'export function hullToGeoPoints',
+      'export function occupiedPoints',
+      // 真实来源白名单
+      "source === 'curated'",
+      "source === 'osm'",
+      "source === 'amap'",
+      "source === 'baidu'",
+      // 展示文案
+      '再开 ',
+      '至少 3 个真实地点才能围成一片地',
+      '已是最高爵位'
+    ]);
+  }
+
+  // B. UI 入口：我的页疆域卡 + 城市页 + 分享卡
+  const profileFile = path.join(ETS_ROOT, 'views', 'ProfileView.ets');
+  const profileText = fs.existsSync(profileFile) ? stripComments(fs.readFileSync(profileFile, 'utf8')) : '';
+  if (!profileText.includes('territoryCard()')) {
+    fail('疆域对齐', 'ProfileView.ets 缺少疆域爵位卡（territoryCard）');
+  }
+  if (!profileText.includes('onShareTerritory')) {
+    fail('疆域对齐', 'ProfileView.ets 缺少「分享」入口（onShareTerritory）');
+  }
+  if (!profileText.includes('territoryFromCards') && !profileText.includes('territoryRank')) {
+    fail('疆域对齐', 'ProfileView.ets 没有调用 core/territory.ts 的计算');
+  }
+
+  const cityFile = path.join(ETS_ROOT, 'views', 'CityMapView.ets');
+  const cityText = fs.existsSync(cityFile) ? stripComments(fs.readFileSync(cityFile, 'utf8')) : '';
+  if (cityText.length === 0) {
+    fail('疆域对齐', '缺少 views/CityMapView.ets（个人城市地图页）');
+  } else {
+    // C. 无疆域不画假多边形：**绘制那一层**必须自己带 >= 3 判断
+    //    （不能只依赖别处的状态变量 —— 那容易在重构时被绕过）
+    if (!/hullPixels\.length\s*>=\s*3/.test(cityText)) {
+      fail('疆域对齐',
+        'CityMapView.ets 缺「hullPixels.length >= 3 才画多边形」的判断（可能画出假疆域）');
+    }
+    // 同一文件里必须有 fill + stroke 两步（只填不描边或反之都不算完整疆域）
+    if (!/rankColor\s*\+\s*['"]33['"]/.test(cityText)) {
+      fail('疆域对齐', 'CityMapView.ets 缺少爵位色 20% 填充');
+    }
+    if (!/ctx\.stroke\(\)/.test(cityText)) {
+      fail('疆域对齐', 'CityMapView.ets 缺少多边形描边 stroke()');
+    }
+    if (!cityText.includes('territoryHullPixels')) {
+      fail('疆域对齐', 'CityMapView.ets 缺少疆域多边形绘制（territoryHullPixels）');
+    }
+    // 描边 2.5 / 填充 20%
+    if (!cityText.includes('lineWidth = 2.5')) {
+      fail('疆域对齐', 'CityMapView.ets 缺少 2.5 描边');
+    }
+  }
+
+  // D. 分享卡：布局必须来自 core/sharecard.ts
+  const shareFile = path.join(ETS_ROOT, 'components', 'TerritoryShareCard.ets');
+  const shareText = fs.existsSync(shareFile) ? stripComments(fs.readFileSync(shareFile, 'utf8')) : '';
+  if (shareText.length === 0) {
+    fail('疆域对齐', '缺少 components/TerritoryShareCard.ets（疆域分享卡）');
+  } else {
+    if (!shareText.includes('shareCardLayout(')) {
+      fail('疆域对齐', 'TerritoryShareCard.ets 没有用 core/sharecard.ts 的 shareCardLayout()');
+    }
+    if (!shareText.includes('layout.polygon.length >= 3') &&
+        !shareText.includes('polygon.length >= 3')) {
+      fail('疆域对齐', 'TerritoryShareCard.ets 没有「polygon >= 3 才画」的判断（会画假多边形）');
+    }
+  }
+
+  const shareCore = coreText('sharecard.ts');
+  if (shareCore.length === 0) {
+    fail('疆域对齐', '缺少 core/sharecard.ts（分享卡布局）');
+  } else {
+    expectIn('疆域对齐', 'core/sharecard.ts', shareCore, [
+      'CARD_WIDTH: number = 720',
+      'CARD_HEIGHT: number = 960',
+      'export function shareCardLayout',
+      'export function fitHullToBox'
+    ]);
+  }
+
+  // 入口注册：Index 必须能打开城市页与分享卡
+  const indexFile = path.join(ETS_ROOT, 'pages', 'Index.ets');
+  const indexText = fs.existsSync(indexFile) ? fs.readFileSync(indexFile, 'utf8') : '';
+  if (!indexText.includes('OVERLAY_CITYMAP')) {
+    fail('疆域对齐', 'Index.ets 没有注册「我的城市」覆盖层（OVERLAY_CITYMAP）');
+  }
+  if (!indexText.includes('OVERLAY_TERRITORY_CARD')) {
+    fail('疆域对齐', 'Index.ets 没有注册疆域分享卡覆盖层（OVERLAY_TERRITORY_CARD）');
+  }
+  if (!indexText.includes('openTerritoryCard')) {
+    fail('疆域对齐', 'Index.ets 缺少 openTerritoryCard()');
+  }
+
+  pass('疆域对齐', '爵位 8 档文案 / 共线容差 0.5 m² / 无疆域不画假多边形 / 分享卡布局集中在 core');
+}
+
+// ============================================================
+// 14) 点数门槛 + 拍照 EXIF 验证（docs/territory.md §三 §四）
+// ============================================================
+
+/**
+ * 守两件事：
+ *   A. 点数门槛真的接进了判定与 UI（capped 时要有文案，不能静默降级）
+ *   B. EXIF 必须**自己解析**（鸿蒙 getImageProperty 部分机型不可靠），
+ *      且失败文案逐字对齐 docs §四 表格（不能只说"失败"）
+ */
+function checkPhotoGpsGuard() {
+  const photoGps = coreText('photo-gps.ts');
+  if (photoGps.length === 0) {
+    fail('拍照验证', '缺少 core/photo-gps.ts（EXIF GPS 自解析）');
+  } else {
+    expectIn('拍照验证', 'core/photo-gps.ts', photoGps, [
+      // 自解析 JPEG APP1，不依赖 getImageProperty
+      "sig === 'Exif'",
+      "reader.u16(off + 2, false)",
+      // 两种字节序
+      "byteOrder === 'II'",
+      "byteOrder === 'MM'",
+      'magic !== 42',
+      // 半径 120m
+      'PHOTO_RADIUS_METERS: number = 120',
+      // 南纬 / 西经负号
+      "latRef === 'S'",
+      "lonRef === 'W'",
+      // 坐标合法性
+      'Math.abs(lat) > 90',
+      'Math.abs(lon) > 180',
+      // 失败文案（docs §四 表格，逐字）
+      '这张照片没有位置信息',
+      '相机没有开启「位置信息」',
+      '照片的位置数据不完整',
+      'PNG 照片不保存位置信息',
+      '拍摄地点离目的地太远',
+      '照片信息损坏',
+      // 具体操作指引（不能只说"失败"）
+      '请用手机自带相机 App 拍一张新照片',
+      '设置 → 应用 → 相机 → 打开「记录位置信息」',
+      '请用相机拍 JPEG 照片',
+      // 演示地点跳过验证
+      'demoSkip'
+    ]);
+    // 禁止在 core/ 里依赖鸿蒙 API（必须能在 Node 里单测）
+    // 只扫代码（注释里说明「为什么不用这些 API」是必要的，不能误伤）
+    const photoGpsCode = stripComments(photoGps);
+    const photoGpsImports = photoGpsCode.match(/^\s*import\s[^;]*from\s+['"]/gm) || [];
+    for (const line of photoGpsImports) {
+      if (line.indexOf('@ohos') >= 0 || line.indexOf('@kit.') >= 0) {
+        fail('拍照验证', 'core/photo-gps.ts 不得依赖 @ohos./@kit.*（必须纯 TS 可单测）');
+        break;
+      }
+    }
+    // 禁止用不可靠的 getImageProperty（注释里可以提，代码里不行）
+    if (photoGpsCode.indexOf('getImageProperty') >= 0) {
+      fail('拍照验证', 'core/photo-gps.ts 不得使用 getImageProperty（部分机型只给字符串、不稳定）');
+    }
+  }
+
+  // UI 接入：收集流程必须真的调用验证，不能是 no-op
+  const revealFile = path.join(ETS_ROOT, 'views', 'RevealView.ets');
+  const revealText = fs.existsSync(revealFile) ? stripComments(fs.readFileSync(revealFile, 'utf8')) : '';
+  if (revealText.length === 0) {
+    fail('拍照验证', '缺少 views/RevealView.ets');
+  } else {
+    if (revealText.indexOf('checkPhotoArrival(') < 0) {
+      fail('拍照验证', 'RevealView.ets 没有调用 checkPhotoArrival()（到达验证未接入）');
+    }
+    if (revealText.indexOf('attachCardPhotoGps(') < 0) {
+      fail('拍照验证', 'RevealView.ets 没有记录验证凭证 attachCardPhotoGps()');
+    }
+    if (revealText.indexOf('verifiedArrival') < 0) {
+      fail('拍照验证', 'RevealView.ets 没有 verifiedArrival 状态（无法阻止未验证收录）');
+    }
+    if (revealText.indexOf('readPhotoAsBase64(') < 0) {
+      fail('拍照验证', 'RevealView.ets 没有读原图字节（EXIF 必须从原图读）');
+    }
+    // 必须真的在「拍完照」和「收录」两个时刻挂上去，光有函数定义不算
+    if (revealText.indexOf('this.verifyArrivalPhoto(') < 0) {
+      fail('拍照验证', 'RevealView.ets 拍完照后没有调用 this.verifyArrivalPhoto()（验证没接上）');
+    }
+    if (revealText.indexOf('attachGpsIfVerified(') < 0) {
+      fail('拍照验证', 'RevealView.ets 收录时没有补挂验证凭证 attachGpsIfVerified()');
+    }
+    // 收录必须被验证门禁拦住（未验证不能收）
+    if (!/requiresPhotoVerification\(\)\s*&&\s*!this\.verifiedArrival/.test(revealText)) {
+      fail('拍照验证', 'RevealView.ets 收录没有被「未验证则拦截」的条件挡住');
+    }
+  }
+
+  // 「这样拍一张」不能还是 no-op：SeekPanel 必须真的走相机 + 验证
+  const seekFile = path.join(ETS_ROOT, 'components', 'SeekPanel.ets');
+  const seekText = fs.existsSync(seekFile) ? stripComments(fs.readFileSync(seekFile, 'utf8')) : '';
+  if (seekText.length > 0) {
+    if (seekText.indexOf('takeAndAdoptPhoto(') < 0 && seekText.indexOf('pickAndAdoptPhoto(') < 0) {
+      fail('拍照验证', 'SeekPanel.ets 的「这样拍一张」没有真正取图（不能是 no-op）');
+    }
+    if (seekText.indexOf('checkPhotoArrival(') < 0) {
+      fail('拍照验证', 'SeekPanel.ets 没有做照片 GPS 验证');
+    }
+  }
+
+  // 点数门槛 UI 文案：capped 必须给出解释
+  const territory = coreText('territory.ts');
+  if (territory.indexOf('边界够了，但只有 ') < 0) {
+    fail('拍照验证', 'core/territory.ts 缺少 capped 解释文案（docs §三 UI 要求）');
+  }
+  if (territory.indexOf('个点才能晋 ') < 0) {
+    fail('拍照验证', 'core/territory.ts 缺少「再探索 M 个点才能晋 X」文案');
+  }
+
+  pass('拍照验证', '点数门槛已接入判定与文案 / EXIF 自解析（II+MM）/ 失败文案逐字对齐 docs / 收集流程真实验证');
+}
+
+// ============================================================
 // 输出
 // ============================================================
 
@@ -800,7 +1052,9 @@ const sections = [
   ['反虚构兜底', checkNoFakeFallback],
   ['附近惊喜保密', checkSurpriseSecrecy],
   ['布局陷阱', checkBlankScreenPattern],
-  ['iOS 对齐', checkIosParity]
+  ['iOS 对齐', checkIosParity],
+  ['疆域对齐', checkTerritory],
+  ['拍照验证', checkPhotoGpsGuard]
 ];
 
 console.log('═══ 步迷 Walkaholic · HarmonyOS ArkTS 静态自检 ═══');

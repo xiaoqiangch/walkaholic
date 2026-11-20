@@ -211,6 +211,16 @@ function decodeCard(value: unknown): PlaceCard | undefined {
   if (typeof photoRemotePath === 'string' && photoRemotePath.length > 0) {
     card.photoRemotePath = photoRemotePath;
   }
+  // 到达验证凭证（docs/territory.md §四）：照片 EXIF 坐标 + 实测距离
+  const photoGpsRecord: Record<string, unknown> | undefined = toRecord(record['photoGps']);
+  if (photoGpsRecord !== undefined) {
+    const photoGps: GeoPoint | undefined = decodeGeoPoint(photoGpsRecord);
+    if (photoGps !== undefined) card.photoGps = photoGps;
+  }
+  const photoDistance: unknown = record['photoDistance'];
+  if (typeof photoDistance === 'number' && isFinite(photoDistance)) {
+    card.photoDistance = photoDistance;
+  }
   return card;
 }
 

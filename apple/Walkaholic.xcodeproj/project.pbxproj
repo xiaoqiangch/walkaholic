@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AA2300000000000000000011 /* PhotoGps.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2300000000000000000001 /* PhotoGps.swift */; };
+		AA2100000000000000000011 /* Territory.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2100000000000000000001 /* Territory.swift */; };
+		AA2100000000000000000012 /* TerritoryDataSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2100000000000000000002 /* TerritoryDataSource.swift */; };
+		AA2100000000000000000013 /* TerritoryViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2100000000000000000003 /* TerritoryViews.swift */; };
 		0473991C7CDF22D88AEB9A4C /* BoxSetupSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = F72DDD9DB50EFFF8AFAA31FE /* BoxSetupSheet.swift */; };
 		0BFDE57FA86DD528503B8457 /* QuestSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA513A9498B51AFE53978783 /* QuestSession.swift */; };
 		1159B26E2CFE0B1EFC38F296 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C002EA791982D766EFF7D65 /* Models.swift */; };
@@ -124,6 +128,10 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		AA2300000000000000000001 /* PhotoGps.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoGps.swift; sourceTree = "<group>"; };
+		AA2100000000000000000001 /* Territory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Territory.swift; sourceTree = "<group>"; };
+		AA2100000000000000000002 /* TerritoryDataSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerritoryDataSource.swift; sourceTree = "<group>"; };
+		AA2100000000000000000003 /* TerritoryViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerritoryViews.swift; sourceTree = "<group>"; };
 		0339A1BD3379BB1EC20CEBB2 /* RealPlace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealPlace.swift; sourceTree = "<group>"; };
 		0662FD5FDCAD4F9ADD24B9FE /* WatchRevealView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchRevealView.swift; sourceTree = "<group>"; };
 		07421175E805830B544FE273 /* WatchStatusChip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchStatusChip.swift; sourceTree = "<group>"; };
@@ -244,6 +252,8 @@
 				C17A2B3C4D5E6F7081920004 /* WalkTrackStore.swift */,
 				C17A2B3C4D5E6F7081920007 /* SurpriseReceipt.swift */,
 				C17A2B3C4D5E6F7081920009 /* DayMoment.swift */,
+				AA2100000000000000000001 /* Territory.swift */,
+				AA2300000000000000000001 /* PhotoGps.swift */,
 			);
 			path = Core;
 			sourceTree = "<group>";
@@ -314,6 +324,7 @@
 				4F30BCE02B19E59E1C79AB4F /* POIProviderService.swift */,
 				F8B7F84840371328C872A00E /* RouteService.swift */,
 				E3CB49D79ED0B31541C25942 /* WatchSyncService.swift */,
+				AA2100000000000000000002 /* TerritoryDataSource.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -340,6 +351,7 @@
 				D8B5340A7CFC80269A2CE14B /* SocialView.swift */,
 				C609EA79D18AA7BE27481AB8 /* SurprisesView.swift */,
 				07421175E805830B544FE273 /* WatchStatusChip.swift */,
+				AA2100000000000000000003 /* TerritoryViews.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -540,6 +552,10 @@
 				EC7C2987750EFD573BE6EC72 /* WatchSessionSummary.swift in Sources */,
 				741C5CFE2E5C032AE541EDD3 /* WatchStatusChip.swift in Sources */,
 				739234F1BC84BD53D0E49268 /* WatchSyncService.swift in Sources */,
+				AA2300000000000000000011 /* PhotoGps.swift in Sources */,
+				AA2100000000000000000011 /* Territory.swift in Sources */,
+				AA2100000000000000000012 /* TerritoryDataSource.swift in Sources */,
+				AA2100000000000000000013 /* TerritoryViews.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

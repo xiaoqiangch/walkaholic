@@ -18,6 +18,61 @@
 import assert from 'node:assert/strict';
 
 import {
+  PHOTO_RADIUS_METERS,
+  PhotoArrivalCheck,
+  PhotoGpsFailure,
+  PhotoGpsResult,
+  base64ToBytes,
+  checkPhotoArrival,
+  haversineMeters,
+  parseExifGps,
+  parseExifGpsFromBase64,
+  photoFailFullText,
+  photoFailHowto,
+  photoFailNeedsSettings,
+  photoFailText,
+  tooFarCopy,
+  verifyPhotoAt
+} from '../entry/src/main/ets/core/photo-gps';
+import {
+  COLLINEAR_EPS_M2,
+  MIN_POINTS_FOR_TERRITORY,
+  NEED_MORE_POINTS_HINT,
+  TERRITORY_METRIC_LABELS,
+  TERRITORY_RANKS,
+  TerritoryRankResult,
+  TerritoryStats,
+  convexHull,
+  emptyTerritory,
+  fiefTitle,
+  formatTerritoryArea,
+  formatTerritorySpan,
+  hullToGeoPoints,
+  isRealPlaceSource as isRealPlaceSourceForTerritory,
+  isValidCoordinate,
+  needMorePointsCopy,
+  occupiedPoints,
+  polygonAreaM2,
+  progressCopy,
+  projectMeters,
+  rankByKey,
+  territoryFromCards,
+  territoryRank,
+  territoryStats
+} from '../entry/src/main/ets/core/territory';
+import {
+  CARD_FOOTER_BRAND,
+  CARD_HEIGHT,
+  CARD_WIDTH,
+  MAP_SIZE,
+  MAP_TOP,
+  ShareCardLayout,
+  CardPoint,
+  fitHullToBox,
+  formatCardDate,
+  shareCardLayout
+} from '../entry/src/main/ets/core/sharecard';
+import {
   Area,
   BuriedSurprise,
   ExploreScope,
@@ -3842,6 +3897,1126 @@ test('寻惊喜：达标结算后可从「我找到的」看到，并记下复�
   assert.equal(found.length, 1);
   assert.equal(found[0].id, target.id);
   assert.equal(found[0].finderPhotoUri, '/sandbox/finder.jpg');
+});
+
+// ============================================================
+// 23. 疆域与爵位（docs/territory.md，对齐 Web territory.js）
+// ============================================================
+
+/** 造一个约 1km × 1km 的正方形（4 个角） */
+function squareKm(): GeoPoint[] {
+  const points: GeoPoint[] = [
+    geoPoint(31.2304, 121.4737),
+    geoPoint(31.2304, 121.4845),
+    geoPoint(31.2394, 121.4845),
+    geoPoint(31.2394, 121.4737)
+  ];
+  return points;
+}
+
+test('疆域：爵位表 8 档，文案与色值逐字/逐值对齐 docs', (): void => {
+  assert.equal(TERRITORY_RANKS.length, 8);
+  const expected: string[][] = [
+    ['commoner', '民', '白身', '0', '#9CA3AF', '还没有自己的疆域'],
+    ['shi', '士', '士', '0.05', '#64748B', '初立门户，方寸之地'],
+    ['nan', '男', '男爵', '0.3', '#0EA5E9', '一街一巷，始有封地'],
+    ['zi', '子', '子爵', '1.2', '#14B8A6', '数坊之间，渐成版图'],
+    ['bo', '伯', '伯爵', '4', '#5B6CFF', '半城风物，已在掌中'],
+    ['hou', '侯', '侯爵', '12', '#8B5CF6', '纵横十余里，一方之望'],
+    ['gong', '公', '公爵', '30', '#F59E0B', '半壁城池，位极人臣'],
+    ['wang', '王', '王', '80', '#EF4444', '一城之主，疆域无出其右']
+  ];
+  for (let i = 0; i < expected.length; i += 1) {
+    const rank = TERRITORY_RANKS[i];
+    assert.equal(rank.key, expected[i][0], '第 ' + String(i) + ' 档 key');
+    assert.equal(rank.seal, expected[i][1], rank.key + ' 印章');
+    assert.equal(rank.title, expected[i][2], rank.key + ' 名称');
+    assert.equal(String(rank.thresholdKm2), expected[i][3], rank.key + ' 门槛');
+    assert.equal(rank.color, expected[i][4], rank.key + ' 色值');
+    assert.equal(rank.desc, expected[i][5], rank.key + ' 释义');
+    assert.equal(rank.order, i, rank.key + ' 序号');
+  }
+  // 门槛严格递增
+  for (let i = 1; i < TERRITORY_RANKS.length; i += 1) {
+    assert.ok(TERRITORY_RANKS[i].thresholdKm2 > TERRITORY_RANKS[i - 1].thresholdKm2,
+      '门槛必须严格递增：' + TERRITORY_RANKS[i].key);
+  }
+  assert.equal(rankByKey('zi').title, '子爵');
+  assert.equal(rankByKey('不存在').title, '白身', '未知 key 回退白身');
+});
+
+test('疆域：共线容差常量 0.5 m²（Web 踩过的浮点坑）', (): void => {
+  assert.equal(COLLINEAR_EPS_M2, 0.5);
+});
+
+test('疆域：正方形凸包面积 ≈ 1 km²（4 个顶点，内部点被剔除）', (): void => {
+  const points: GeoPoint[] = squareKm();
+  // 中心点（应被凸包剔除）
+  points.push(geoPoint(31.2349, 121.4791));
+  // 边上一点（应被剔除）
+  points.push(geoPoint(31.2304, 121.4791));
+
+  const stats: TerritoryStats = territoryStats(points);
+  assert.equal(stats.pointCount, 6, '合法点都计入 pointCount');
+  assert.equal(stats.hullPointCount, 4, '内部点 + 边上点都应被凸包剔除');
+  // 约 1.02 km²（1.03km × 1.0km，等距圆柱近似）
+  assert.ok(Math.abs(stats.areaKm2 - 1.0) < 0.06, '面积应约 1 km²，实测 ' + stats.areaKm2.toFixed(4));
+  assert.ok(stats.spanM > 1300 && stats.spanM < 1550, '跨度约 1.4 km，实测 ' + stats.spanM.toFixed(0));
+  assert.equal(stats.hull.length, 4);
+});
+
+test('疆域：共线点不产生面积（容差生效，不出现退化细三角）', (): void => {
+  // 三个严格共线的点
+  const collinear: GeoPoint[] = [
+    geoPoint(31.2304, 121.4737),
+    geoPoint(31.2304, 121.4837),
+    geoPoint(31.2304, 121.4937)
+  ];
+  const stats: TerritoryStats = territoryStats(collinear);
+  assert.equal(stats.areaM2, 0, '共线面积必须为 0');
+  assert.equal(stats.areaKm2, 0);
+  assert.ok(stats.hullPointCount <= 2, '共线时凸包只剩 2 个端点，实测 ' + String(stats.hullPointCount));
+
+  // 注意容差作用在**叉积**上（叉积 = 2 × 三角形面积），
+  // 所以能保留的最小三角形面积约 0.25 m² —— 这是 Web prototype/web/territory.js 的原样行为。
+  //
+  // 退化三角：底边 0.857 米、高 0.09 米 → 叉积 ≈ 0.077 m² ≤ 0.5 → 应被吃成共线
+  const degenerate: GeoPoint[] = [
+    geoPoint(31.2304, 121.4737),
+    geoPoint(31.2304, 121.4737090),   // 东移约 0.857 米
+    geoPoint(31.2304008, 121.4737)    // 北移约 0.088 米（叉积 ≈ 0.076 m²）
+  ];
+  const degenerateStats: TerritoryStats = territoryStats(degenerate);
+  assert.ok(degenerateStats.hullPointCount <= 2,
+    '退化三角应被容差吃成共线，实测 hull=' + String(degenerateStats.hullPointCount));
+  assert.equal(degenerateStats.areaM2, 0, '退化三角面积必须为 0，实测 ' + degenerateStats.areaM2.toFixed(4));
+
+  // 同样底边，高 0.6 米 → 叉积 ≈ 0.514 m² > 0.5 → 刚好越过容差，面积保留（≈ 0.257 m²）
+  const tiny: GeoPoint[] = [
+    geoPoint(31.2304, 121.4737),
+    geoPoint(31.2304, 121.4737090),
+    geoPoint(31.2304053, 121.4737)    // 北移约 0.586 米
+  ];
+  const tinyStats: TerritoryStats = territoryStats(tiny);
+  assert.ok(tinyStats.areaM2 > 0.15 && tinyStats.areaM2 < 0.5,
+    '刚好越过容差的三角应保留面积，实测 ' + tinyStats.areaM2.toFixed(4));
+
+  // 真正有面积的三角：底边 951 米、高 30 米 → 面积 ≈ 14300 m²，必须完整保留
+  const real: GeoPoint[] = [
+    geoPoint(31.2304, 121.4737),
+    geoPoint(31.2304, 121.4837),
+    geoPoint(31.23067, 121.4737)
+  ];
+  const realStats: TerritoryStats = territoryStats(real);
+  assert.ok(realStats.areaM2 > 10000, '真三角形面积必须保留，实测 ' + realStats.areaM2.toFixed(1));
+});
+
+test('疆域：点数 < 3 → 面积 0、无凸包', (): void => {
+  assert.equal(territoryStats([]).areaM2, 0);
+  assert.equal(territoryStats([]).hullPointCount, 0);
+  assert.equal(territoryStats([geoPoint(31.23, 121.47)]).areaM2, 0);
+  assert.equal(territoryStats([geoPoint(31.23, 121.47)]).pointCount, 1);
+
+  const two: GeoPoint[] = [geoPoint(31.23, 121.47), geoPoint(31.24, 121.48)];
+  const twoStats: TerritoryStats = territoryStats(two);
+  assert.equal(twoStats.pointCount, 2);
+  assert.equal(twoStats.areaM2, 0);
+  assert.equal(twoStats.hullPointCount, 0, '两点不构成面积');
+  assert.equal(twoStats.spanM, 0, '点数 < 3 时跨度为 0（与 Web 一致）');
+});
+
+test('疆域：非法坐标被过滤', (): void => {
+  const dirty: GeoPoint[] = [
+    geoPoint(31.2304, 121.4737),
+    geoPoint(31.2304, 121.4845),
+    geoPoint(31.2394, 121.4845),
+    geoPoint(NaN, 121.4737),
+    geoPoint(31.23, Infinity),
+    geoPoint(91, 121.47),      // 纬度越界
+    geoPoint(31.23, 181)       // 经度越界
+  ];
+  const stats: TerritoryStats = territoryStats(dirty);
+  assert.equal(stats.pointCount, 3, '只有 3 个合法点（NaN / Infinity / 越界全被丢弃）');
+  assert.ok(stats.areaKm2 > 0.4, '3 个合法点构成直角三角形，应有面积，实测 ' + stats.areaKm2.toFixed(3));
+
+  assert.equal(isValidCoordinate(undefined), false);
+  assert.equal(isValidCoordinate(geoPoint(0, 0)), true);
+  assert.equal(isValidCoordinate(geoPoint(NaN, 0)), false);
+  assert.equal(isValidCoordinate(geoPoint(91, 0)), false);
+  assert.equal(isValidCoordinate(geoPoint(0, -181)), false);
+
+  // 全是非法坐标 → 无疆域
+  const allBad: GeoPoint[] = [geoPoint(NaN, NaN), geoPoint(95, 0), geoPoint(0, 200)];
+  assert.equal(territoryStats(allBad).pointCount, 0);
+  assert.equal(territoryStats(allBad).areaM2, 0);
+});
+
+test('疆域：爵位边界值（0 / 0.05 / 0.3 / 1.2 / 4 / 12 / 30 / 80）', (): void => {
+  // 门槛处刚好晋级（>= 判定）
+  assert.equal(territoryRank(0).rank.key, 'commoner');
+  assert.equal(territoryRank(0.049).rank.key, 'commoner');
+  assert.equal(territoryRank(0.05).rank.key, 'shi', '刚好 0.05 → 士');
+  assert.equal(territoryRank(0.3).rank.key, 'nan');
+  assert.equal(territoryRank(1.2).rank.key, 'zi');
+  assert.equal(territoryRank(4).rank.key, 'bo');
+  assert.equal(territoryRank(12).rank.key, 'hou');
+  assert.equal(territoryRank(30).rank.key, 'gong');
+  assert.equal(territoryRank(80).rank.key, 'wang');
+  assert.equal(territoryRank(9999).rank.key, 'wang', '超过最高档仍是王');
+  // 负数 / NaN → 白身
+  assert.equal(territoryRank(-1).rank.key, 'commoner');
+  assert.equal(territoryRank(NaN).rank.key, 'commoner');
+});
+
+test('疆域：进度与「再扩 X 晋 Y」', (): void => {
+  // 0.3 到 1.2 之间：0.75 → progress = (0.75-0.3)/(1.2-0.3) = 0.5
+  const mid: TerritoryRankResult = territoryRank(0.75);
+  assert.equal(mid.rank.key, 'nan');
+  assert.equal(mid.next === undefined ? '' : mid.next.key, 'zi');
+  assert.ok(Math.abs(mid.progress - 0.5) < 0.001, '进度应 0.5，实测 ' + mid.progress.toFixed(4));
+  assert.ok(Math.abs(mid.toNextKm2 - 0.45) < 0.001, '还差 0.45，实测 ' + mid.toNextKm2.toFixed(4));
+  assert.equal(progressCopy(mid), '再扩 0.45 km² 晋 子爵');
+
+  // 最高档：progress=1，next undefined，toNext=0
+  const top: TerritoryRankResult = territoryRank(100);
+  assert.equal(top.rank.key, 'wang');
+  assert.equal(top.next, undefined);
+  assert.equal(top.progress, 1);
+  assert.equal(top.toNextKm2, 0);
+  assert.equal(progressCopy(top), '已是最高爵位');
+
+  // 白身：0 → progress 0，还差 0.05
+  const zero: TerritoryRankResult = territoryRank(0);
+  assert.equal(zero.progress, 0);
+  assert.ok(Math.abs(zero.toNextKm2 - 0.05) < 1e-9);
+  // 0.05 km² ≥ 0.01 km² → 走 km² 分支（2 位小数），不是 m²
+  assert.equal(progressCopy(zero), '再扩 0.05 km² 晋 士');
+
+  // areaKm2 会被夹到 0（负数）
+  assert.equal(territoryRank(-5).areaKm2, 0);
+});
+
+test('疆域：面积格式化四档', (): void => {
+  assert.equal(formatTerritoryArea(0), '0 m²');
+  assert.equal(formatTerritoryArea(-1), '0 m²');
+  assert.equal(formatTerritoryArea(NaN), '0 m²');
+  // < 0.01 km² → 平方米
+  assert.equal(formatTerritoryArea(0.0000123), '12 m²');
+  assert.equal(formatTerritoryArea(0.009), '9000 m²');
+  // 0.01 ≤ a < 1 → 2 位小数
+  assert.equal(formatTerritoryArea(0.0123), '0.01 km²');
+  assert.equal(formatTerritoryArea(0.5), '0.50 km²');
+  // 1 ≤ a < 100 → 1 位小数
+  assert.equal(formatTerritoryArea(1.0227), '1.0 km²');
+  assert.equal(formatTerritoryArea(99.9), '99.9 km²');
+  // ≥ 100 → 取整
+  assert.equal(formatTerritoryArea(100), '100 km²');
+  assert.equal(formatTerritoryArea(123.6), '124 km²');
+  // 跨度
+  assert.equal(formatTerritorySpan(0), '0 m');
+  assert.equal(formatTerritorySpan(999), '999 m');
+  assert.equal(formatTerritorySpan(1431), '1.4 km');
+});
+
+test('疆域：封号 / 点数不足文案 / 数据行标签', (): void => {
+  assert.equal(fiefTitle(TERRITORY_RANKS[3]), '子爵');
+  assert.equal(fiefTitle(TERRITORY_RANKS[3], '金陵'), '金陵 · 子爵');
+  assert.equal(fiefTitle(TERRITORY_RANKS[3], ''), '子爵');
+
+  assert.equal(MIN_POINTS_FOR_TERRITORY, 3);
+  assert.equal(needMorePointsCopy(0), '再开 3 个盲盒就能围出你的第一块疆域');
+  assert.equal(needMorePointsCopy(1), '再开 2 个盲盒就能围出你的第一块疆域');
+  assert.equal(needMorePointsCopy(2), '再开 1 个盲盒就能围出你的第一块疆域');
+  assert.equal(NEED_MORE_POINTS_HINT, '至少 3 个真实地点才能围成一片地');
+  assert.deepEqual(TERRITORY_METRIC_LABELS, ['疆域面积', '占领地点', '最长跨度']);
+});
+
+test('疆域：投影以平均纬度为基准（城市尺度误差极小）', (): void => {
+  const points: GeoPoint[] = squareKm();
+  const flat = projectMeters(points);
+  assert.equal(flat.length, 4);
+  assert.equal(flat[0].x, 0, 'origin 是第一个点，x=0');
+  assert.equal(flat[0].y, 0, 'origin 是第一个点，y=0');
+  // 第二点同纬度往东 → x>0, y≈0
+  assert.ok(flat[1].x > 1000 && flat[1].x < 1100, '东移约 1.03km，实测 ' + flat[1].x.toFixed(0));
+  assert.ok(Math.abs(flat[1].y) < 0.001);
+  // 第三点在北 → y>0
+  assert.ok(flat[2].y > 990 && flat[2].y < 1010, '北移约 1.0km，实测 ' + flat[2].y.toFixed(0));
+  // 单位：米（不是度）
+  assert.ok(flat[3].x < 1, '第四点经度与 origin 相同 → x≈0');
+});
+
+test('疆域：凸包逆时针且首尾不重复', (): void => {
+  const flat = projectMeters(squareKm());
+  const hull = convexHull(flat);
+  assert.equal(hull.length, 4, '正方形 4 个顶点');
+  // 逆时针：连续三点叉积 > 0
+  for (let i = 0; i < hull.length; i += 1) {
+    const o = hull[i];
+    const a = hull[(i + 1) % hull.length];
+    const b = hull[(i + 2) % hull.length];
+    const cross = (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    assert.ok(cross > 0, '第 ' + String(i) + ' 个顶点应左转（逆时针），实测 ' + cross.toFixed(2));
+  }
+  assert.equal(hull[0].x === hull[hull.length - 1].x && hull[0].y === hull[hull.length - 1].y, false,
+    '首尾不应重复');
+  assert.equal(polygonAreaM2([]), 0);
+  assert.equal(polygonAreaM2(hull), polygonAreaM2(hull), '纯函数可重复调用');
+});
+
+test('疆域：只统计真实来源 + 有坐标的地点（内置演示地点被排除）', (): void => {
+  assert.equal(isRealPlaceSourceForTerritory('curated'), true);
+  assert.equal(isRealPlaceSourceForTerritory('osm'), true);
+  assert.equal(isRealPlaceSourceForTerritory('wikipedia'), true);
+  assert.equal(isRealPlaceSourceForTerritory('amap'), true);
+  assert.equal(isRealPlaceSourceForTerritory('baidu'), true);
+  assert.equal(isRealPlaceSourceForTerritory('wiki'), true);
+  assert.equal(isRealPlaceSourceForTerritory('catalog'), false, '内置演示地点不计入疆域');
+  assert.equal(isRealPlaceSourceForTerritory('manual'), false);
+  assert.equal(isRealPlaceSourceForTerritory(''), false);
+
+  const places: Place[] = [
+    {
+      id: 'real-1', name: '静安公园', area: Area.Near, category: '公园', emoji: '🌳',
+      rarity: Rarity.Common, why: '', task: '', hints: ['一', '二', '三'],
+      mapPoint: { x: 0.5, y: 0.5 }, radiusMeters: 1000,
+      coordinate: geoPoint(31.2304, 121.4737), source: 'osm'
+    },
+    {
+      id: 'real-2', name: '人民广场', area: Area.Near, category: '广场', emoji: '⛲️',
+      rarity: Rarity.Common, why: '', task: '', hints: ['一', '二', '三'],
+      mapPoint: { x: 0.5, y: 0.5 }, radiusMeters: 1000,
+      coordinate: geoPoint(31.2304, 121.4845), source: 'amap'
+    },
+    {
+      id: 'real-3', name: '上海博物馆', area: Area.OldTown, category: '博物馆', emoji: '🖼️',
+      rarity: Rarity.Rare, why: '', task: '', hints: ['一', '二', '三'],
+      mapPoint: { x: 0.5, y: 0.5 }, radiusMeters: 1000,
+      coordinate: geoPoint(31.2394, 121.4845), source: 'wiki'
+    },
+    {
+      id: 'demo-1', name: '旧码头边的石阶', area: Area.River, category: '石阶', emoji: '🪜',
+      rarity: Rarity.Rare, why: '', task: '', hints: ['一', '二', '三'],
+      mapPoint: { x: 0.2, y: 0.4 }, radiusMeters: 1200, source: 'catalog'
+    }
+  ];
+
+  const points: GeoPoint[] = occupiedPoints(
+    ['real-1', 'real-2', 'real-3', 'demo-1'], places
+  );
+  assert.equal(points.length, 3, '只取 3 个真实来源的点（demo-1 无坐标被排除）');
+
+  const stats: TerritoryStats = territoryFromCards(
+    ['real-1', 'real-2', 'real-3', 'demo-1'], places
+  );
+  assert.equal(stats.pointCount, 3);
+  assert.ok(stats.areaKm2 > 0.4, '三点应围出面积');
+  assert.equal(territoryFromCards(['demo-1'], places).areaM2, 0, '只有演示地点 → 无疆域');
+  assert.equal(territoryFromCards([], places).areaM2, 0);
+});
+
+test('疆域：真实来源白名单比 store 更宽（含 wikipedia 历史别名）', async (): Promise<void> => {
+  // 两个白名单是分开维护的：store 只放行 wiki，territory 额外放行 wikipedia。
+  // 这里显式断言差异，避免以后有人「统一」它们时悄悄丢历史数据。
+  const { isRealPlaceSource: storeWhitelist } = await import('../entry/src/main/ets/core/store');
+  assert.equal(storeWhitelist('wikipedia'), false, 'store 白名单不含 wikipedia');
+  assert.equal(isRealPlaceSourceForTerritory('wikipedia'), true, '疆域白名单含 wikipedia');
+  // 其余六个来源两边一致
+  const common: string[] = ['curated', 'osm', 'amap', 'baidu', 'wiki'];
+  for (const source of common) {
+    assert.equal(storeWhitelist(source), true, source + ' 两边都应放行');
+    assert.equal(isRealPlaceSourceForTerritory(source), true, source + ' 庭域应放行');
+  }
+  assert.equal(storeWhitelist('catalog'), false);
+  assert.equal(isRealPlaceSourceForTerritory('catalog'), false);
+});
+
+test('疆域：凸包顶点能还原成经纬度（地图叠加用，往返误差 < 1 米）', (): void => {
+  const points: GeoPoint[] = squareKm();
+  const stats: TerritoryStats = territoryStats(points);
+  const back: GeoPoint[] = hullToGeoPoints(stats.hull, points);
+  assert.equal(back.length, stats.hullPointCount, '顶点数一致');
+
+  // 每个还原点都应匹配某个原始点（同一批点，误差在米级）
+  for (let i = 0; i < back.length; i += 1) {
+    let bestMeters: number = Infinity;
+    for (let j = 0; j < points.length; j += 1) {
+      const dLat: number = (back[i].latitude - points[j].latitude) * 110540;
+      const dLon: number = (back[i].longitude - points[j].longitude) * 111320 *
+        Math.cos(31.2304 * Math.PI / 180);
+      const d: number = Math.sqrt(dLat * dLat + dLon * dLon);
+      if (d < bestMeters) bestMeters = d;
+    }
+    assert.ok(bestMeters < 1, '还原误差应 < 1 米，实测 ' + bestMeters.toFixed(3));
+  }
+
+  // 空输入
+  assert.equal(hullToGeoPoints([], points).length, 0);
+  assert.equal(hullToGeoPoints(stats.hull, []).length, 0);
+});
+
+test('疆域：Store 快照里内置演示地点全覆盖 → 默认无疆域（不造假）', async (): Promise<void> => {
+  const store: WalkaholicStoreApi = await freshStore();
+  const snapshot = store.snapshot();
+  const placeIDs: string[] = snapshot.profile.cards.map((card: PlaceCard): string => card.placeID);
+  assert.ok(placeIDs.length > 0, '演示态有已收集卡片');
+
+  const stats: TerritoryStats = territoryFromCards(placeIDs, snapshot.places);
+  // 演示卡片全是内置地点（source = catalog，无坐标）→ 疆域为 0
+  assert.equal(stats.areaM2, 0, '演示地点不该围出疆域');
+  assert.equal(stats.hullPointCount, 0);
+  assert.equal(territoryRank(0).rank.key, 'commoner');
+  assert.equal(emptyTerritory(0).areaKm2, 0);
+});
+
+// ============================================================
+// 24. 疆域分享卡布局（core/sharecard.ts）
+// ============================================================
+
+test('分享卡：720×960，印章/标题/数据/页脚都在画布内', (): void => {
+  const pts: GeoPoint[] = squareKm();
+  const stats: TerritoryStats = territoryStats(pts);
+  const rank = territoryRank(stats.areaKm2);
+  const layout: ShareCardLayout = shareCardLayout(stats, rank, 1763000000000);
+
+  assert.equal(layout.width, CARD_WIDTH);
+  assert.equal(layout.height, CARD_HEIGHT);
+  assert.equal(CARD_WIDTH, 720);
+  assert.equal(CARD_HEIGHT, 960);
+
+  // 印章圆完整在画布内
+  assert.ok(layout.sealX - layout.sealRadius >= 0);
+  assert.ok(layout.sealY - layout.sealRadius >= 0);
+  assert.ok(layout.sealX + layout.sealRadius <= layout.width);
+  assert.ok(layout.sealY + layout.sealRadius <= layout.height);
+
+  // 文案与爵位一致
+  assert.equal(layout.seal, rank.rank.seal);
+  assert.equal(layout.title, rank.rank.title);
+  assert.equal(layout.desc, rank.rank.desc);
+  assert.equal(layout.color, rank.rank.color);
+
+  // 所有元素纵向有序（色带 → 印章 → 标题 → 释义 → 图形 → 数据 → 页脚）
+  assert.ok(layout.sealY < layout.titleY);
+  assert.ok(layout.titleY < layout.descY);
+  assert.ok(layout.descY < MAP_TOP);
+  assert.ok(MAP_TOP + MAP_SIZE < layout.stats[0].y);
+  assert.ok(layout.stats[0].y < layout.footerY);
+  assert.ok(layout.footerY <= CARD_HEIGHT);
+});
+
+test('分享卡：三项数据文案取自 formatTerritoryArea / 跨度，三等分居中', (): void => {
+  const pts: GeoPoint[] = squareKm();
+  const stats: TerritoryStats = territoryStats(pts);
+  const layout: ShareCardLayout = shareCardLayout(stats, territoryRank(stats.areaKm2), 0);
+
+  assert.equal(layout.stats.length, 3);
+  assert.deepEqual(layout.stats.map((c) => c.label), ['疆域面积', '占领地点', '最长跨度']);
+  assert.equal(layout.stats[0].value, formatTerritoryArea(stats.areaKm2));
+  assert.equal(layout.stats[1].value, String(stats.pointCount));
+  assert.equal(layout.stats[2].value, formatTerritorySpan(stats.spanM));
+
+  // 三等分中心
+  assert.ok(Math.abs(layout.stats[0].x - CARD_WIDTH / 6) < 0.01);
+  assert.ok(Math.abs(layout.stats[1].x - CARD_WIDTH / 2) < 0.01);
+  assert.ok(Math.abs(layout.stats[2].x - CARD_WIDTH * 5 / 6) < 0.01);
+  // 数值与标签都在画布内
+  for (const cell of layout.stats) {
+    assert.ok(cell.y > 0 && cell.y < CARD_HEIGHT);
+    assert.ok(cell.labelY > cell.y && cell.labelY < CARD_HEIGHT);
+  }
+});
+
+test('分享卡：有疆域时多边形顶点全落在图形区域内', (): void => {
+  const pts: GeoPoint[] = squareKm();
+  const stats: TerritoryStats = territoryStats(pts);
+  const layout: ShareCardLayout = shareCardLayout(stats, territoryRank(stats.areaKm2), 0);
+
+  assert.ok(layout.polygon.length >= 3, '有疆域就应该有 >= 3 个顶点');
+  assert.equal(layout.polygon.length, stats.hullPointCount);
+
+  const boxLeft: number = CARD_WIDTH / 2 - MAP_SIZE / 2;
+  for (const point of layout.polygon) {
+    assert.ok(point.x >= boxLeft && point.x <= boxLeft + MAP_SIZE,
+      '顶点 x 应在图形区域内，实测 ' + point.x.toFixed(1));
+    assert.ok(point.y >= MAP_TOP && point.y <= MAP_TOP + MAP_SIZE,
+      '顶点 y 应在图形区域内，实测 ' + point.y.toFixed(1));
+  }
+});
+
+test('分享卡：无疆域 → polygon 为空，绝不画假多边形', (): void => {
+  // 2 个点（不足 3）
+  const two: GeoPoint[] = [geoPoint(31.2304, 121.4737), geoPoint(31.2344, 121.4737)];
+  const stats: TerritoryStats = territoryStats(two);
+  const layout: ShareCardLayout = shareCardLayout(stats, territoryRank(0), 0);
+
+  assert.equal(layout.polygon.length, 0, '无疆域时 polygon 必须为空');
+  assert.ok(layout.emptyTerritoryText.length > 0, '要有替代文案');
+  assert.equal(layout.emptyTerritoryText, '再开 3 个盲盒即可围出疆域');
+  // 爵位是白身
+  assert.equal(layout.title, '白身');
+});
+
+test('分享卡：fitHullToBox 等比缩放 + Y 轴翻转', (): void => {
+  // 手工构造一个 200×100 的矩形（米），塞进 100×100 的方框
+  const hull: CardPoint[] = [
+    { x: 0, y: 0 },
+    { x: 200, y: 0 },
+    { x: 200, y: 100 },
+    { x: 0, y: 100 }
+  ];
+  const fitted: CardPoint[] = fitHullToBox(hull, 0, 0, 100, 100);
+  assert.equal(fitted.length, 4);
+  // 等比：宽度维（200）先撞界 → scale = 0.5，所以 x 跨度 100、y 跨度 50
+  let minX: number = Infinity;
+  let maxX: number = -Infinity;
+  let minY: number = Infinity;
+  let maxY: number = -Infinity;
+  for (const p of fitted) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  assert.ok(Math.abs((maxX - minX) - 100) < 0.01, 'x 跨度应 100，实测 ' + (maxX - minX).toFixed(2));
+  assert.ok(Math.abs((maxY - minY) - 50) < 0.01, 'y 跨度应 50（等比），实测 ' + (maxY - minY).toFixed(2));
+  // 居中：包围盒中心 = 方框中心 (50,50)
+  assert.ok(Math.abs((minX + maxX) / 2 - 50) < 0.01);
+  assert.ok(Math.abs((minY + maxY) / 2 - 50) < 0.01);
+
+  // Y 轴翻转：数学 y 较大的点（上方），画布 y 较小
+  const original0 = hull[0];   // (0,0)
+  const original2 = hull[2];   // (200,100) —— y 更大
+  const fitted0 = fitted[0];
+  const fitted2 = fitted[2];
+  assert.ok(Math.abs(original2.y - original0.y) > Math.abs(original0.y - original0.y));
+  assert.ok(fitted2.y < fitted0.y, 'Math y 更大的点画布 y 应更小（翻转）');
+});
+
+test('分享卡：fitHullToBox 边界（顶点不足 / 零尺寸 / 退化共线）', (): void => {
+  assert.equal(fitHullToBox([], 0, 0, 100, 100).length, 0);
+  assert.equal(fitHullToBox([{ x: 0, y: 0 }, { x: 10, y: 0 }], 0, 0, 100, 100).length, 0);
+  assert.equal(fitHullToBox([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 20, y: 0 }], 0, 0, 0, 100).length, 0,
+    '零尺寸方框应返回空');
+  // 退化共线（所有点一条线）：span 被兜底为 1，不崩、不除零
+  const collinear: CardPoint[] = [
+    { x: 0, y: 0 }, { x: 50, y: 0 }, { x: 100, y: 0 }
+  ];
+  const fitted: CardPoint[] = fitHullToBox(collinear, 0, 0, 100, 100);
+  assert.equal(fitted.length, 3, '共线也照常返回顶点（是否画由 polygon<3 判断）');
+  for (const p of fitted) {
+    assert.ok(isFinite(p.x) && isFinite(p.y), '不能出现 NaN');
+  }
+});
+
+test('疆域：与 Web territory.js 的爵位表/门槛/色值逐值一致（三端契约）', (): void => {
+  // Web 端的 RANKS（prototype/web/territory.js）是权威参考：
+  // 这里把它的 8 档硬编码进来逐值比对，任何一端悄悄改门槛都会被这条测试拦住。
+  interface WebRank {
+    key: string;
+    title: string;
+    seal: string;
+    thresholdKm2: number;
+    color: string;
+    desc: string;
+  }
+  const webRanks: WebRank[] = [
+    { key: 'commoner', title: '白身', seal: '民', thresholdKm2: 0, color: '#9CA3AF', desc: '还没有自己的疆域' },
+    { key: 'shi', title: '士', seal: '士', thresholdKm2: 0.05, color: '#64748B', desc: '初立门户，方寸之地' },
+    { key: 'nan', title: '男爵', seal: '男', thresholdKm2: 0.3, color: '#0EA5E9', desc: '一街一巷，始有封地' },
+    { key: 'zi', title: '子爵', seal: '子', thresholdKm2: 1.2, color: '#14B8A6', desc: '数坊之间，渐成版图' },
+    { key: 'bo', title: '伯爵', seal: '伯', thresholdKm2: 4, color: '#5B6CFF', desc: '半城风物，已在掌中' },
+    { key: 'hou', title: '侯爵', seal: '侯', thresholdKm2: 12, color: '#8B5CF6', desc: '纵横十余里，一方之望' },
+    { key: 'gong', title: '公爵', seal: '公', thresholdKm2: 30, color: '#F59E0B', desc: '半壁城池，位极人臣' },
+    { key: 'wang', title: '王', seal: '王', thresholdKm2: 80, color: '#EF4444', desc: '一城之主，疆域无出其右' }
+  ];
+  assert.equal(TERRITORY_RANKS.length, webRanks.length);
+  for (let i = 0; i < webRanks.length; i += 1) {
+    const mine = TERRITORY_RANKS[i];
+    const theirs = webRanks[i];
+    assert.equal(mine.key, theirs.key, '第 ' + String(i) + ' 档 key 必须与 Web 一致');
+    assert.equal(mine.title, theirs.title, mine.key + ' 名称');
+    assert.equal(mine.seal, theirs.seal, mine.key + ' 印章');
+    assert.equal(mine.thresholdKm2, theirs.thresholdKm2, mine.key + ' 门槛');
+    assert.equal(mine.color, theirs.color, mine.key + ' 色值');
+    assert.equal(mine.desc, theirs.desc, mine.key + ' 释义');
+  }
+});
+
+test('分享卡：页脚品牌与日期格式', (): void => {
+  assert.equal(CARD_FOOTER_BRAND, '步迷 Walkaholic');
+  assert.equal(formatCardDate(new Date(2026, 10, 20, 15, 7, 32).getTime()), '2026-11-20');
+  assert.equal(formatCardDate(new Date(2026, 0, 5).getTime()), '2026-01-05', '个位数月/日补零');
+
+  const stats: TerritoryStats = territoryStats(squareKm());
+  const layout: ShareCardLayout = shareCardLayout(stats, territoryRank(stats.areaKm2), new Date(2026, 10, 20).getTime());
+  assert.equal(layout.footer, '步迷 Walkaholic · 2026-11-20');
+});
+
+// ============================================================
+// 25. 点数门槛（docs/territory.md §三）
+// ============================================================
+
+test('点数门槛：8 档 minPoints 逐值对齐 docs，且严格单调递增', (): void => {
+  const expected: number[] = [0, 3, 5, 7, 9, 12, 15, 21];
+  assert.equal(TERRITORY_RANKS.length, expected.length);
+  for (let i = 0; i < expected.length; i += 1) {
+    assert.equal(TERRITORY_RANKS[i].minPoints, expected[i],
+      TERRITORY_RANKS[i].key + ' 的 minPoints 应为 ' + String(expected[i]));
+  }
+  // 单调递增（不允许后一档比前一档要求更少点数）
+  for (let i = 1; i < TERRITORY_RANKS.length; i += 1) {
+    assert.ok(TERRITORY_RANKS[i].minPoints > TERRITORY_RANKS[i - 1].minPoints,
+      TERRITORY_RANKS[i].key + ' 的 minPoints 必须严格大于前一档');
+  }
+  // 与面积门槛同步单调
+  for (let i = 1; i < TERRITORY_RANKS.length; i += 1) {
+    assert.ok(TERRITORY_RANKS[i].thresholdKm2 > TERRITORY_RANKS[i - 1].thresholdKm2);
+  }
+});
+
+test('点数门槛：4 点围 1163 km² → 士（docs 的招牌例子）', (): void => {
+  const result = territoryRank(1163, 4);
+  assert.equal(result.rank.key, 'shi', '4 个点只能到士');
+  assert.equal(result.capped, true, '应被点数卡住');
+  assert.equal(result.blockedBy === undefined ? '' : result.blockedBy.key, 'wang',
+    '面积本来够王，被点数卡在士');
+  // next 指向被卡的那一档（提示用户还差多少点）
+  assert.equal(result.next === undefined ? '' : result.next.key, 'wang');
+  assert.equal(result.pointsNeeded, 21 - 4, '还差 17 个点');
+  assert.equal(result.toNextKm2, 0, '被点数卡住时不再提示面积');
+
+  // 文案
+  assert.equal(progressCopy(result),
+    '边界够了，但只有 4 个探索点 · 再探索 17 个点才能晋 王');
+
+  // 点数够了就是王
+  const uncapped = territoryRank(1163, 21);
+  assert.equal(uncapped.rank.key, 'wang');
+  assert.equal(uncapped.capped, false);
+  assert.equal(uncapped.blockedBy, undefined);
+});
+
+test('点数门槛：不传 pointCount → 完全保持旧行为（只按面积）', (): void => {
+  // 同一组面积，传与不传的 rank 必须一致（不传时不被点数打回）
+  const areas: number[] = [0, 0.05, 0.3, 1.2, 4, 12, 30, 80, 1163];
+  const expectedKeys: string[] = ['commoner', 'shi', 'nan', 'zi', 'bo', 'hou', 'gong', 'wang', 'wang'];
+  for (let i = 0; i < areas.length; i += 1) {
+    const without = territoryRank(areas[i]);
+    assert.equal(without.rank.key, expectedKeys[i], '不传点数时 rank 应按面积');
+    assert.equal(without.capped, false, '不传点数不该 capped');
+    assert.equal(without.blockedBy, undefined);
+    assert.equal(without.pointCount, undefined, '不传时 pointCount 应为 undefined');
+    assert.equal(without.pointsNeeded, 0);
+  }
+  // 但传了很少的点数就会被卡
+  const capped = territoryRank(1163, 2);
+  assert.equal(capped.rank.key, 'commoner', '2 个点连士都不到');
+  assert.equal(capped.capped, true);
+});
+
+test('点数门槛：各档边界值（面积够 + 点数刚好/差 1）', (): void => {
+  // 每档：点数刚好等于 minPoints 时应达到该档
+  for (let i = 1; i < TERRITORY_RANKS.length; i += 1) {
+    const rank = TERRITORY_RANKS[i];
+    const atEdge = territoryRank(rank.thresholdKm2, rank.minPoints);
+    assert.equal(atEdge.rank.order >= rank.order, true,
+      rank.key + '：点数刚好够时应至少达到该档，实测 ' + atEdge.rank.key);
+  }
+  // 王：面积够 + 20 点（差 1）→ 公爵
+  const wangMinus1 = territoryRank(100, 20);
+  assert.equal(wangMinus1.rank.key, 'gong', '20 个点只能到公爵');
+  assert.equal(wangMinus1.capped, true);
+  assert.equal(wangMinus1.pointsNeeded, 1);
+  // 王：面积够 + 21 点 → 王
+  assert.equal(territoryRank(100, 21).rank.key, 'wang');
+
+  // 公爵：14 点 → 侯爵（差 1）
+  assert.equal(territoryRank(50, 14).rank.key, 'hou');
+  assert.equal(territoryRank(50, 14).pointsNeeded, 1);
+  assert.equal(territoryRank(50, 15).rank.key, 'gong');
+
+  // 伯爵：8 点 → 子爵
+  assert.equal(territoryRank(10, 8).rank.key, 'zi');
+  assert.equal(territoryRank(10, 9).rank.key, 'bo');
+});
+
+test('点数门槛：capped 时进度按点数算，uncapped 按面积算', (): void => {
+  // capped：current=士(min3) next=王(min21)，4 点 → (4-3)/(21-3) ≈ 0.0556
+  const capped = territoryRank(1163, 4);
+  assert.ok(Math.abs(capped.progress - (4 - 3) / (21 - 3)) < 1e-9,
+    'capped 进度按点数算，实测 ' + capped.progress.toFixed(6));
+  // 刚好在 current 的点数门槛上 → progress 0
+  const atMin = territoryRank(1163, 3);
+  assert.equal(atMin.rank.key, 'shi');
+  assert.ok(Math.abs(atMin.progress) < 1e-9);
+
+  // uncapped：0.06 km² / 3 点 → 士，面积进度 (0.06-0.05)/(0.3-0.05)
+  const uncapped = territoryRank(0.06, 3);
+  assert.equal(uncapped.rank.key, 'shi');
+  assert.equal(uncapped.capped, false);
+  assert.ok(Math.abs(uncapped.progress - (0.06 - 0.05) / (0.3 - 0.05)) < 1e-9);
+  assert.ok(Math.abs(uncapped.toNextKm2 - 0.24) < 1e-9);
+});
+
+test('点数门槛：uncapped 文案带「还需 N 个探索点」', (): void => {
+  const result = territoryRank(0.06, 3);
+  assert.equal(progressCopy(result), '再扩 0.24 km² 晋 男爵（还需 2 个探索点）');
+  // 点数已足够的 uncapped 不带后缀
+  const enough = territoryRank(0.06, 10);
+  assert.equal(progressCopy(enough), '再扩 0.24 km² 晋 男爵');
+  // 最高档
+  assert.equal(progressCopy(territoryRank(100, 30)), '已是最高爵位');
+});
+
+test('点数门槛：异常输入（NaN / 负数 / 小数）安全', (): void => {
+  // pointCount = NaN → 视为未传（保持旧行为）
+  assert.equal(territoryRank(1163, NaN).capped, false);
+  assert.equal(territoryRank(1163, NaN).rank.key, 'wang');
+  // 负数点数 → 夹到 0
+  assert.equal(territoryRank(1163, -5).rank.key, 'commoner');
+  assert.equal(territoryRank(1163, -5).pointCount, 0);
+  // 小数点数 → 不崩，按数值比较
+  assert.equal(territoryRank(1163, 3.5).rank.key, 'shi');
+  // 面积为 NaN → 0
+  assert.equal(territoryRank(NaN, 0).rank.key, 'commoner');
+});
+
+// ============================================================
+// 26. 拍照 EXIF GPS（docs/territory.md §四）
+// ============================================================
+
+/** 极简 Buffer 写入工具（不依赖 node:Buffer，纯 number[] + DataView） */
+interface ByteBuilder {
+  bytes: number[];
+}
+
+function newBuilder(): ByteBuilder {
+  const builder: ByteBuilder = { bytes: [] };
+  return builder;
+}
+
+function pushU8(builder: ByteBuilder, value: number): void {
+  builder.bytes.push(value & 0xFF);
+}
+
+function pushBytes(builder: ByteBuilder, values: number[]): void {
+  for (let i = 0; i < values.length; i += 1) pushU8(builder, values[i]);
+}
+
+function pushAscii(builder: ByteBuilder, text: string): void {
+  for (let i = 0; i < text.length; i += 1) pushU8(builder, text.charCodeAt(i));
+}
+
+function pushU16(builder: ByteBuilder, value: number, little: boolean): void {
+  if (little) {
+    pushU8(builder, value & 0xFF);
+    pushU8(builder, (value >> 8) & 0xFF);
+  } else {
+    pushU8(builder, (value >> 8) & 0xFF);
+    pushU8(builder, value & 0xFF);
+  }
+}
+
+function pushU32(builder: ByteBuilder, value: number, little: boolean): void {
+  const b0: number = value & 0xFF;
+  const b1: number = (value >> 8) & 0xFF;
+  const b2: number = (value >> 16) & 0xFF;
+  const b3: number = Math.floor(value / 16777216) & 0xFF;
+  if (little) {
+    pushBytes(builder, [b0, b1, b2, b3]);
+  } else {
+    pushBytes(builder, [b3, b2, b1, b0]);
+  }
+}
+
+/** 把十进制度编码成 EXIF 的 3 个 rational（度/分/秒，分母 1/1/10000） */
+function pushDms(builder: ByteBuilder, value: number, little: boolean): void {
+  const abs: number = Math.abs(value);
+  const deg: number = Math.floor(abs);
+  const minFloat: number = (abs - deg) * 60;
+  const min: number = Math.floor(minFloat);
+  const sec: number = (minFloat - min) * 60;
+  pushU32(builder, deg, little); pushU32(builder, 1, little);
+  pushU32(builder, min, little); pushU32(builder, 1, little);
+  pushU32(builder, Math.round(sec * 10000), little); pushU32(builder, 10000, little);
+}
+
+/**
+ * 构造一张带 EXIF GPS 的最小 JPEG。
+ * 结构与 prototype/web/tests/exif.test.mjs 的 buildExif 等价（可交叉验证）。
+ */
+function buildExifJpeg(lat: number, lon: number, bigEndian: boolean, withGpsTag: boolean): Uint8Array {
+  const little: boolean = !bigEndian;
+  const tiff: ByteBuilder = newBuilder();
+  pushAscii(tiff, little ? 'II' : 'MM');
+  pushU16(tiff, 42, little);
+  const TIFF_HDR: number = 8;
+  const IFD0_SIZE: number = 2 + 12 * 1 + 4;
+  const GPS_IFD_OFF: number = TIFF_HDR + IFD0_SIZE;
+  const GPS_IFD_SIZE: number = 2 + 12 * 4 + 4;
+  const DATA_OFF: number = GPS_IFD_OFF + GPS_IFD_SIZE;
+
+  if (!withGpsTag) {
+    // 相机没开位置信息：IFD0 条目数 = 0，没有 GPSInfo 指针
+    pushU32(tiff, TIFF_HDR, little);
+    pushU16(tiff, 0, little);
+    pushU32(tiff, 0, little);
+  } else {
+    pushU32(tiff, TIFF_HDR, little);
+    // IFD0：1 条 entry = GPSInfoIFDPointer(0x8825) → GPS IFD
+    pushU16(tiff, 1, little);
+    pushU16(tiff, 0x8825, little);
+    pushU16(tiff, 4, little);       // type LONG
+    pushU32(tiff, 1, little);       // count
+    pushU32(tiff, GPS_IFD_OFF, little);
+    pushU32(tiff, 0, little);       // next IFD = 0
+
+    // GPS IFD：4 条 entry（纬度Ref / 纬度 / 经度Ref / 经度）
+    pushU16(tiff, 4, little);
+    // 0x0001 GPSLatitudeRef：ASCII 2 字节，inline（值在前 2 字节）
+    pushU16(tiff, 0x0001, little);
+    pushU16(tiff, 2, little);
+    pushU32(tiff, 2, little);
+    pushBytes(tiff, [lat >= 0 ? 0x4E : 0x53, 0, 0, 0]);   // 'N' / 'S'
+    // 0x0002 GPSLatitude：3 个 rational = 24 字节 → 偏移
+    pushU16(tiff, 0x0002, little);
+    pushU16(tiff, 5, little);
+    pushU32(tiff, 3, little);
+    pushU32(tiff, DATA_OFF, little);
+    // 0x0003 GPSLongitudeRef
+    pushU16(tiff, 0x0003, little);
+    pushU16(tiff, 2, little);
+    pushU32(tiff, 2, little);
+    pushBytes(tiff, [lon >= 0 ? 0x45 : 0x57, 0, 0, 0]);   // 'E' / 'W'
+    // 0x0004 GPSLongitude
+    pushU16(tiff, 0x0004, little);
+    pushU16(tiff, 5, little);
+    pushU32(tiff, 3, little);
+    pushU32(tiff, DATA_OFF + 24, little);
+    pushU32(tiff, 0, little);       // next IFD = 0
+    // 数据区：纬度 DMS + 经度 DMS
+    pushDms(tiff, lat, little);
+    pushDms(tiff, lon, little);
+  }
+
+  const app1Body: ByteBuilder = newBuilder();
+  pushAscii(app1Body, 'Exif');
+  pushBytes(app1Body, [0, 0]);
+  pushBytes(app1Body, tiff.bytes);
+
+  const jpeg: ByteBuilder = newBuilder();
+  pushBytes(jpeg, [0xFF, 0xD8]);                    // SOI
+  pushBytes(jpeg, [0xFF, 0xE1]);                    // APP1
+  pushU16(jpeg, app1Body.bytes.length + 2, false);  // 段长（大端，含自身 2 字节）
+  pushBytes(jpeg, app1Body.bytes);
+  pushBytes(jpeg, [0xFF, 0xDA, 0x00, 0x02, 0xFF, 0xD9]);  // SOS + EOI
+  return new Uint8Array(jpeg.bytes);
+}
+
+/** 无 EXIF 的 JPEG（只有 COM 段） */
+function buildNoExifJpeg(): Uint8Array {
+  const jpeg: ByteBuilder = newBuilder();
+  pushBytes(jpeg, [0xFF, 0xD8]);
+  pushBytes(jpeg, [0xFF, 0xFE, 0x00, 0xB4]);
+  for (let i = 0; i < 178; i += 1) pushU8(jpeg, 0);
+  pushBytes(jpeg, [0xFF, 0xDA, 0x00, 0x02, 0xFF, 0xD9]);
+  return new Uint8Array(jpeg.bytes);
+}
+
+test('EXIF：小端（II）JPEG 的 GPS 正确解析', (): void => {
+  const bytes: Uint8Array = buildExifJpeg(32.05975, 118.77135, false, true);
+  const result: PhotoGpsResult = parseExifGps(bytes);
+  assert.equal(result.ok, true, result.detail);
+  assert.ok(result.lat !== undefined && Math.abs(result.lat - 32.05975) < 0.0001,
+    'lat=' + String(result.lat));
+  assert.ok(result.lon !== undefined && Math.abs(result.lon - 118.77135) < 0.0001,
+    'lon=' + String(result.lon));
+});
+
+test('EXIF：大端（MM / Motorola）JPEG 的 GPS 正确解析', (): void => {
+  const bytes: Uint8Array = buildExifJpeg(39.9042, 116.4074, true, true);
+  const result: PhotoGpsResult = parseExifGps(bytes);
+  assert.equal(result.ok, true, result.detail);
+  assert.ok(result.lat !== undefined && Math.abs(result.lat - 39.9042) < 0.0001);
+  assert.ok(result.lon !== undefined && Math.abs(result.lon - 116.4074) < 0.0001);
+});
+
+test('EXIF：南纬 + 西经取负号', (): void => {
+  const bytes: Uint8Array = buildExifJpeg(-33.8688, -151.2093, false, true);
+  const result: PhotoGpsResult = parseExifGps(bytes);
+  assert.equal(result.ok, true, result.detail);
+  assert.ok(result.lat !== undefined && result.lat < 0, '南半球应为负');
+  assert.ok(result.lon !== undefined && result.lon < 0, '西经应为负');
+  assert.ok(result.lat !== undefined && Math.abs(result.lat + 33.8688) < 0.0001);
+  assert.ok(result.lon !== undefined && Math.abs(result.lon + 151.2093) < 0.0001);
+});
+
+test('EXIF：有 EXIF 但无 GPS 标签 → noGpsTag（提示去开相机定位）', (): void => {
+  const bytes: Uint8Array = buildExifJpeg(32, 118, false, false);
+  const result: PhotoGpsResult = parseExifGps(bytes);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'noGpsTag');
+  // 必须给出具体操作路径，不能只说"失败"
+  const howto: string = photoFailHowto('noGpsTag');
+  assert.ok(howto.indexOf('位置信息') >= 0, '应告诉用户去开启位置信息');
+  assert.ok(howto.indexOf('设置') >= 0, '应给出设置路径');
+  assert.equal(photoFailNeedsSettings('noGpsTag'), true);
+});
+
+test('EXIF：无 EXIF 段 → noExif', (): void => {
+  const result: PhotoGpsResult = parseExifGps(buildNoExifJpeg());
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'noExif');
+  assert.equal(photoFailNeedsSettings('noExif'), true);
+});
+
+test('EXIF：PNG → pngNoExif（明确说明 PNG 不存位置）', (): void => {
+  const png: Uint8Array = new Uint8Array(64);
+  png[0] = 0x89;
+  png[1] = 0x50;
+  png[2] = 0x4E;
+  png[3] = 0x47;
+  const result: PhotoGpsResult = parseExifGps(png);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'pngNoExif');
+  assert.ok(photoFailHowto('pngNoExif').indexOf('JPEG') >= 0);
+});
+
+test('EXIF：空 / 极小文件 → notImage', (): void => {
+  assert.equal(parseExifGps(new Uint8Array(0)).reason, 'notImage');
+  assert.equal(parseExifGps(new Uint8Array(4)).reason, 'notImage');
+  assert.equal(parseExifGpsFromBase64('').reason, 'noData');
+  assert.equal(parseExifGpsFromBase64('abc').reason, 'noData');
+});
+
+test('EXIF：损坏的字节序标识 → brokenExif', (): void => {
+  const good: Uint8Array = buildExifJpeg(32, 118, false, true);
+  // 找到 TIFF 头（"II"）并把前两字节改成 "XX"
+  const copy: Uint8Array = new Uint8Array(good.length);
+  for (let i = 0; i < good.length; i += 1) copy[i] = good[i];
+  for (let i = 0; i + 1 < copy.length; i += 1) {
+    if (copy[i] === 0x49 && copy[i + 1] === 0x49) {
+      copy[i] = 0x58;
+      copy[i + 1] = 0x58;
+      break;
+    }
+  }
+  const result: PhotoGpsResult = parseExifGps(copy);
+  assert.equal(result.ok, false);
+  assert.ok(result.reason === 'brokenExif' || result.reason === 'noExif',
+    '实际 ' + String(result.reason));
+});
+
+test('EXIF：base64 路径与原始字节路径结果一致（含 data URL 前缀）', (): void => {
+  const bytes: Uint8Array = buildExifJpeg(31.2304, 121.4737, false, true);
+  // 手写 base64 编码（避免依赖 Buffer）
+  const alphabet: string = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let base64: string = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b0: number = bytes[i];
+    const b1: number = i + 1 < bytes.length ? bytes[i + 1] : 0;
+    const b2: number = i + 2 < bytes.length ? bytes[i + 2] : 0;
+    base64 += alphabet.charAt(b0 >> 2);
+    base64 += alphabet.charAt(((b0 & 0x03) << 4) | (b1 >> 4));
+    base64 += i + 1 < bytes.length ? alphabet.charAt(((b1 & 0x0F) << 2) | (b2 >> 6)) : '=';
+    base64 += i + 2 < bytes.length ? alphabet.charAt(b2 & 0x3F) : '=';
+  }
+
+  const viaBytes: PhotoGpsResult = parseExifGps(bytes);
+  const viaBase64: PhotoGpsResult = parseExifGpsFromBase64(base64);
+  assert.equal(viaBase64.ok, true, viaBase64.detail);
+  assert.equal(viaBase64.lat, viaBytes.lat);
+  assert.equal(viaBase64.lon, viaBytes.lon);
+  assert.ok(viaBase64.lat !== undefined && Math.abs(viaBase64.lat - 31.2304) < 0.0001);
+
+  // data URL 前缀也要能处理
+  const dataUrl: string = 'data:image/jpeg;base64,' + base64;
+  const viaDataUrl: PhotoGpsResult = parseExifGpsFromBase64(dataUrl);
+  assert.equal(viaDataUrl.ok, true);
+  assert.equal(viaDataUrl.lat, viaBytes.lat);
+
+  // base64ToBytes 解码长度正确
+  const decoded: Uint8Array = base64ToBytes(base64);
+  assert.equal(decoded.length, bytes.length, 'base64 解码后字节数应一致');
+});
+
+test('EXIF：失败文案齐全（10 种 reason 都有标题 + 操作指引）', (): void => {
+  const reasons: PhotoGpsFailure[] = [
+    'noExif', 'noGpsTag', 'incompleteGps', 'invalidGps', 'notImage',
+    'brokenExif', 'pngNoExif', 'tooFar', 'noData', 'unreadableGps'
+  ];
+  const seen: string[] = [];
+  for (let i = 0; i < reasons.length; i += 1) {
+    const reason: PhotoGpsFailure = reasons[i];
+    const title: string = photoFailText(reason);
+    const howto: string = photoFailHowto(reason);
+    assert.ok(title.length > 0, reason + ' 缺少标题文案');
+    assert.ok(howto.length > 0, reason + ' 缺少操作指引');
+    assert.ok(title.indexOf('。') < 0, reason + ' 标题不该带句号');
+    seen.push(title);
+  }
+  // 标题互不相同（不能所有失败都显示同一句）
+  const unique: Set<string> = new Set<string>(seen);
+  assert.equal(unique.size, reasons.length, '每个 reason 的标题应互不相同');
+
+  // 逐字核对 docs §四 表格
+  assert.equal(photoFailText('noExif'), '这张照片没有位置信息');
+  assert.equal(photoFailText('noGpsTag'), '相机没有开启「位置信息」');
+  assert.equal(photoFailText('pngNoExif'), 'PNG 照片不保存位置信息');
+  assert.equal(photoFailText('tooFar'), '拍摄地点离目的地太远');
+  assert.equal(photoFailText('incompleteGps'), '照片的位置数据不完整');
+  assert.equal(photoFailText('brokenExif'), '照片信息损坏');
+
+  // 完整文案 = 标题 + 句号 + 指引
+  assert.equal(photoFailFullText('noExif'),
+    '这张照片没有位置信息。请用手机自带相机 App 拍一张新照片（不要用截图，也不要转发聊天软件里的图）');
+});
+
+test('到达验证：120m 内通过、超出拒绝、边界值', (): void => {
+  assert.equal(PHOTO_RADIUS_METERS, 120);
+  const target: GeoPoint = geoPoint(32.0597, 118.7713);
+
+  // 约 50m
+  const near = verifyPhotoAt(target, { lat: 32.06015, lon: 118.7713 });
+  assert.equal(near.ok, true);
+  assert.ok((near.distanceMeters ?? 999) < 120);
+
+  // 约 330m
+  const far = verifyPhotoAt(target, { lat: 32.0627, lon: 118.7713 });
+  assert.equal(far.ok, false);
+  assert.equal(far.reason, 'tooFar');
+  assert.ok((far.distanceMeters ?? 0) > 300);
+
+  // 边界：约 111m 通过 / 约 133m 拒绝
+  assert.equal(verifyPhotoAt(target, { lat: 32.0597 + 0.00100, lon: 118.7713 }).ok, true);
+  assert.equal(verifyPhotoAt(target, { lat: 32.0597 + 0.00120, lon: 118.7713 }).ok, false);
+
+  // 自定义半径
+  const far300 = { lat: 32.0627, lon: 118.7713 };
+  assert.equal(verifyPhotoAt(target, far300, 500).ok, true);
+  assert.equal(verifyPhotoAt(target, far300, 120).ok, false);
+
+  // 同一点
+  assert.equal(verifyPhotoAt(target, { lat: target.latitude, lon: target.longitude }).ok, true);
+});
+
+test('到达验证：haversine 与缺数据', (): void => {
+  // 南京 → 北京约 900km
+  const d: number = haversineMeters(32.0597, 118.7713, 39.9042, 116.4074);
+  assert.ok(d > 890000 && d < 920000, '实测 ' + Math.round(d) + 'm');
+  // 同一点为 0
+  assert.ok(haversineMeters(32.06, 118.77, 32.06, 118.77) < 0.001);
+  // 缺数据
+  assert.equal(verifyPhotoAt(geoPoint(NaN, 0), { lat: 32, lon: 118 }).reason, 'noData');
+  assert.equal(verifyPhotoAt(geoPoint(32, 118), { lat: NaN, lon: 118 }).reason, 'noData');
+});
+
+test('到达验证：tooFar 文案带实测距离与 120m 要求', (): void => {
+  const text: string = tooFarCopy(330);
+  assert.equal(text, '照片拍摄点离目的地 330 米，需要在 120 米内拍摄。走近一点再拍一张。');
+  assert.ok(tooFarCopy(330, 500).indexOf('500 米内') >= 0);
+});
+
+test('到达验证：演示地点无坐标 → 跳过验证（不判用户失败）', (): void => {
+  const check: PhotoArrivalCheck = checkPhotoArrival(undefined, '');
+  assert.equal(check.ok, true, '演示地点不该让用户失败');
+  assert.equal(check.demoSkip, true);
+  assert.ok(check.title.indexOf('演示') >= 0);
+});
+
+test('到达验证：完整链路（真照片坐标 → 通过 / 太远 → 失败）', (): void => {
+  const target: GeoPoint = geoPoint(32.0597, 118.7713);
+  const targetPhoto: Uint8Array = buildExifJpeg(32.0598, 118.7714, false, true);
+  const farPhoto: Uint8Array = buildExifJpeg(32.0627, 118.7713, false, true);
+
+  // 先转 base64（与 UI 层拿到的一样）
+  const alphabet: string = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  function toBase64(bytes: Uint8Array): string {
+    let out: string = '';
+    for (let i = 0; i < bytes.length; i += 3) {
+      const b0: number = bytes[i];
+      const b1: number = i + 1 < bytes.length ? bytes[i + 1] : 0;
+      const b2: number = i + 2 < bytes.length ? bytes[i + 2] : 0;
+      out += alphabet.charAt(b0 >> 2);
+      out += alphabet.charAt(((b0 & 0x03) << 4) | (b1 >> 4));
+      out += i + 1 < bytes.length ? alphabet.charAt(((b1 & 0x0F) << 2) | (b2 >> 6)) : '=';
+      out += i + 2 < bytes.length ? alphabet.charAt(b2 & 0x3F) : '=';
+    }
+    return out;
+  }
+
+  const near: PhotoArrivalCheck = checkPhotoArrival(target, toBase64(targetPhoto));
+  assert.equal(near.ok, true, near.title);
+  assert.equal(near.demoSkip, false);
+  assert.ok(near.photoGps !== undefined);
+  assert.ok((near.distanceMeters ?? 999) < 120);
+
+  const tooFar: PhotoArrivalCheck = checkPhotoArrival(target, toBase64(farPhoto));
+  assert.equal(tooFar.ok, false);
+  assert.equal(tooFar.reason, 'tooFar');
+  assert.ok((tooFar.distanceMeters ?? 0) > 300);
+  assert.ok(tooFar.howto.indexOf('走近一点') >= 0);
+
+  // 没有 GPS 的照片：给出 noGpsTag 指引
+  const noGps: PhotoArrivalCheck = checkPhotoArrival(
+    target, toBase64(buildExifJpeg(32.06, 118.77, false, false))
+  );
+  assert.equal(noGps.ok, false);
+  assert.equal(noGps.reason, 'noGpsTag');
+  assert.ok(noGps.howto.indexOf('记录位置信息') >= 0 || noGps.howto.indexOf('位置信息') >= 0);
+});
+
+// ============================================================
+// 27. 到达验证凭证的持久化 + store 接口
+// ============================================================
+
+test('到达验证：photoGps / photoDistance 能存能读（重启后仍在）', async (): Promise<void> => {
+  const kv: MemoryKV = new MemoryKV();
+  await initStore(kv, true);
+  const store: WalkaholicStoreApi = getStore();
+  const card = store.snapshot().profile.cards[0];
+
+  // 记录前：没有凭证
+  assert.equal(store.cardPhotoGps(card.placeID), undefined);
+
+  const ok: boolean = store.attachCardPhotoGps(card.placeID, geoPoint(32.0597, 118.7713), 42.5);
+  assert.equal(ok, true);
+  const before = store.cardPhotoGps(card.placeID);
+  assert.ok(before !== undefined);
+
+  // 模拟 App 重启
+  await initStore(kv, true);
+  const reloaded: WalkaholicStoreApi = getStore();
+  const after = reloaded.cardPhotoGps(card.placeID);
+  if (after === undefined) throw new Error('photoGps 应随卡片持久化');
+  assert.ok(Math.abs(after.location.latitude - 32.0597) < 1e-9);
+  assert.ok(Math.abs(after.location.longitude - 118.7713) < 1e-9);
+  assert.equal(after.distanceMeters, 42.5);
+});
+
+test('到达验证：store 记录 photoGps 后，疆域可用它（凭证可审计）', async (): Promise<void> => {
+  const store: WalkaholicStoreApi = await freshStore();
+  const snapshot = store.snapshot();
+  const card = snapshot.profile.cards[0];
+  const recorded: boolean = store.attachCardPhotoGps(card.placeID, geoPoint(32.0597, 118.7713), 33.2);
+  assert.equal(recorded, true, '卡片存在时应记录成功');
+
+  const gps = store.cardPhotoGps(card.placeID);
+  if (gps === undefined) throw new Error('应能读回验证凭证');
+  assert.ok(Math.abs(gps.location.latitude - 32.0597) < 1e-9);
+  assert.ok(Math.abs(gps.location.longitude - 118.7713) < 1e-9);
+  assert.equal(gps.distanceMeters, 33.2);
+
+  // 不存在的卡片：返回 false，不崩
+  assert.equal(store.attachCardPhotoGps('不存在的地点', geoPoint(0, 0), 0), false);
+  assert.equal(store.cardPhotoGps('不存在的地点'), undefined);
+});
+
+test('到达验证：没有 photoGps 的卡片，cardPhotoGps 返回 undefined', async (): Promise<void> => {
+  const store: WalkaholicStoreApi = await freshStore();
+  const card = store.snapshot().profile.cards[0];
+  assert.equal(store.cardPhotoGps(card.placeID), undefined);
 });
 
 // ============================================================

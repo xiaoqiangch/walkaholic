@@ -47,6 +47,7 @@ import {
   WalkaholicStoreApi,
   BuryParams,
   CardPhoto,
+  CardPhotoGps,
   CollectResult,
   DataSourceStatus,
   DrawResult,
@@ -858,6 +859,45 @@ export class WalkaholicStore implements WalkaholicStoreApi {
       this.profile.cards[index].photoRemotePath = remotePath;
     }
     this.persist(Date.now());
+  }
+
+  /**
+   * 记录到达验证凭证（docs/territory.md §四「数据存储」）。
+   *
+   * 照片 EXIF 里的坐标 + 与目的地的实测距离。用途：
+   * - 事后审计（这张卡到底是不是"真的到过"）
+   * - 疆域计算（**疆域点应优先用 photoGps 而不是手机 GPS** —— 照片更难伪造）
+   *
+   * @returns 是否找到了这张卡
+   */
+  attachCardPhotoGps(placeID: string, photoGps: GeoPoint, distanceMeters: number): boolean {
+    for (let i = 0; i < this.profile.cards.length; i += 1) {
+      if (this.profile.cards[i].placeID !== placeID) continue;
+      const point: GeoPoint = {
+        latitude: photoGps.latitude,
+        longitude: photoGps.longitude
+      };
+      this.profile.cards[i].photoGps = point;
+      this.profile.cards[i].photoDistance = distanceMeters;
+      this.persist(Date.now());
+      return true;
+    }
+    return false;
+  }
+
+  /** 这张卡的到达验证凭证（照片 EXIF 坐标 + 距离）；没有返回 undefined */
+  cardPhotoGps(placeID: string): CardPhotoGps | undefined {
+    for (let i = 0; i < this.profile.cards.length; i += 1) {
+      const card: PlaceCard = this.profile.cards[i];
+      if (card.placeID !== placeID) continue;
+      if (card.photoGps === undefined) return undefined;
+      const gps: CardPhotoGps = {
+        location: card.photoGps,
+        distanceMeters: card.photoDistance === undefined ? 0 : card.photoDistance
+      };
+      return gps;
+    }
+    return undefined;
   }
 
   /** 这张卡到达时拍的照片（本地文件名 / 远端路径）；都没有返回 undefined */

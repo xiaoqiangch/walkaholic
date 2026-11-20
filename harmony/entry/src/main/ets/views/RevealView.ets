@@ -7,16 +7,38 @@
  * 2. 卡片（稀有度 + 编号 + 类别 emoji + 地点名 + 区域/类别/地址 + 为什么是这里 + 小任务 + 收进图鉴/分享）
  *
  * 保密：只有本页（到达后）才展示 currentPlace.name / address / category。
+ *
+ * ## 到达验证（docs/territory.md §四）
+ * 「来了」不能只信手机 GPS（可伪造）。真实地点要求：
+ * **在目的地 120 米内拍一张照片，照片 EXIF 自带 GPS**，系统读照片坐标比对。
+ * - 成功 → 记录 photoGps / photoDistance 到卡片（疆域计算优先用它）
+ * - 失败 → 按 reason 给出精准指引（去哪个设置开什么开关 / 走近多少米）
+ * - **演示地点无坐标 → 跳过验证**（不因为「没有坐标」判用户失败）
  */
 
 import { common } from '@kit.AbilityKit';
 import { getStore } from '../core/store';
 import { AppSnapshot, CollectResult, KeyValueStore } from '../core/contract';
-import { Achievement, FeedPost, Place } from '../core/types';
+import { Achievement, FeedPost, GeoPoint, Place } from '../core/types';
 import { HttpClient } from '../core/http';
 import { AccountConfig, isLoggedIn, readAccountConfig } from '../core/account';
 import { uploadCheckInPhoto } from '../core/surpriseRemote';
-import { PickedPhoto, photoDataURL, pickAndAdoptPhoto, takeAndAdoptPhoto, toImageUri } from '../components/PhotoPick';
+import {
+  PickedPhoto,
+  photoDataURL,
+  pickAndAdoptPhoto,
+  readPhotoAsBase64,
+  takeAndAdoptPhoto,
+  toImageUri
+} from '../components/PhotoPick';
+import {
+  PhotoArrivalCheck,
+  PhotoGpsFailure,
+  PHOTO_RADIUS_METERS,
+  checkPhotoArrival,
+  photoFailHowto,
+  photoFailText
+} from '../core/photo-gps';
 import {
   WaHairline,
   WaMicroLabel,
@@ -69,6 +91,14 @@ export struct RevealView {
   @State private checkInUri: string = '';
   @State private checkInRemotePath: string = '';
   @State private uploadingPhoto: boolean = false;
+  /** 到达验证通过（照片带 GPS 且距离达标；演示地点也置 true） */
+  @State private verifiedArrival: boolean = false;
+  /** 验证失败：标题 */
+  @State private verifyFailTitle: string = '';
+  /** 验证失败：操作指引 */
+  @State private verifyFailHowto: string = '';
+  /** 验证失败原因（用于区分「去改设置」和「走近一点」） */
+  @State private verifyFailReason: string = '';
 
   private stageTimers: number[] = [];
   private toastTimer: number = -1;
@@ -125,6 +155,109 @@ export struct RevealView {
     return isLoggedIn(config) ? '仅存本机（稍后可再上传）' : '仅存本机 · 登录后可同步';
   }
 
+  // ============================================================
+  // 到达验证（docs/territory.md §四）
+  // ============================================================
+
+  /**
+   * 目的地真实坐标；undefined = 演示地点 / 没有坐标 → 跳过验证。
+   */
+  private targetCoordinate(): GeoPoint | undefined {
+    const place: Place | undefined = this.place();
+    if (place === undefined) return undefined;
+    const coordinate: GeoPoint | undefined = place.coordinate;
+    if (coordinate === undefined) return undefined;
+    if (!isFinite(coordinate.latitude) || !isFinite(coordinate.longitude)) return undefined;
+    return coordinate;
+  }
+
+  /** 这个地点是否要求拍照验证（只有真实地点要求） */
+  private requiresPhotoVerification(): boolean {
+    return this.targetCoordinate() !== undefined;
+  }
+
+  private clearVerifyFail(): void {
+    this.verifyFailTitle = '';
+    this.verifyFailHowto = '';
+    this.verifyFailReason = '';
+  }
+
+  /**
+   * 拍完照片 → 读 EXIF GPS → 验证是否在目的地 120 米内。
+   *
+   * 为什么必须**在原图上读**：canvas 重编码 / 社交软件转发都会丢 EXIF。
+   * 这里读的是 picker 给的原图（落沙箱时逐字节复制，EXIF 完整保留）。
+   */
+  private verifyArrivalPhoto(uri: string): void {
+    const target: GeoPoint | undefined = this.targetCoordinate();
+    if (target === undefined) {
+      // 演示地点：跳过验证，照片只作纪念
+      this.verifiedArrival = true;
+      this.clearVerifyFail();
+      return;
+    }
+
+    const base64: string = readPhotoAsBase64(uri);
+    if (base64.length === 0) {
+      this.verifiedArrival = false;
+      this.verifyFailReason = 'notImage';
+      this.verifyFailTitle = photoFailText('notImage');
+      this.verifyFailHowto = photoFailHowto('notImage');
+      return;
+    }
+
+    const check: PhotoArrivalCheck = checkPhotoArrival(target, base64, PHOTO_RADIUS_METERS);
+    if (check.demoSkip) {
+      this.verifiedArrival = true;
+      this.clearVerifyFail();
+      return;
+    }
+    if (check.ok) {
+      this.verifiedArrival = true;
+      this.clearVerifyFail();
+      // 记录验证凭证（疆域计算优先用照片坐标，比手机 GPS 可信）
+      const placeID: string = this.currentPlaceID();
+      if (placeID.length > 0 && check.photoGps !== undefined) {
+        try {
+          getStore().attachCardPhotoGps(
+            placeID,
+            { latitude: check.photoGps.lat, longitude: check.photoGps.lon },
+            check.distanceMeters === undefined ? 0 : check.distanceMeters
+          );
+        } catch (err) {
+          // 卡片还没收录时挂不上，收录后再补
+        }
+      }
+      return;
+    }
+
+    this.verifiedArrival = false;
+    this.verifyFailReason = check.reason === undefined ? 'noData' : check.reason;
+    this.verifyFailTitle = check.title;
+    this.verifyFailHowto = check.howto;
+  }
+
+  /** 收录后再补挂一次验证凭证（先拍后收录的顺序） */
+  private attachGpsIfVerified(placeID: string): void {
+    if (!this.verifiedArrival || placeID.length === 0) return;
+    const target: GeoPoint | undefined = this.targetCoordinate();
+    if (target === undefined) return;
+    if (this.checkInUri.length === 0) return;
+    const base64: string = readPhotoAsBase64(this.checkInUri);
+    if (base64.length === 0) return;
+    const check: PhotoArrivalCheck = checkPhotoArrival(target, base64, PHOTO_RADIUS_METERS);
+    if (!check.ok || check.demoSkip || check.photoGps === undefined) return;
+    try {
+      getStore().attachCardPhotoGps(
+        placeID,
+        { latitude: check.photoGps.lat, longitude: check.photoGps.lon },
+        check.distanceMeters === undefined ? 0 : check.distanceMeters
+      );
+    } catch (err) {
+      // 忽略
+    }
+  }
+
   /** 拍一张 / 换一张：先落本机（离线也有），再尽力上传账号 */
   private async capturePhoto(fromCamera: boolean): Promise<void> {
     if (this.uploadingPhoto) return;
@@ -139,6 +272,8 @@ export struct RevealView {
 
     this.checkInUri = picked.uri;
     this.checkInRemotePath = '';
+    // 到达验证：读这张照片自己的 EXIF GPS，与目的地比对（docs §四）
+    this.verifyArrivalPhoto(picked.uri);
     const placeID: string = this.currentPlaceID();
     if (placeID.length > 0) {
       try {
@@ -176,10 +311,80 @@ export struct RevealView {
     this.onChanged();
   }
 
+  /**
+   * 到达验证失败提示（docs §四：必须给出**具体的操作指引**，不能只说"失败"）。
+   *
+   * - `noGpsTag` → 去设置开相机的位置信息
+   * - `tooFar` → 带实测距离，提示走近一点
+   * - `noExif` → 别用截图/转发图
+   */
+  @Builder
+  verifyFailBanner() {
+    Column({ space: 4 }) {
+      Row({ space: 6 }) {
+        SymbolGlyph($r('sys.symbol.exclamationmark_circle'))
+          .fontSize(WAFont.captionSm)
+          .fontColor([WAColor.ember])
+          .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+        Text(this.verifyFailTitle)
+          .fontSize(WAFont.captionSm)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(WAColor.ember)
+          .maxLines(2)
+          .layoutWeight(1)
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Top)
+
+      Text(this.verifyFailHowto)
+        .fontSize(WAFont.microSm)
+        .fontColor(WAColor.ink2)
+        .lineHeight(17)
+        .width('100%')
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .padding(10)
+    .backgroundColor('#1AFA2A2D')
+    .borderRadius(WASize.cardRadiusSm)
+    .border({ width: 1, color: '#33FA2A2D', radius: WASize.cardRadiusSm })
+  }
+
+  /** 验证通过的小标识（让用户知道这张照片算数） */
+  @Builder
+  verifyPassBadge() {
+    Row({ space: 5 }) {
+      SymbolGlyph($r('sys.symbol.checkmark_circle'))
+        .fontSize(WAFont.microSm)
+        .fontColor([WAColor.teal])
+        .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+      Text(this.requiresPhotoVerification()
+        ? '位置已验证 · 照片就在目的地附近'
+        : '演示地点 · 照片只作纪念')
+        .fontSize(WAFont.microSm)
+        .fontColor(WAColor.teal)
+        .maxLines(1)
+    }
+    .width('100%')
+  }
+
   /** 到达实拍区块（与 iOS RevealView.checkInPhotoSection 同语义） */
   @Builder
   checkInPhotoSection() {
     Column({ space: 6 }) {
+      if (this.requiresPhotoVerification()) {
+        Text('要到「到了」还得拍一张：照片里的位置要在 ' + String(PHOTO_RADIUS_METERS) +
+          ' 米内，这样才算真的来过。')
+          .fontSize(WAFont.microSm)
+          .fontColor(WAColor.ink3)
+          .lineHeight(16)
+          .width('100%')
+      }
+
+      if (this.verifyFailTitle.length > 0) {
+        this.verifyFailBanner()
+      }
+
       if (this.checkInUri.length > 0) {
         Stack({ alignContent: Alignment.TopStart }) {
           Image(toImageUri(this.checkInUri))
@@ -201,6 +406,10 @@ export struct RevealView {
             .margin(10)
         }
         .width('100%')
+
+        if (this.verifiedArrival) {
+          this.verifyPassBadge()
+        }
 
         Row({ space: 10 }) {
           Text('重拍')
@@ -397,6 +606,17 @@ export struct RevealView {
       return;
     }
 
+    // 真实地点：必须先在目的地 120 米内拍一张带 GPS 的照片（docs §四）
+    if (this.requiresPhotoVerification() && !this.verifiedArrival) {
+      if (this.checkInUri.length === 0) {
+        this.verifyFailTitle = '先拍一张照片才能收进来';
+        this.verifyFailHowto = '照片里的位置要和这里一致（' + String(PHOTO_RADIUS_METERS) +
+          ' 米内），这样才算你真的来过。';
+        this.verifyFailReason = 'needPhoto';
+      }
+      return;
+    }
+
     const result: CollectResult | undefined = getStore().collectCurrentPlace();
     if (result === undefined) {
       this.showToast('这张卡已经在图鉴里了。', 'checkmark_circle');
@@ -415,6 +635,8 @@ export struct RevealView {
       } catch (err) {
         // 照片挂不上不影响收录
       }
+      // 验证凭证（照片 EXIF 坐标 + 距离）
+      this.attachGpsIfVerified(placeID);
     }
     this.load();
     this.onChanged();

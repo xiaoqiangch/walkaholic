@@ -340,6 +340,10 @@ public struct PlaceCard: Codable, Identifiable, Hashable, Sendable {
     public var photoName: String?
     /// 同一张照片上传到账号后的路径（如 /api/photos/<placeID>），换机登录也能取回
     public var photoRemotePath: String?
+    /// 到达验证：照片 EXIF 里的 GPS 坐标（无 GPS / 演示地点为 nil）
+    public var photoGps: GeoPoint?
+    /// 到达验证：照片坐标到目的地的距离（米；拍照失败为 nil）
+    public var photoDistance: Double?
 
     public init(
         id: String = UUID().uuidString,
@@ -348,7 +352,9 @@ public struct PlaceCard: Codable, Identifiable, Hashable, Sendable {
         collectedAt: Date = Date(),
         taskDone: Bool = false,
         photoName: String? = nil,
-        photoRemotePath: String? = nil
+        photoRemotePath: String? = nil,
+        photoGps: GeoPoint? = nil,
+        photoDistance: Double? = nil
     ) {
         self.id = id
         self.placeID = placeID
@@ -357,6 +363,8 @@ public struct PlaceCard: Codable, Identifiable, Hashable, Sendable {
         self.taskDone = taskDone
         self.photoName = photoName
         self.photoRemotePath = photoRemotePath
+        self.photoGps = photoGps
+        self.photoDistance = photoDistance
     }
 }
 

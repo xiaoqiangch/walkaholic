@@ -21,7 +21,14 @@ import { AccountConfig, isLoggedIn, readAccountConfig } from '../core/account';
 import { claimSurprise } from '../core/surpriseRemote';
 import { HttpClient } from '../core/http';
 import { KeyValueStore } from '../core/contract';
-import { PickedPhoto, pickAndAdoptPhoto, takeAndAdoptPhoto } from './PhotoPick';
+import { PickedPhoto, pickAndAdoptPhoto, readPhotoAsBase64, takeAndAdoptPhoto } from './PhotoPick';
+import {
+  PHOTO_RADIUS_METERS,
+  PhotoArrivalCheck,
+  checkPhotoArrival,
+  photoFailHowto,
+  photoFailText
+} from '../core/photo-gps';
 import {
   HINT_FOOTER,
   LOCKED_CLUE_TEXT,
@@ -74,6 +81,10 @@ export struct WaSeekPanel {
   @State private resultScore: number = -1;
   @State private resultPassed: boolean = false;
   @State private resultVerdict: string = '';
+  /** 照片 EXIF 位置验证失败：标题 */
+  @State private gpsFailTitle: string = '';
+  /** 照片 EXIF 位置验证失败：操作指引 */
+  @State private gpsFailHowto: string = '';
   @State private resultDemo: boolean = false;
   @State private resultXP: number = 0;
 
@@ -164,6 +175,26 @@ export struct WaSeekPanel {
     }
     if (picked === undefined) return;
     this.busy = true;
+
+    // ── 照片 EXIF 位置验证（docs/territory.md §四）──
+    // 只有「真到了半径内」才允许比对；照片的 GPS 必须在惊喜点 120 米内。
+    // 演示地点（targetLat/Lon = 0）或无定位时跳过（走原 dHash 流程）。
+    const hasTarget: boolean = this.targetLat !== 0 || this.targetLon !== 0;
+    if (hasTarget) {
+      const base64: string = readPhotoAsBase64(picked.uri);
+      const target: GeoPoint = { latitude: this.targetLat, longitude: this.targetLon };
+      const check: PhotoArrivalCheck = checkPhotoArrival(target, base64, PHOTO_RADIUS_METERS);
+      if (!check.ok && !check.demoSkip) {
+        // 位置不对：不进入比对（照片都没拍对地方，比相似度没意义）
+        this.gpsFailTitle = check.title;
+        this.gpsFailHowto = check.howto;
+        this.busy = false;
+        return;
+      }
+    }
+    this.gpsFailTitle = '';
+    this.gpsFailHowto = '';
+
     this.compare(picked);
     this.busy = false;
   }
@@ -437,6 +468,28 @@ export struct WaSeekPanel {
         .lineHeight(20)
 
       if (this.state.inRange) {
+        // 照片 GPS 验证失败：明确说清原因怎么改（docs §四：不能只说"失败"）
+        if (this.gpsFailTitle.length > 0) {
+          Column({ space: 4 }) {
+            Text(this.gpsFailTitle)
+              .fontSize(WAFont.captionSm)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(WAColor.ember)
+              .width('100%')
+            Text(this.gpsFailHowto)
+              .fontSize(WAFont.microSm)
+              .fontColor(WAColor.ink2)
+              .lineHeight(17)
+              .width('100%')
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .padding(10)
+          .backgroundColor('#1AFA2A2D')
+          .borderRadius(WASize.cardRadiusSm)
+          .border({ width: 1, color: '#33FA2A2D', radius: WASize.cardRadiusSm })
+        }
+
         WaPrimaryButton({
           title: this.busy ? '正在比对…' : '这样拍一张',
           tag: this.state.demoArrived ? '演示' : '',

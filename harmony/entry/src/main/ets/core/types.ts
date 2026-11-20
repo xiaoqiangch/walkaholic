@@ -160,6 +160,13 @@ export interface PlaceCard {
   photoName?: string;
   /** 同一张照片上传到账号后的路径（如 /api/photos/<placeID>），换机登录也能取回 */
   photoRemotePath?: string;
+  /**
+   * 到达验证凭证：照片 EXIF 里的真实坐标（docs/territory.md §四「数据存储」）。
+   * 用于事后审计、疆域计算（疆域点应优先用 photoGps 而不是手机 GPS）。
+   */
+  photoGps?: GeoPoint;
+  /** 与目的地的实测距离（米） */
+  photoDistance?: number;
 }
 
 // ============================================================

@@ -303,10 +303,18 @@ public final class WalkaholicStore {
 
     /// 把到达时拍的照片挂到卡片上。
     /// 「先拍照再收进图鉴」和「先收进图鉴再补拍」都会走这里。
-    public func attachCardPhoto(placeID: String, photoName: String?, remotePath: String?) {
+    public func attachCardPhoto(
+        placeID: String,
+        photoName: String?,
+        remotePath: String?,
+        photoGps: GeoPoint? = nil,
+        photoDistance: Double? = nil
+    ) {
         guard let index = profile.cards.firstIndex(where: { $0.placeID == placeID }) else { return }
         if let photoName { profile.cards[index].photoName = photoName }
         if let remotePath { profile.cards[index].photoRemotePath = remotePath }
+        if let photoGps { profile.cards[index].photoGps = photoGps }
+        if let photoDistance { profile.cards[index].photoDistance = photoDistance }
         persistence.saveProfile(profile)
     }
 

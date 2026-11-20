@@ -23,9 +23,17 @@ struct WalkaholicApp: App {
     /// 真实的 init 路径保留在这里：不依赖任何演示数据。
     private static func makeStore() -> WalkaholicStore {
         if usesDemoData {
-            let store = WalkaholicStore.demo()
-            // 仅用于截图/演示：`SIMCTL_CHILD_WA_PREVIEW=reveal` 启动即到达并开盒
             let preview = ProcessInfo.processInfo.environment["WA_PREVIEW"] ?? ""
+            // 疆域截图：先在真实地点目录里放 5 个上海真实 POI（不是虚构地点），
+            // 让 Profile 的卡片与 CityMap 的多边形都有数据。仅 preview 模式调用。
+            let previewEnv = ProcessInfo.processInfo.environment
+            let seededPlaces = (preview == "profile" || preview.hasPrefix("territory"))
+                ? seedTerritoryDemoPlaces(cappedMode: previewEnv["WA_PREVIEW_TERRITORY_CAPPED"] == "1")
+                : []
+            let store = WalkaholicStore.demo()
+            if !seededPlaces.isEmpty {
+                ensureTerritoryCards(store: store, places: seededPlaces)
+            }
             if preview == "reveal" {
                 _ = store.arriveNow()
                 store.beginReveal()
@@ -69,6 +77,38 @@ struct WalkaholicApp: App {
                 PlaceDirectory.shared.remember(place)
                 _ = store.updateLocation(distanceMeters: Double(total), bearingDegrees: bearing)
             }
+            // 拍照 + EXIF GPS 到达验证自检：`WA_PREVIEW=photo-verify`
+            // 配 `WA_PREVIEW_PHOTO=ok|nogps|far` + `WA_PREVIEW_COLLECT=1` 截三种结果
+            if preview == "photo-verify" {
+                let target = GeoPoint(latitude: 31.2330, longitude: 121.4710) // 人民公园（真实坐标）
+                let poi = POICandidate(
+                    id: "photo-verify-park",
+                    name: "人民公园",
+                    coordinate: target,
+                    address: "黄浦区 · 人民公园",
+                    category: .park,
+                    source: "curated"
+                )
+                let place = RealPlaceFactory.scrub(RealPlaceFactory.makePlace(
+                    from: poi,
+                    origin: GeoPoint(latitude: 31.2304, longitude: 121.4737),
+                    mood: .drift,
+                    hour: 10,
+                    startMeters: 480
+                ))
+                PlaceDirectory.shared.remember(place)
+                store.session = QuestSession(
+                    placeID: place.id,
+                    totalMeters: 480,
+                    remainingMeters: 0,
+                    phase: .arrived,
+                    unlockedHintCount: 3,
+                    target: target,
+                    currentBearing: nil
+                )
+                store.currentPlace = place
+                store.reveal = Reveal(place: place, xpGained: 40 + place.rarity.xpBonus)
+            }
             // 真实 POI 自检：用内置的一条真实 POI 直接建旅程（不走 MapKit，离线可复现）
             if preview == "realquest" {
                 let origin = GeoPoint(latitude: 31.2304, longitude: 121.4737)
@@ -93,6 +133,62 @@ struct WalkaholicApp: App {
         let persistence = UserDefaultsProfileStore()
         let profile = persistence.loadProfile() ?? Profile()
         return WalkaholicStore(profile: profile, persistence: persistence)
+    }
+
+    // MARK: 疆域截图种子（仅 preview，真实坐标）
+
+    private static func seedTerritoryDemoPlaces(cappedMode: Bool = false) -> [Place] {
+        let origin = GeoPoint(latitude: 31.2304, longitude: 121.4737)
+        // 点数门槛截图：4 个点围出 >0.3km² 的边界，但点数不够 → 被卡在下一档
+        let cappedSeeds: [(id: String, name: String, lat: Double, lon: Double, category: RealPlaceCategory, address: String)] = [
+            ("territory-demo-square", "人民广场", 31.2304, 121.4737, .plaza, "黄浦区 · 人民广场"),
+            ("territory-demo-nanjing", "南京东路步行街", 31.2355, 121.4800, .plaza, "黄浦区 · 南京东路"),
+            ("territory-demo-bund", "外滩", 31.2400, 121.4900, .river, "黄浦区 · 中山东一路"),
+            ("territory-demo-yuyuan", "豫园", 31.2270, 121.4920, .garden, "黄浦区 · 豫园")
+        ]
+        let normalSeeds: [(id: String, name: String, lat: Double, lon: Double, category: RealPlaceCategory, address: String)] = [
+            ("territory-demo-park", "人民公园", 31.2330, 121.4710, .park, "黄浦区 · 人民公园"),
+            ("territory-demo-museum", "上海博物馆", 31.230278, 121.470556, .museum, "黄浦区 · 人民大道 201 号"),
+            ("territory-demo-concert", "上海音乐厅", 31.228889, 121.473333, .venue, "黄浦区 · 延安东路 523 号"),
+            ("territory-demo-square", "人民广场", 31.229564, 121.47438, .plaza, "黄浦区 · 人民广场"),
+            ("territory-demo-nanjing", "南京东路步行街", 31.2355, 121.4800, .plaza, "黄浦区 · 南京东路")
+        ]
+        let seeds = cappedMode ? cappedSeeds : normalSeeds
+        if cappedMode {
+            // 预览专用：清掉历史目录，确保只有 4 个点（否则之前截图留下的点会让门槛不触发）
+            PlaceDirectory.shared.removeAll()
+        }
+        var places: [Place] = []
+        for seed in seeds {
+            let candidate = POICandidate(
+                id: seed.id,
+                name: seed.name,
+                coordinate: GeoPoint(latitude: seed.lat, longitude: seed.lon),
+                address: seed.address,
+                category: seed.category,
+                source: "curated"
+            )
+            let place = RealPlaceFactory.scrub(RealPlaceFactory.makePlace(
+                from: candidate, origin: origin, mood: .drift, hour: 10, startMeters: 480
+            ))
+            PlaceDirectory.shared.remember(place)
+            places.append(place)
+        }
+        return places
+    }
+
+    private static func ensureTerritoryCards(store: WalkaholicStore, places: [Place]) {
+        let existing = Set(store.profile.cards.map(\.placeID))
+        var cards = store.profile.cards
+        for (index, place) in places.enumerated() where !existing.contains(place.id) {
+            cards.append(PlaceCard(
+                placeID: place.id,
+                serial: String(format: "T%04d", 700 + index * 13),
+                collectedAt: Date().addingTimeInterval(-Double(index + 1) * 86_400)
+            ))
+        }
+        store.profile.cards = cards
+        store.profile.boxesOpened = max(store.profile.boxesOpened, cards.count)
     }
 }
 
@@ -141,7 +237,7 @@ struct RootView: View {
         default: tab = .home
         }
         _selectedTab = State(initialValue: tab)
-        _isJourneyPresented = State(initialValue: ["journey", "reveal", "live", "realquest", "parity"].contains(preview))
+        _isJourneyPresented = State(initialValue: ["journey", "reveal", "live", "realquest", "parity", "photo-verify"].contains(preview))
     }
 
     var body: some View {

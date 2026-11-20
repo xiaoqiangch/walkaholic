@@ -26,6 +26,9 @@ entry/src/main/ets/
 │   ├── mapkeys.ts  地图 Key 下发（包内→Pages→后台→免费源）
 │   ├── search.ts   三档搜索 + 策展优先 + 明确失败（绝不虚构）
 │   ├── fog.ts      迷雾路径几何（纯函数）
+│   ├── territory.ts 疆域凸包 + 爵位判定（docs/territory.md 唯一实现）
+│   ├── sharecard.ts 疆域分享卡布局（720×960，纯计算）
+│   ├── photo-gps.ts 照片 EXIF GPS 自解析 + 120m 到达验证
 │   ├── hints.ts    图鉴「附近惊喜」隐晦提示 + 探寻线索解锁（保密铁律）
 │   ├── account.ts  账号（手动 Cookie）
 │   └── …           地理 / 抽盒 / 会话 / dHash / 成就 / 持久化 / store
@@ -35,17 +38,18 @@ entry/src/main/ets/
 └── theme/   设计 token（字号已按 parity.md §5 对齐 Web v32）
 ```
 
-## 校验结果（2026-11-19，真实运行）
+## 校验结果
+
+最近一次离线校验（2026-11-20，v0.11 点数门槛 + EXIF GPS 验证）：
 
 ```
 tsc --noEmit            0 error
-npm test                143/143 通过
-ArkTS 静态检查          31 个 .ets，0 error（含「附近惊喜保密」守卫）
-hvigor assembleHap      ✅ CompileArkTS 0 error / PackageHap 成功
-hap-sign-tool           本地签名 + verify-app ✅ Verify success
-模拟器（HarmonyOS 7.0）   ✅ 安装/启动/抽盒/路线/揭晓/四个 Tab 全通，0 崩溃
-产物                    entry-default-signed.hap (2.7 MB)
+npm test                195/195 通过
+ArkTS 静态检查          32 个 .ets，0 error（14 个分区全过，含「附近惊喜保密」「疆域对齐」「拍照验证」守卫）
 ```
+
+真机编译与模拟器验证记录见 [docs/HARMONY.md](docs/HARMONY.md) §11–§12（2026-11-19：`.hap` 构建 + 本地签名 + 模拟器端到端跑通）。
+**说明**：v0.10 / v0.11 改动尚未重新跑 `.hap` 编译与模拟器验证，见 docs §7 的待确认清单。
 
 > 真机运行仍需模拟器或设备；运行时行为清单见 [docs/HARMONY.md](docs/HARMONY.md) §7、实测记录见 §12。
 > 本地自签名只用于调试，**上架必须用华为账号正式证书**（见 §3.1）。

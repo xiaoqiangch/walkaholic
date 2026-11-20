@@ -1,6 +1,8 @@
 import SwiftUI
 import Foundation
 import PhotosUI
+import ImageIO
+import UniformTypeIdentifiers
 
 // MARK: - 揭晓 Reveal（design-system §5.4，全屏覆盖；视觉基准：web 原型 #/reveal）
 //
@@ -44,6 +46,12 @@ struct RevealView: View {
     @State private var checkInPhotoName: String?
     @State private var checkInRemotePath: String?
     @State private var isUploadingPhoto = false
+
+    // 到达验证：照片 EXIF GPS 与目的地的比对
+    @State private var photoGpsResult: PhotoGpsResult?
+    @State private var photoGpsDistance: Double?
+    @State private var photoGpsVerified = false
+    @State private var photoVerifyPrompt: PhotoVerifyPrompt?
 
     private var place: Place? {
         store.reveal?.place ?? store.currentPlace
@@ -91,10 +99,20 @@ struct RevealView: View {
             )
             .ignoresSafeArea()
         }
+        .sheet(item: $photoVerifyPrompt) { prompt in
+            PhotoVerificationSheet(issue: prompt.issue) {
+                photoVerifyPrompt = nil
+                showCamera = true
+            }
+        }
         .onChange(of: pickerItem) { _, item in
             guard let item else { return }
             Task { @MainActor in
-                if let image = await PhotoLibraryService.loadImage(from: item) {
+                // 必须在压缩前拿到原始 Data：save() 会重编码，EXIF 就没了
+                if let data = try? await item.loadTransferable(type: Data.self),
+                   let image = UIImage(data: data) {
+                    handleCheckInPhoto(image, data: data)
+                } else if let image = await PhotoLibraryService.loadImage(from: item) {
                     handleCheckInPhoto(image)
                 }
                 pickerItem = nil
@@ -102,11 +120,25 @@ struct RevealView: View {
         }
         .onAppear {
             // 仅用于截图/演示：`WA_PREVIEW_TOAST=1` 自动点一次「收进图鉴」，验证 toast 层级
-            guard ProcessInfo.processInfo.environment["WA_PREVIEW_TOAST"] == "1" else { return }
-            waAfter(1.6) {
-                guard showCard, !hasCollected else { return }
-                collectCard()
+            if ProcessInfo.processInfo.environment["WA_PREVIEW_TOAST"] == "1" {
+                waAfter(1.6) {
+                    guard showCard, !hasCollected else { return }
+                    collectCard()
+                }
             }
+            #if DEBUG
+            // 拍照 + EXIF 自检：`WA_PREVIEW_PHOTO=ok|nogps|far`，配合 `WA_PREVIEW_COLLECT=1`
+            let env = ProcessInfo.processInfo.environment
+            if let scenario = env["WA_PREVIEW_PHOTO"] {
+                waAfter(2.4) {
+                    guard let place, let data = PhotoTestData.make(scenario: scenario, target: place.coordinate) else { return }
+                    handleCheckInPhotoData(data)
+                    if env["WA_PREVIEW_COLLECT"] == "1" {
+                        waAfter(0.45) { collectCard() }
+                    }
+                }
+            }
+            #endif
         }
     }
 
@@ -620,6 +652,13 @@ struct RevealView: View {
                     .accessibilityLabel("从相册选择照片")
                 }
             }
+
+            if let status = photoGpsStatusText {
+                Text(status)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(photoGpsStatusColor)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -639,9 +678,40 @@ struct RevealView: View {
         }
     }
 
-    /// 拍完 / 选完：先落本机（离线也有），再尽力上传账号
-    private func handleCheckInPhoto(_ image: UIImage) {
+    /// 相册选中的**原始 Data**：先读 EXIF GPS，再压缩/落盘（重编码会丢 EXIF）
+    private func handleCheckInPhotoData(_ data: Data) {
+        guard let image = UIImage(data: data) else {
+            photoGpsResult = .failed(reason: .notImage)
+            photoGpsVerified = false
+            photoGpsDistance = nil
+            return
+        }
+        handleCheckInPhoto(image, data: data)
+    }
+
+    /// 拍完 / 选完：先读 EXIF 验证到达，再做落本机/上传
+    private func handleCheckInPhoto(_ image: UIImage, data: Data? = nil) {
         checkInImage = image
+
+        if let data {
+            let result = PhotoGps.read(from: data)
+            photoGpsResult = result
+            if let target = place?.coordinate {
+                let verification = PhotoGps.verify(target: target, photo: result)
+                photoGpsDistance = verification.distance
+                photoGpsVerified = verification.ok
+            } else {
+                // 演示 / 内置地点没有真实坐标 → 不参与到达验证
+                photoGpsDistance = nil
+                photoGpsVerified = false
+            }
+        } else {
+            // UIImagePickerController 的 UIImage 通常已丢 EXIF（相机路径会提示重拍/选相册）
+            photoGpsResult = .failed(reason: .noExif)
+            photoGpsVerified = false
+            photoGpsDistance = nil
+        }
+
         if let name = try? PhotoLibraryService.save(image) {
             checkInPhotoName = name
         }
@@ -650,6 +720,26 @@ struct RevealView: View {
         }
         WAHaptics.light()
         uploadCheckInPhotoIfPossible(image)
+    }
+
+    private var photoGpsStatusText: String? {
+        guard let result = photoGpsResult else { return nil }
+        switch result {
+        case .ok:
+            guard let distance = photoGpsDistance else { return "照片位置已验证" }
+            if photoGpsVerified {
+                return "位置已验证 · 距目的地 \(Int(distance.rounded())) 米"
+            }
+            return PhotoGps.tooFarText(distance: distance)
+        case .failed(let reason):
+            return PhotoGps.reasonText(reason)
+        }
+    }
+
+    private var photoGpsStatusColor: Color {
+        if photoGpsVerified { return WATheme.teal }
+        if photoGpsResult?.failure != nil || !photoGpsVerified { return WATheme.ember }
+        return WATheme.ink3
     }
 
     private func uploadCheckInPhotoIfPossible(_ image: UIImage) {
@@ -756,6 +846,20 @@ struct RevealView: View {
             return
         }
 
+        // 真实地点必须「拍照 + EXIF GPS ≤120m」才能收集；演示/无坐标地点跳过（保持旧行为）
+        if let targetPlace = place, targetPlace.coordinate != nil, !photoGpsVerified {
+            let issue: PhotoVerifyIssue
+            if let result = photoGpsResult, case .ok = result, let distance = photoGpsDistance {
+                issue = .tooFar(distance)
+            } else if let failure = photoGpsResult?.failure {
+                issue = .gps(failure)
+            } else {
+                issue = .needsPhoto
+            }
+            photoVerifyPrompt = PhotoVerifyPrompt(issue: issue)
+            return
+        }
+
         guard let result = store.collect() else {
             appendToast(WAToast(text: "这张卡已经在图鉴里了。", icon: "checkmark.seal"))
             return
@@ -765,8 +869,14 @@ struct RevealView: View {
         WAHaptics.success()
 
         // 把到达实拍挂到这张卡上（先拍后收 / 先收后拍都覆盖得到）
-        if let place, checkInPhotoName != nil || checkInRemotePath != nil {
-            store.attachCardPhoto(placeID: place.id, photoName: checkInPhotoName, remotePath: checkInRemotePath)
+        if let place, checkInPhotoName != nil || checkInRemotePath != nil || photoGpsResult != nil {
+            store.attachCardPhoto(
+                placeID: place.id,
+                photoName: checkInPhotoName,
+                remotePath: checkInRemotePath,
+                photoGps: photoGpsResult?.gps,
+                photoDistance: photoGpsDistance
+            )
         }
 
         // 卡片缩小飞向 Tab 图鉴，飞完再落回原位（web 同款：卡片留在原地并显示「它现在是你的了」）
@@ -833,3 +943,165 @@ struct RevealView: View {
         appendToast(WAToast(text: "已分享到圈子", icon: "paperplane.fill", tint: WATheme.teal))
     }
 }
+
+// MARK: - 拍照到达验证失败弹层
+
+enum PhotoVerifyIssue {
+    case needsPhoto
+    case gps(PhotoGpsFailure)
+    case tooFar(Double)
+
+    var title: String {
+        switch self {
+        case .needsPhoto: return "先拍一张带位置信息的照片"
+        case .gps(let reason): return PhotoGps.reasonText(reason)
+        case .tooFar: return "拍摄地点离目的地太远"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .needsPhoto:
+            return "到达验证需要照片本身带 GPS：请用手机相机拍一张（不要用截图），或从相册选择一张原图。"
+        case .gps(let reason):
+            return PhotoGps.reasonHowto(reason)
+        case .tooFar(let distance):
+            return PhotoGps.tooFarText(distance: distance)
+        }
+    }
+}
+
+struct PhotoVerifyPrompt: Identifiable {
+    let id = UUID()
+    let issue: PhotoVerifyIssue
+}
+
+struct PhotoVerificationSheet: View {
+
+    let issue: PhotoVerifyIssue
+    var onRetry: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 10) {
+                    Image(systemName: "camera.metering.unknown")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundStyle(WATheme.ember)
+                    Text(issue.title)
+                        .font(.headline)
+                        .foregroundStyle(WATheme.ink)
+                }
+
+                Text(issue.message)
+                    .font(.body)
+                    .foregroundStyle(WATheme.ink2)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text("验证规则：照片 EXIF 里的拍摄点与目的地直线距离 ≤ \(Int(PhotoGps.radiusMeters)) 米。")
+                    .font(.caption)
+                    .foregroundStyle(WATheme.ink3)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button {
+                    dismiss()
+                    onRetry()
+                } label: {
+                    Text("重新拍一张 / 换一张")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(WATheme.paper)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(WATheme.amberDeep)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(WAPressEffectStyle())
+
+                Button("先不收集") {
+                    dismiss()
+                }
+                .font(.subheadline)
+                .foregroundStyle(WATheme.ink3)
+                .frame(maxWidth: .infinity)
+
+                Spacer(minLength: 0)
+            }
+            .padding(20)
+            .background(WATheme.cream)
+            .navigationTitle("到达验证")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
+}
+
+// MARK: - 自检用 EXIF 测试图（仅 DEBUG；运行时用 ImageIO 写入真实 EXIF）
+
+#if DEBUG
+enum PhotoTestData {
+
+    /// scenario: ok | nogps | far | noexif
+    static func make(scenario: String, target: GeoPoint?) -> Data? {
+        let base = target ?? GeoPoint(latitude: 31.2330, longitude: 121.4710)
+        switch scenario {
+        case "ok":
+            let p = GeoMath.offset(from: base, meters: 20, bearingDegrees: 30)
+            return jpeg(lat: p.latitude, lon: p.longitude, includeExif: true)
+        case "far":
+            let p = GeoMath.offset(from: base, meters: 500, bearingDegrees: 20)
+            return jpeg(lat: p.latitude, lon: p.longitude, includeExif: true)
+        case "nogps":
+            return jpeg(lat: nil, lon: nil, includeExif: true)
+        default:
+            return jpeg(lat: nil, lon: nil, includeExif: false)
+        }
+    }
+
+    private static func jpeg(lat: Double?, lon: Double?, includeExif: Bool) -> Data? {
+        let size = CGSize(width: 240, height: 240)
+        let image = UIGraphicsImageRenderer(size: size).image { context in
+            let cg = context.cgContext
+            cg.setFillColor(UIColor(WATheme.paper2).cgColor)
+            cg.fill(CGRect(origin: .zero, size: size))
+            cg.setFillColor(UIColor(WATheme.amber).cgColor)
+            cg.fillEllipse(in: CGRect(x: 60, y: 50, width: 120, height: 120))
+            cg.setFillColor(UIColor(WATheme.ink).withAlphaComponent(0.65).cgColor)
+            cg.fill(CGRect(x: 0, y: 190, width: size.width, height: 50))
+        }
+        guard let cgImage = image.cgImage else { return nil }
+
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            data as CFMutableData,
+            UTType.jpeg.identifier as CFString,
+            1,
+            nil
+        ) else { return nil }
+
+        var properties: [CFString: Any] = [:]
+        if includeExif {
+            properties[kCGImagePropertyExifDictionary] = [
+                kCGImagePropertyExifDateTimeOriginal: "2026:11:20 15:00:00"
+            ] as [CFString: Any]
+        }
+        if let lat, let lon {
+            properties[kCGImagePropertyGPSDictionary] = [
+                kCGImagePropertyGPSLatitude: abs(lat),
+                kCGImagePropertyGPSLatitudeRef: lat >= 0 ? "N" : "S",
+                kCGImagePropertyGPSLongitude: abs(lon),
+                kCGImagePropertyGPSLongitudeRef: lon >= 0 ? "E" : "W"
+            ] as [CFString: Any]
+        }
+        CGImageDestinationAddImage(destination, cgImage, properties as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return data as Data
+    }
+}
+#endif

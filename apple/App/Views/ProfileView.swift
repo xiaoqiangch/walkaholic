@@ -14,6 +14,8 @@ struct ProfileView: View {
     @State private var toast: WAToast?
     @State private var showClearConfirm = false
     @State private var showAccount = false
+    @State private var showCityMap = false
+    @State private var showTerritoryShare = false
     @State private var account = AccountService.shared
     /// 仅用于截图/演示：`SIMCTL_CHILD_WA_PREVIEW=achievements` 直达成就页
     @State private var showAchievements = false
@@ -23,6 +25,12 @@ struct ProfileView: View {
             Section {
                 levelCard
                     .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
+                    .listRowBackground(Color.clear)
+            }
+
+            Section {
+                TerritoryCardView(store: store)
+                    .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
                     .listRowBackground(Color.clear)
             }
 
@@ -125,8 +133,14 @@ struct ProfileView: View {
         .navigationDestination(isPresented: $showAchievements) {
             AchievementsView(store: store)
         }
+        .navigationDestination(isPresented: $showCityMap) {
+            CityMapView(store: store)
+        }
         .sheet(isPresented: $showAccount) {
             AccountView(store: store)
+        }
+        .sheet(isPresented: $showTerritoryShare) {
+            TerritorySharePreviewSheet(store: store)
         }
         .onAppear {
             let environment = ProcessInfo.processInfo.environment
@@ -135,6 +149,10 @@ struct ProfileView: View {
                     showAchievements = true
                 } else if environment["WA_PREVIEW_SUBPAGE"] == "account" {
                     showAccount = true
+                } else if environment["WA_PREVIEW_SUBPAGE"] == "citymap" {
+                    showCityMap = true
+                } else if environment["WA_PREVIEW_SUBPAGE"] == "territory-share" {
+                    showTerritoryShare = true
                 }
             }
             Task { await account.refresh() }
