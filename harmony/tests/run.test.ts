@@ -5055,3 +5055,22 @@ main().catch((error: unknown): void => {
   console.log('测试运行器异常：' + message);
   process.exitCode = 1;
 });
+
+test('拍照验证：HEIC/HEIF 明确识别为格式问题（不能误报「相机没开定位」）', () => {
+  const brands: string[] = ['heic', 'heix', 'hevc', 'mif1', 'avif'];
+  for (const brand of brands) {
+    const bytes: Uint8Array = new Uint8Array(64);
+    // ISO BMFF: [4字节 size]['f','t','y','p'][brand]
+    bytes[3] = 24;
+    const ftyp: string = 'ftyp';
+    for (let i = 0; i < 4; i += 1) bytes[4 + i] = ftyp.charCodeAt(i);
+    for (let i = 0; i < 4; i += 1) bytes[8 + i] = brand.charCodeAt(i);
+    const r: PhotoGpsResult = parseExifGps(bytes);
+    assert.equal(r.ok, false, brand + ' 不应解析成功');
+    assert.equal(r.reason, 'heicUnsupported', brand + ' 应识别为 HEIC');
+    assert.ok(photoFailText(r.reason as PhotoGpsFailure).includes('HEIF'),
+      brand + ' 标题应说明是 HEIF 格式');
+    assert.ok(photoFailHowto(r.reason as PhotoGpsFailure).includes('JPEG'),
+      brand + ' 指引应告诉用户切到 JPEG');
+  }
+});

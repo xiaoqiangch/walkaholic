@@ -45,6 +45,7 @@ export type PhotoGpsFailure =
   | 'notImage'
   | 'brokenExif'
   | 'pngNoExif'
+  | 'heicUnsupported'
   | 'tooFar'
   | 'noData'
   /** Web 端还有一个 UNREADABLE_GPS：坐标能定位到标签但值读不出来 */
@@ -297,6 +298,15 @@ function readAscii(reader: BytesReader, entry: IfdEntry | undefined): string {
 // 4. 主入口：从图片字节里读 GPS
 // ============================================================
 
+/** 从字节数组里读 ASCII（ISO BMFF 的 ftyp/brand 判型用） */
+function asciiAt(bytes: Uint8Array, offset: number, len: number): string {
+  let out: string = '';
+  for (let i = 0; i < len && offset + i < bytes.length; i += 1) {
+    out += String.fromCharCode(bytes[offset + i]);
+  }
+  return out;
+}
+
 /** GPS IFD 里我们要的 tag（与 Web 的 GPS_TAGS 一致） */
 const GPS_TAGS: string[] = ['1', '2', '3', '4', '5', '6', '7', '29'];
 
@@ -326,7 +336,23 @@ export function parseExifGps(bytes: Uint8Array): PhotoGpsResult {
     return { ok: false, reason: 'notImage', detail: '无法读取文件' };
   }
 
-  // PNG/HEIC 暂不支持（PNG 本来就不存 EXIF；HEIC 需要额外解析）
+  // HEIC/HEIF：ISO BMFF 容器（[4字节size]"ftyp"+brand），EXIF 在 meta box 里，本解析器不支持。
+  // 必须**明确告诉用户是格式问题**，否则用户会以为是相机没开定位。
+  if (bytes.length >= 12) {
+    const brand: string = asciiAt(bytes, 4, 4);
+    if (brand === 'ftyp') {
+      const sub: string = asciiAt(bytes, 8, 4);
+      if (/^(heic|heix|hevc|hevx|heim|heis|hevm|hevs|mif1|msf1|avif)$/i.test(sub)) {
+        return {
+          ok: false,
+          reason: 'heicUnsupported',
+          detail: '这是 HEIF/' + sub.toUpperCase() + ' 格式的照片，当前读不到里面的位置信息'
+        };
+      }
+    }
+  }
+
+  // PNG 本来就不存 EXIF
   if (reader.u8(0) === 0x89 && reader.u8(1) === 0x50) {
     return {
       ok: false,
@@ -577,6 +603,7 @@ export function photoFailText(reason: PhotoGpsFailure): string {
   if (reason === 'unreadableGps') return '照片的位置数据读不出来';
   if (reason === 'invalidGps') return '照片坐标不合法';
   if (reason === 'pngNoExif') return 'PNG 照片不保存位置信息';
+  if (reason === 'heicUnsupported') return '这是 HEIF 格式的照片';
   if (reason === 'brokenExif') return '照片信息损坏';
   if (reason === 'notImage') return '这不是有效的照片文件';
   if (reason === 'tooFar') return '拍摄地点离目的地太远';
@@ -600,6 +627,10 @@ export function photoFailHowto(reason: PhotoGpsFailure): string {
   if (reason === 'unreadableGps') return '请重新用相机拍一张';
   if (reason === 'invalidGps') return '请重新用相机拍一张';
   if (reason === 'pngNoExif') return '请用相机拍 JPEG 照片，不要用截图或 PNG';
+  if (reason === 'heicUnsupported') {
+    return '请到 相机设置 → 格式 → 选择「兼容性最佳 / JPEG」，或换一张 JPEG 照片重拍。' +
+      '（iPhone 默认用 HEIF 格式，鸿蒙部分机型也可能如此）';
+  }
   if (reason === 'brokenExif') return '请重新用相机拍一张';
   if (reason === 'notImage') return '请选择一张照片';
   if (reason === 'tooFar') return '走近一点再拍一张';

@@ -208,3 +208,19 @@ test('到达验证：缺数据', () => {
   assert.equal(E.verifyPhotoAt(null, { lat: 32, lon: 118 }).ok, false);
   assert.equal(E.verifyPhotoAt({ lat: 32, lon: 118 }, null).ok, false);
 });
+
+test('EXIF：HEIC/HEIF 明确识别为格式问题（不能误报「相机没开定位」）', () => {
+  const brands = ['heic', 'heix', 'hevc', 'mif1', 'avif'];
+  for (const brand of brands) {
+    const b = Buffer.alloc(64);
+    b.writeUInt32BE(24, 0);
+    b.write('ftyp', 4, 'ascii');
+    b.write(brand, 8, 'ascii');
+    const r = E.readGpsFromBuffer(toArrayBuffer(b));
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'HEIC_UNSUPPORTED', `${brand} 应识别为 HEIC`);
+    assert.ok(E.REASON_TEXT[r.reason].includes('HEIF'), '标题应说明是 HEIF 格式');
+    assert.ok(E.REASON_HOWTO[r.reason].includes('兼容性最佳') || E.REASON_HOWTO[r.reason].includes('JPEG'),
+      '指引应告诉用户切到 JPEG 格式');
+  }
+});
