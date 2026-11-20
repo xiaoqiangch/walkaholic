@@ -7,7 +7,7 @@
 
   var D = window.WA_DATA;
   var STORE_KEY = 'walkaholic:v1';
-  var APP_VERSION = 'v55';
+  var APP_VERSION = 'v56';
   var APP_BUILT_AT = '2026-11-09 14:10';
 
   var ROUTES = ['/home', '/setup', '/journey', '/reveal', '/cards', '/social', '/profile', '/debug',
@@ -1024,21 +1024,35 @@
     input.click();
   }
 
-  /** 失败提示：区分「没开相机定位」和「离太远」 */
+  /**
+   * 失败提示：必须给**可照做的分步指引**，不能只说「没有位置信息」。
+   * 返回 { title, steps[], howto }
+   */
   function photoVerifyFailText(fail) {
     var E = window.BW_EXIF;
-    if (!fail) return { title: '拍照失败', howto: '再试一次' };
+    if (!fail) {
+      return { title: '拍照失败', steps: ['请再试一次'], howto: '请再试一次' };
+    }
     if (fail.reason === 'CANCELLED') return null;
+
     if (fail.reason === 'TOO_FAR') {
+      var dist = Math.round(fail.distanceMeters || 0);
       return {
         title: '这张照片拍得太远了',
-        howto: '照片拍摄点离目的地 ' + Math.round(fail.distanceMeters || 0) +
-          ' 米，需要在 ' + PHOTO_VERIFY_RADIUS + ' 米内拍摄。走近一点再拍一张。'
+        steps: [
+          '这张照片拍在离目的地 ' + dist + ' 米处，需要在 ' + PHOTO_VERIFY_RADIUS + ' 米内',
+          '走到目的地附近（地图上「你」和「?」几乎重合的位置）',
+          '在目的地旁边重新拍一张'
+        ],
+        howto: '走近一点再拍一张（当前 ' + dist + ' 米，需 ≤' + PHOTO_VERIFY_RADIUS + ' 米）'
       };
     }
+
     var title = (E && E.REASON_TEXT[fail.reason]) || (fail.detail || '照片没有位置信息');
+    var steps = (E && E.stepsFor) ? E.stepsFor(fail.reason)
+      : [(E && E.REASON_HOWTO[fail.reason]) || '请重新用手机相机拍一张'];
     var howto = (E && E.REASON_HOWTO[fail.reason]) || '请重新用手机相机拍一张';
-    return { title: title, howto: howto };
+    return { title: title, steps: steps, howto: howto };
   }
 
   /** 拍照验证弹层（到达揭晓页后，先完成这一步才能收集卡片） */
@@ -1046,12 +1060,18 @@
     var pending = state.pendingPhotoVerify;
     if (!pending) return '';
     var lastFail = pending.lastFail;
-    var failBlock = lastFail
-      ? '<div class="photoverify__fail" role="alert">' +
+    var failBlock = '';
+    if (lastFail) {
+      var stepList = (lastFail.steps || [lastFail.howto || '']).map(function (st, i) {
+        return '<li class="photoverify__step"><span class="photoverify__num">' + (i + 1) + '</span>' +
+          '<span class="photoverify__step-text">' + esc(st) + '</span></li>';
+      }).join('');
+      failBlock = '<div class="photoverify__fail" role="alert">' +
         '<p class="photoverify__fail-title">⚠️ ' + esc(lastFail.title) + '</p>' +
-        '<p class="photoverify__fail-howto">' + esc(lastFail.howto) + '</p>' +
-        '</div>'
-      : '';
+        '<p class="photoverify__fail-lead">照下面这样做：</p>' +
+        '<ol class="photoverify__steps">' + stepList + '</ol>' +
+        '</div>';
+    }
     return '<div class="photoverify" role="dialog" aria-label="拍照验证">' +
       '<div class="photoverify__card">' +
       '<p class="photoverify__title">到达了？拍一张照片</p>' +
@@ -5044,7 +5064,8 @@
           else state.pendingPhotoVerify = { placeId: place0.id, lastFail: msg };
           render();
           mountPhotoVerifySheet();
-          showToast(msg.title, '⚠️', { duration: 3200 });
+          var firstStep = (msg.steps && msg.steps[0]) ? msg.steps[0] : msg.howto;
+          showToast(msg.title + ' · ' + firstStep, '⚠️', { duration: 5000 });
         });
         break;
       }
