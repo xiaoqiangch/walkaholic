@@ -44,7 +44,7 @@ import { KeyValueStore, RoutePolyline } from '../core/contract';
 import { QuestFlowDeps, loadCuratedPois, planRoute } from '../core/flow';
 import { discoverNearbyPlaces } from '../core/nearby';
 import { getCurrentLocationOnce, requestLocationPermission } from '../components/Location';
-import { applySyncedPayload, buildSyncPayload } from '../components/StoreBridge';
+import { activeSession, applySyncedPayload, buildSyncPayload } from '../components/StoreBridge';
 import { readAccountConfig } from '../core/account';
 import { MAPKEYS_CACHE_KEY, loadMapKeys, mapKeysSourceText } from '../core/mapkeys';
 import { waToast } from '../components/Async';
@@ -564,6 +564,15 @@ struct Index {
     this.refresh();
   }
 
+  /** 是否有进行中的旅程（决定关掉揭晓层后回到哪一屏） */
+  private hasActiveQuest(): boolean {
+    try {
+      return activeSession(getStore().snapshot()) !== undefined;
+    } catch (err) {
+      return false;
+    }
+  }
+
   /** 收录完成：回图鉴 Tab */
   private goCards(): void {
     this.activeOverlay = OVERLAY_NONE;
@@ -985,6 +994,12 @@ struct Index {
           kv: this.kv,
           onGoCards: () => {
             this.goCards();
+          },
+          onClose: () => {
+            // 未收录就关掉揭晓层：回到旅程页（iOS 里揭晓是盖在旅程上的
+            // fullScreenCover，关掉就是回旅程）。旅程已结束时才退回首页。
+            this.activeOverlay = this.hasActiveQuest() ? OVERLAY_JOURNEY : OVERLAY_NONE;
+            this.refresh();
           },
           onChanged: () => {
             this.refresh();

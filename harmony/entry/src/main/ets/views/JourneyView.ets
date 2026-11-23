@@ -44,8 +44,13 @@ import {
 } from '../components/Common';
 import { WaAbstractMap } from '../components/AbstractMap';
 import { WaFogPath } from '../components/FogPath';
-import { CompassWatcher, GeoWatcher } from '../components/Location';
-import { waSleep } from '../components/Async';
+import {
+  CompassWatcher,
+  GeoWatcher,
+  LocationAccess,
+  requestLocationAccess
+} from '../components/Location';
+import { waSleep, waToast } from '../components/Async';
 import { activeSession, emptySnapshot, readSnapshot } from '../components/StoreBridge';
 import {
   WAColor,
@@ -62,6 +67,13 @@ import {
 } from '../components/Format';
 
 const CLUE_INDEXES: number[] = [0, 1, 2];
+
+/**
+ * 定位停滞判定窗口（毫秒）：
+ * `on('locationChange')` 订阅成功并不代表有点 —— 室内 / 地下 / 定位开关关闭时
+ * 一个点都不会来。超过这个时间还没拿到任何点，就把「实时定位」改成失败态。
+ */
+const WATCH_STALL_MS: number = 12000;
 
 interface UpcomingManeuver {
   maneuver: RouteManeuver;
@@ -95,6 +107,13 @@ export struct JourneyView {
   @State private flashOpacity: number = 0;
   @State private arrivalHandled: boolean = false;
   @State private watchFailed: boolean = false;
+  /**
+   * 只拿到了「大致位置」（鸿蒙授权弹窗选了大致的那个）。
+   *
+   * 大致位置误差可能到公里级：Navigation 精度门槛 50m 过不去，导航不会推进。
+   * 不能说「拿不到定位」（那是错的），必须明确让用户去开精确位置。
+   */
+  @State private approximateOnly: boolean = false;
   @State private fogCaption: string = '正在规划路径…';
   @State private fixLat: number = 0;
   @State private fixLon: number = 0;
@@ -105,6 +124,8 @@ export struct JourneyView {
   @State private confirmParkedFar: boolean = false;
 
   private timerId: number = -1;
+  /** 定位停滞检测的定时器（-1 = 没有在等） */
+  private stallTimer: number = -1;
   private watcher: GeoWatcher | undefined = undefined;
   private compass: CompassWatcher | undefined = undefined;
   /** 上次看到的会话 id（换了一趟旅程要清掉「已停车」标记） */
@@ -131,15 +152,24 @@ export struct JourneyView {
       return;
     }
     if (session.phase === QuestPhase.Walking && !this.snapshot.demoMode) {
-      this.startTracking();
+      this.startTracking().catch(() => {
+        this.watchFailed = true;
+      });
     }
     if (session.phase === QuestPhase.Arrived) {
       this.beginArrival();
     }
+    // 已经揭晓过（用户关掉了揭晓页、还没收录）：不自动弹卡片，
+    // 只把底部按钮变成「打开这张卡」（见 actionSection）。自动弹会变成
+    // 「我关掉了，它又自己回来」，用户没得选。
   }
 
   aboutToDisappear(): void {
     this.stopCompass();
+    if (this.stallTimer >= 0) {
+      clearTimeout(this.stallTimer);
+      this.stallTimer = -1;
+    }
     if (this.timerId >= 0) {
       clearInterval(this.timerId);
       this.timerId = -1;
@@ -220,7 +250,35 @@ export struct JourneyView {
   // 真实定位
   // ============================================================
 
-  private startTracking(): void {
+  /**
+   * 开始跟踪真实定位。
+   *
+   * 必须先申请权限：`geoLocationManager.on('locationChange')` 在未授权时抛 201，
+   * 而本页的权限只由抽盒面板申请过 —— 用户「恢复上次旅程」直接进来时并没有授权，
+   * 于是订阅永远失败，距离/迷雾全部不动。
+   */
+  private async startTracking(): Promise<void> {
+    if (this.watcher !== undefined) {
+      return;
+    }
+    try {
+      const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+      const access: LocationAccess = await requestLocationAccess(context);
+      if (!access.approximate && !access.precise) {
+        this.watchFailed = true;
+        this.approximateOnly = false;
+        this.onChanged();
+        this.load();
+        return;
+      }
+      // 只有大致位置：导航需要 50m 内的点，明确告诉用户去开精确位置
+      this.approximateOnly = !access.precise;
+    } catch (err) {
+      this.watchFailed = true;
+      this.onChanged();
+      this.load();
+      return;
+    }
     if (this.watcher !== undefined) {
       return;
     }
@@ -238,6 +296,34 @@ export struct JourneyView {
     this.watcher = watcher;
     this.watchFailed = false;
     this.startCompass();
+    if (!this.approximateOnly) {
+      this.watchStallCheck();
+    }
+  }
+
+  /**
+   * 订阅成功但**一直不给点**也算失败。
+   *
+   * `on('locationChange')` 只是「订阅成功」，室内 / 地下 / 系统定位开关关闭时
+   * 一个点都不会来。用户看到的是「实时定位」绿灯亮着、距离永远不变 ——
+   * 比明确报错更让人困惑。
+   */
+  private watchStallCheck(): void {
+    if (this.stallTimer >= 0) {
+      clearTimeout(this.stallTimer);
+    }
+    const baseline: string = String(this.fixLat) + ',' + String(this.fixLon);
+    this.stallTimer = setTimeout(() => {
+      this.stallTimer = -1;
+      if (this.watcher === undefined || this.watchFailed) {
+        return;
+      }
+      const current: string = String(this.fixLat) + ',' + String(this.fixLon);
+      if (current === baseline) {
+        this.watchFailed = true;
+        this.onChanged();
+      }
+    }, WATCH_STALL_MS);
   }
 
   /** 罗盘：让迷雾路径跟随「你面朝的方向」转，而不是只按路线方向 */
@@ -262,6 +348,14 @@ export struct JourneyView {
   }
 
   private onGeoPoint(point: GeoPoint, accuracyMeters: number): void {
+    if (this.stallTimer >= 0) {
+      clearTimeout(this.stallTimer);
+      this.stallTimer = -1;
+    }
+    if (this.watchFailed) {
+      // 迟到的定位点说明订阅其实还活着：撤掉失败提示
+      this.watchFailed = false;
+    }
     this.fixLat = point.latitude;
     this.fixLon = point.longitude;
     this.fixAccuracyMeters = accuracyMeters;
@@ -448,7 +542,13 @@ export struct JourneyView {
     if (session === undefined) {
       return false;
     }
-    return session.phase === QuestPhase.Arrived;
+    return session.phase === QuestPhase.Arrived || session.phase === QuestPhase.Revealed;
+  }
+
+  /** 当前会话阶段（没有会话时返回 undefined） */
+  private sessionPhase(): QuestPhase | undefined {
+    const session: QuestSession | undefined = this.session();
+    return session === undefined ? undefined : session.phase;
   }
 
   // ============================================================
@@ -728,20 +828,32 @@ export struct JourneyView {
   @Builder
   statusRow() {
     Row({ space: 6 }) {
+      // 定位失败时**不能**再挂「实时定位 · 真实坐标」的绿灯：
+      // 以前不管有没有定位都显示，用户看到进度条不动会以为「导航坏了」，
+      // 真正的原因却是权限没给 / GPS 没信号。
       Row({ space: 4 }) {
         Circle()
           .width(6)
           .height(6)
-          .fill(WAColor.teal)
-        Text('实时定位 · 真实坐标')
+          .fill(this.watchFailed ? WAColor.ember : (this.approximateOnly ? WAColor.gold : WAColor.teal))
+        Text(this.watchFailed
+          ? '拿不到定位 · 点这里处理'
+          : (this.approximateOnly ? '只有大致位置 · 点这里修正' : '实时定位 · 真实坐标'))
           .fontSize(WAFont.micro)
-          .fontColor(WAColor.teal)
+          .fontColor(this.watchFailed ? WAColor.ember
+            : (this.approximateOnly ? WAColor.gold : WAColor.teal))
       }
       .padding({ left: 9, right: 9, top: 4, bottom: 4 })
-      .backgroundColor(WAColor.tealSoft)
+      .backgroundColor(this.watchFailed ? '#1AFA2A2D'
+        : (this.approximateOnly ? '#1AE84026' : WAColor.tealSoft))
       .borderRadius(WASize.chipRadius)
+      .onClick(() => {
+        if (this.watchFailed || this.approximateOnly) {
+          this.retryTracking();
+        }
+      })
 
-      if (this.isRealMode()) {
+      if (this.isRealMode() && !this.watchFailed && !this.approximateOnly) {
         Text('GPS')
           .fontSize(WAFont.microSm)
           .fontWeight(FontWeight.Medium)
@@ -754,6 +866,37 @@ export struct JourneyView {
     }
     .width('100%')
     .padding({ left: WASize.pagePadding, right: WASize.pagePadding, bottom: 8 })
+  }
+
+  /**
+   * 重新开始定位（用户点了「拿不到定位」之后）。
+   *
+   * 走完整流程：先申请权限（本页以前从不申请，直接 on('locationChange') 会抛 201），
+   * 再订阅；成功就清掉失败标记。
+   */
+  private async retryTracking(): Promise<void> {
+    const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+    const access: LocationAccess = await requestLocationAccess(context);
+    if (!access.approximate && !access.precise) {
+      waToast('请允许「步迷」使用定位，否则无法显示真实距离');
+      return;
+    }
+    if (this.watcher !== undefined) {
+      this.watcher.stop();
+      this.watcher = undefined;
+    }
+    try {
+      await this.startTracking();
+    } catch (err) {
+      this.watchFailed = true;
+    }
+    if (this.watchFailed) {
+      waToast('还是拿不到定位：检查系统定位开关，或到室外再试');
+    } else if (this.approximateOnly) {
+      waToast('当前是「大致位置」，请到 设置 → 应用 → 步迷 → 位置信息 选「精确位置」');
+    } else {
+      waToast('定位已开启');
+    }
   }
 
   /** 当前路线折线（真实模式才有） */
@@ -1215,9 +1358,16 @@ export struct JourneyView {
     Column({ space: 8 }) {
       if (this.isArrived()) {
         WaPrimaryButton({
-          title: '揭晓盲盒',
+          // phase = Revealed 说明已经揭晓过（用户关掉了卡片）：
+          // beginArrival 会因 arrivalHandled / 非 Walking 直接返回，点下去毫无反应，
+          // 所以这里必须换成「打开那张卡」。
+          title: this.sessionPhase() === QuestPhase.Revealed ? '打开这张卡' : '揭晓盲盒',
           onTap: () => {
-            this.beginArrival();
+            if (this.sessionPhase() === QuestPhase.Revealed) {
+              this.onArrived();
+            } else {
+              this.beginArrival();
+            }
           }
         })
       } else if (this.snapshot.demoMode) {

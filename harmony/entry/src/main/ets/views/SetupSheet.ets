@@ -35,7 +35,12 @@ import {
 } from '../components/Common';
 import { waToast } from '../components/Async';
 import { emptySnapshot, readSnapshot } from '../components/StoreBridge';
-import { getCurrentLocationOnce, requestLocationPermission } from '../components/Location';
+import {
+  LocationAccess,
+  LocationFix,
+  getLocationFix,
+  requestLocationAccess
+} from '../components/Location';
 import {
   WaLocationBlockedPanel,
   WaManualLocationSheet,
@@ -296,23 +301,32 @@ export struct SetupSheet {
     }
     if (origin === undefined) {
       const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
-      const granted: boolean = await requestLocationPermission(context);
-      if (!granted) {
+      const access: LocationAccess = await requestLocationAccess(context);
+      if (!access.approximate && !access.precise) {
         this.busy = false;
         this.statusText = '';
         this.locationBlockedReason = 'denied';
         return;
       }
+      // 只有「大致位置」也能抽盒（误差偏大但仍是真实坐标），继续往下走。
+      // 以前这里把「大致位置」判成拒绝 → 用户永远抽不了。
       try {
-        origin = await getCurrentLocationOnce(6000);
+        // 三级取点：快速定位 → 精度优先 → 系统缓存。
+        // 原来只有一次 6 秒的 FIRST_FIX，室内/高楼间经常直接超时，
+        // 用户看到「定位超时」但其实再等一档、或用缓存点就够抽盒用了。
+        const fix: LocationFix = await getLocationFix(6000);
+        origin = fix.point;
       } catch (err) {
         origin = undefined;
+        this.locationBlockedReason = 'timeout';
       }
     }
     if (origin === undefined) {
       this.busy = false;
       this.statusText = '';
-      this.locationBlockedReason = 'timeout';
+      if (this.locationBlockedReason.length === 0) {
+        this.locationBlockedReason = 'timeout';
+      }
       return;
     }
 

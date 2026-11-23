@@ -28,56 +28,180 @@ const LOCATION_PERMISSIONS: Permissions[] = [
   'ohos.permission.LOCATION'
 ];
 
-/** 申请定位权限；已授权时也返回 true（系统不会重复弹窗）。 */
-export async function requestLocationPermission(context: common.UIAbilityContext): Promise<boolean> {
+/**
+ * 定位授权结果。
+ *
+ * `approximate` 为 true 就**算拿到了定位权限**：鸿蒙的授权弹窗分「精确 / 大致」两档，
+ * 用户选「大致位置」时精确定位是「拒绝」状态 —— 以前这里要求两个都授予，
+ * 于是选了大致的用户被当成「拒绝了定位」，抽盒、导航、拍照验证全线报「拿不到位置」。
+ * 大致位置的误差通常是百米级到公里级，做 300–1600 米的盲盒偏粗，
+ * 但「明确告诉用户精度不够」远比「说你拒绝了权限」正确。
+ */
+export interface LocationAccess {
+  /** 大致位置是否可用（有它就够启动流程） */
+  approximate: boolean;
+  /** 精确位置是否可用（导航 / 拍照验证需要它才够准） */
+  precise: boolean;
+}
+
+/** 申请定位权限并返回两档各自的授权结果 */
+export async function requestLocationAccess(context: common.UIAbilityContext): Promise<LocationAccess> {
+  const access: LocationAccess = { approximate: false, precise: false };
   try {
     const atManager: abilityAccessCtrl.AtManager = abilityAccessCtrl.createAtManager();
     const result = await atManager.requestPermissionsFromUser(context, LOCATION_PERMISSIONS);
     if (result === undefined || result.authResults === undefined || result.authResults.length === 0) {
-      return false;
+      return access;
     }
-    let granted: boolean = true;
+    // authResults 与请求数组顺序对应：
+    //   [0] APPROXIMATELY_LOCATION，[1] LOCATION
+    // 但系统不保证一定按这个顺序返回，所以按 permissions 字段反查更稳。
+    const names: string[] = result.permissions === undefined ? [] : result.permissions;
     for (let i = 0; i < result.authResults.length; i++) {
       if (result.authResults[i] !== 0) {
-        granted = false;
+        continue;
+      }
+      const name: string = i < names.length ? names[i] : LOCATION_PERMISSIONS[i];
+      if (name === 'ohos.permission.LOCATION') {
+        access.precise = true;
+      } else {
+        access.approximate = true;
       }
     }
-    return granted;
   } catch (err) {
     const error = err as BusinessError;
-    return false;
+    return access;
   }
+  return access;
+}
+
+/**
+ * 申请定位权限；拿到任意一档都返回 true。
+ *
+ * ⚠️ 不要在这里要求「精确」：用户选了「大致位置」也是合法的授权，
+ * 由调用方按 `requestLocationAccess()` 的 precise 决定要不要更严的校验。
+ */
+export async function requestLocationPermission(context: common.UIAbilityContext): Promise<boolean> {
+  const access: LocationAccess = await requestLocationAccess(context);
+  return access.approximate || access.precise;
+}
+
+/**
+ * 定位结果的完整信息（UI 需要知道「这个点有多准 / 是不是缓存的」）。
+ */
+export interface LocationFix {
+  point: GeoPoint;
+  /** 精度半径（米）；0 = 系统没给 */
+  accuracyMeters: number;
+  /** true = 来自系统缓存（getLastLocation），不是刚算出来的 */
+  cached: boolean;
+}
+
+/** 一次单点定位的原始请求（不做任何兜底）；失败时抛出，由调用方决定怎么退 */
+function requestCurrentLocation(timeoutMs: number, precise: boolean): Promise<geoLocationManager.Location> {
+  return new Promise<geoLocationManager.Location>(
+    (resolve: (value: geoLocationManager.Location) => void, reject: (reason: Error) => void) => {
+      try {
+        const request: geoLocationManager.CurrentLocationRequest = {
+          priority: precise
+            ? geoLocationManager.LocationRequestPriority.ACCURACY
+            : geoLocationManager.LocationRequestPriority.FIRST_FIX,
+          scenario: geoLocationManager.LocationRequestScenario.UNSET,
+          // 不要设 50 —— maxAccuracy 不是「过滤」，而是告诉系统
+          // 「精度达不到就别返回」，室内/大致位置授权下会直接 3301200 失败。
+          // 精度判断交给调用方（WalkingFixFilter 仍然拦 50m 以上的点做导航）。
+          maxAccuracy: precise ? 100 : 200,
+          timeoutMs: timeoutMs
+        };
+        geoLocationManager.getCurrentLocation(request)
+          .then((location: geoLocationManager.Location) => {
+            resolve(location);
+          })
+          .catch((err: BusinessError) => {
+            const error = err as BusinessError;
+            reject(new Error(error === undefined || error.code === undefined
+              ? 'location_failed'
+              : 'location_failed_' + String(error.code)));
+          });
+      } catch (err) {
+        reject(new Error('location_exception'));
+      }
+    });
+}
+
+/** 读系统缓存的上一个定位点（同步、不等待）；没有就返回 undefined */
+function readCachedLocation(): geoLocationManager.Location | undefined {
+  try {
+    const last: geoLocationManager.Location = geoLocationManager.getLastLocation();
+    if (last === undefined || last === null) {
+      return undefined;
+    }
+    if (!isFinite(last.latitude) || !isFinite(last.longitude)) {
+      return undefined;
+    }
+    return last;
+  } catch (err) {
+    const error = err as BusinessError;
+    return undefined;
+  }
+}
+
+/**
+ * 三级取点（**不通就往下一级，绝不虚构坐标**）：
+ *   1. 快速首次定位（FIRST_FIX，通常 1–2 秒）
+ *   2. 精度优先再试一次（室内 / 高楼间 FIRST_FIX 经常超时）
+ *   3. 系统缓存的最后一个点（可能是几分钟前的，但对「120 米够不够近」仍可用）
+ *
+ * 为什么要有第 3 级：鸿蒙 CameraPicker 按隐私规格**永远不给照片写 GPS**，
+ * App 内拍照这条路径的到达验证完全依赖这个点。以前只做第 1 级、4 秒超时，
+ * 于是「相机路径永远提示没有位置信息」—— 其实是取点失败，不是照片没 GPS。
+ */
+export async function getLocationFix(timeoutMs: number): Promise<LocationFix> {
+  if (!geoLocationManager.isLocationEnabled()) {
+    throw new Error('location_disabled');
+  }
+
+  try {
+    const fresh: geoLocationManager.Location = await requestCurrentLocation(timeoutMs, false);
+    const fix: LocationFix = {
+      point: { latitude: fresh.latitude, longitude: fresh.longitude },
+      accuracyMeters: isFinite(fresh.accuracy) ? fresh.accuracy : 0,
+      cached: false
+    };
+    return fix;
+  } catch (err) {
+    // 落到第二级
+  }
+
+  try {
+    const precise: geoLocationManager.Location =
+      await requestCurrentLocation(Math.max(timeoutMs, 6000), true);
+    const fix: LocationFix = {
+      point: { latitude: precise.latitude, longitude: precise.longitude },
+      accuracyMeters: isFinite(precise.accuracy) ? precise.accuracy : 0,
+      cached: false
+    };
+    return fix;
+  } catch (err) {
+    // 落到第三级
+  }
+
+  const cached: geoLocationManager.Location | undefined = readCachedLocation();
+  if (cached !== undefined) {
+    const fix: LocationFix = {
+      point: { latitude: cached.latitude, longitude: cached.longitude },
+      accuracyMeters: isFinite(cached.accuracy) ? cached.accuracy : 0,
+      cached: true
+    };
+    return fix;
+  }
+  throw new Error('location_unavailable');
 }
 
 /** 单次定位（带超时）；失败时 reject，由调用方明确提示定位不可用。 */
 export function getCurrentLocationOnce(timeoutMs: number): Promise<GeoPoint> {
-  return new Promise<GeoPoint>((resolve: (value: GeoPoint) => void, reject: (reason: Error) => void) => {
-    try {
-      if (!geoLocationManager.isLocationEnabled()) {
-        reject(new Error('location_disabled'));
-        return;
-      }
-      const request: geoLocationManager.CurrentLocationRequest = {
-        priority: geoLocationManager.LocationRequestPriority.FIRST_FIX,
-        scenario: geoLocationManager.LocationRequestScenario.UNSET,
-        maxAccuracy: 100,
-        timeoutMs: timeoutMs
-      };
-      geoLocationManager.getCurrentLocation(request)
-        .then((location: geoLocationManager.Location) => {
-          const point: GeoPoint = {
-            latitude: location.latitude,
-            longitude: location.longitude
-          };
-          resolve(point);
-        })
-        .catch((err: BusinessError) => {
-          reject(new Error('location_failed'));
-        });
-    } catch (err) {
-      reject(new Error('location_exception'));
-    }
-  });
+  return getLocationFix(timeoutMs)
+    .then((fix: LocationFix): GeoPoint => fix.point);
 }
 
 /**

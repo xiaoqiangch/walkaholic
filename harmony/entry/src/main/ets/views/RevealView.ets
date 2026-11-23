@@ -19,7 +19,7 @@
 import { common } from '@kit.AbilityKit';
 import { getStore } from '../core/store';
 import { AppSnapshot, CollectResult, KeyValueStore } from '../core/contract';
-import { Achievement, FeedPost, GeoPoint, Place } from '../core/types';
+import { Achievement, FeedPost, GeoPoint, Place, QuestPhase } from '../core/types';
 import { HttpClient } from '../core/http';
 import { AccountConfig, isLoggedIn, readAccountConfig } from '../core/account';
 import { uploadCheckInPhoto } from '../core/surpriseRemote';
@@ -56,7 +56,11 @@ import {
 } from '../theme/Theme';
 import { clockHHMM } from '../components/Format';
 import { categorySymbol } from '../components/WaSymbol';
-import { getCurrentLocationOnce } from '../components/Location';
+import {
+  LocationFix,
+  getLocationFix,
+  requestLocationPermission
+} from '../components/Location';
 
 /** 拍照兜底定位的超时（毫秒）：太短拿不到点，太长用户会以为卡住 */
 const PHOTO_LOCATION_TIMEOUT_MS: number = 4000;
@@ -70,6 +74,15 @@ export struct RevealView {
 
   /** 收录完成 → 回图鉴（Index 切 tab） */
   onGoCards: () => void = () => {
+  };
+  /**
+   * 关闭揭晓（回上一屏）。
+   *
+   * 之前这个回调根本不存在，关闭按钮又只在「已收录」后才渲染 ——
+   * 于是「没通过拍照验证 / 不想收录」的用户被关在一个全屏层里出不去。
+   * 现在关闭按钮**永远在**：已收录 → 去图鉴；未收录 → 直接关掉这一层。
+   */
+  onClose: () => void = () => {
   };
   onChanged: () => void = () => {
   };
@@ -97,6 +110,8 @@ export struct RevealView {
   @State private checkInUri: string = '';
   @State private checkInRemotePath: string = '';
   @State private uploadingPhoto: boolean = false;
+  /** 正在取定位 / 等待拍照（这一步最长要几秒，必须让用户看到在做事情） */
+  @State private locating: boolean = false;
   /** 到达验证通过（照片带 GPS 且距离达标；演示地点也置 true） */
   @State private verifiedArrival: boolean = false;
   /** 验证失败：标题 */
@@ -133,6 +148,17 @@ export struct RevealView {
 
   private load(): void {
     this.snapshot = readSnapshot(this.snapshot);
+    // 这张卡是否已经收过：关掉揭晓再进来时必须还原成「去看看图鉴」，
+    // 否则按钮又变回「收进图鉴」，点下去只会得到一句「已经在图鉴里了」。
+    const placeID: string = this.currentPlaceID();
+    if (placeID.length > 0 && !this.hasCollected) {
+      for (let i = 0; i < this.snapshot.profile.cards.length; i += 1) {
+        if (this.snapshot.profile.cards[i].placeID === placeID) {
+          this.hasCollected = true;
+          break;
+        }
+      }
+    }
     this.loadExistingCheckInPhoto();
   }
 
@@ -156,6 +182,32 @@ export struct RevealView {
       if (photo.remote !== undefined) this.checkInRemotePath = photo.remote;
     } catch (err) {
       // 没有照片就是没有
+    }
+    this.restoreVerifiedFromCard(placeID);
+  }
+
+  /**
+   * 从已落盘的卡片恢复「已验证」状态。
+   *
+   * 场景：用户拍完照、验证通过，关掉揭晓页没收录，再进来 ——
+   * 照片还在（沙箱），但 verifiedArrival 是组件内状态，重建后归 false。
+   * 不恢复的话，用户会被要求「再拍一张」才能收录，尽管凭证早就存好了。
+   */
+  private restoreVerifiedFromCard(placeID: string): void {
+    if (this.verifiedArrival) return;
+    try {
+      const gps = getStore().cardPhotoGps(placeID);
+      if (gps === undefined) return;
+      this.verifiedArrival = true;
+      this.verifySource = 'photo';
+      this.verifiedGps = {
+        lat: gps.location.latitude,
+        lon: gps.location.longitude
+      };
+      this.verifiedDistance = gps.distanceMeters;
+      this.clearVerifyFail();
+    } catch (err) {
+      // 没有凭证就是没有
     }
   }
 
@@ -280,17 +332,39 @@ export struct RevealView {
 
   /** 拍一张 / 换一张：先落本机（离线也有），再尽力上传账号 */
   private async capturePhoto(fromCamera: boolean): Promise<void> {
-    if (this.uploadingPhoto) return;
-    const context: common.UIAbilityContext = getContext() as common.UIAbilityContext;
+    if (this.uploadingPhoto || this.locating) return;
+    const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
 
-    // 先取一次当前定位：相机路径（见下）需要它在照片没有 GPS 时兜底。
-    // 取不到就让 fallback 为空，验证会走「照片无坐标」的失败文案，绝不虚构坐标。
-    let devicePoint: GeoPoint | undefined = undefined;
+    // 相机路径需要「拍照那一刻的设备定位」兜底：鸿蒙 CameraPicker 按隐私规格
+    // **永远不给照片写 GPS**（华为官方 FAQ faqs-camera-58），相册路径才有 EXIF。
+    //
+    // ⚠️ 这里必须先**申请定位权限**。以前直接调 getCurrentLocationOnce：
+    // 本页从未申请过 LOCATION，系统直接抛 201（permission denied），
+    // 兜底坐标永远是 undefined —— 于是相机路径 100% 落在「照片没有位置信息」，
+    // 用户看到的就是「一直说没位置」，而真正的原因是根本没拿到定位。
+    let deviceFix: LocationFix | undefined = undefined;
     if (fromCamera) {
       try {
-        devicePoint = await getCurrentLocationOnce(PHOTO_LOCATION_TIMEOUT_MS);
+        const granted: boolean = await requestLocationPermission(context);
+        if (!granted) {
+          this.verifyFailTitle = '没有定位权限，没法确认你到了哪';
+          this.verifyFailHowto = '系统相机组件拍出来的照片本身不带坐标，只能靠拍照那一刻的定位。' +
+            '请允许「步迷」使用定位，然后重拍。';
+          this.verifyFailReason = 'denied';
+          this.verifyFailSteps = [
+            '点「重拍」',
+            '系统询问定位权限时选「允许」',
+            '如果之前拒绝过：设置 → 应用 → 步迷 → 权限 → 位置信息 → 允许'
+          ];
+          this.showToast('需要定位权限才能验证到达', 'info_circle');
+          return;
+        }
+        this.locating = true;
+        deviceFix = await getLocationFix(PHOTO_LOCATION_TIMEOUT_MS);
+        this.locating = false;
       } catch (err) {
-        devicePoint = undefined;
+        this.locating = false;
+        deviceFix = undefined;
       }
     }
 
@@ -306,14 +380,67 @@ export struct RevealView {
     this.checkInRemotePath = '';
     // 到达验证：照片 EXIF 优先；鸿蒙 CameraPicker 不写 GPS，相机路径用设备定位兜底
     let fallback: PhotoGpsPoint | undefined = undefined;
-    if (devicePoint !== undefined) {
+    if (deviceFix !== undefined) {
       const point: PhotoGpsPoint = {
-        lat: devicePoint.latitude,
-        lon: devicePoint.longitude
+        lat: deviceFix.point.latitude,
+        lon: deviceFix.point.longitude
       };
       fallback = point;
     }
+    if (fallback === undefined && fromCamera) {
+      // 最后一道兜底：旅程刚走过的真实定位（10 分钟内）。
+      // 这个点来自真实 GPS（导航用的就是它），不是虚构坐标；
+      // 比「直接判失败、让用户站在目的地却收不了卡」合理得多。
+      try {
+        const recent: GeoPoint | undefined = getStore().freshOrigin(10 * 60 * 1000);
+        if (recent !== undefined) {
+          const point: PhotoGpsPoint = {
+            lat: recent.latitude,
+            lon: recent.longitude
+          };
+          fallback = point;
+        }
+      } catch (err) {
+        // 没有就没有
+      }
+    }
     this.verifyArrivalPhoto(picked.uri, fallback);
+    // 二次机会：照片里没有坐标（截图、聊天软件转发、相册压缩）时，
+    // 再用「现在这一刻的设备定位」试一次。
+    //
+    // 为什么这样做：EXIF 丢失去用户完全不可控（转发一次就没了），
+    // 只报「这张照片没有位置信息」等于把用户挡在门外，而他确实就站在目的地。
+    // 兜底坐标来自真实 GPS，UI 会明确标注凭据来源，不冒充「照片坐标已验证」。
+    if (!this.verifiedArrival && this.isMissingGpsReason(this.verifyFailReason)) {
+      const second: PhotoGpsPoint | undefined = await this.tryDeviceFallback();
+      if (second !== undefined) {
+        this.verifyArrivalPhoto(picked.uri, second);
+        if (this.verifiedArrival) {
+          this.showToast('按你当前的位置验证通过', 'checkmark_circle');
+        }
+      }
+    }
+    // 相机路径拿不到坐标时的文案修正。
+    //
+    // CameraPicker 拍的照片**必然没有 EXIF GPS**（系统隐私规格），所以这张照片
+    // 「没有位置信息」是正常现象，真正失败的是「没取到设备定位」。
+    // 直接沿用相册路径的「这张照片没有位置信息」会把用户引去改相机设置 —— 改一百次也没用。
+    if (fromCamera && !this.verifiedArrival) {
+      const reason: string = this.verifyFailReason;
+      if (reason === 'noExif' || reason === 'noGpsTag' ||
+        reason === 'noData' || reason === 'incompleteGps' || reason === 'unreadableGps') {
+        this.verifyFailTitle = '没拿到你的实时位置';
+        this.verifyFailHowto = '这一步要用拍照那一刻的定位确认你在目的地 ' +
+          String(PHOTO_RADIUS_METERS) + ' 米内。这张照片来自系统相机组件，本身不带坐标。';
+        this.verifyFailReason = 'noFix';
+        this.verifyFailSteps = [
+          '确认手机顶部下拉的「位置信息 / 定位」开关是打开的',
+          '在室外或窗边再试一次（室内、地下车库经常定不到位）',
+          '回到这里点「重拍」，拍完看到「位置已验证」再收进图鉴',
+          '实在定不到：改用「换一张」，从相册选一张在目的地拍的照片'
+        ];
+      }
+    }
     const placeID: string = this.currentPlaceID();
     if (placeID.length > 0) {
       try {
@@ -324,6 +451,54 @@ export struct RevealView {
     }
     this.onChanged();
     this.uploadCheckInPhotoIfPossible(picked.uri, placeID);
+  }
+
+  /** 这些失败原因说明「没读到坐标」，而不是「坐标太远」—— 值得用设备定位再试一次 */
+  private isMissingGpsReason(reason: string): boolean {
+    return reason === 'noExif' || reason === 'noGpsTag' || reason === 'noData' ||
+      reason === 'incompleteGps' || reason === 'unreadableGps' ||
+      reason === 'pngNoExif' || reason === 'notImage' || reason === 'brokenExif';
+  }
+
+  /**
+   * 用当前设备定位兜底（真实 GPS，不虚构）。
+   *
+   * 先申请权限再取点；取不到返回 undefined，绝不编造坐标。
+   */
+  private async tryDeviceFallback(): Promise<PhotoGpsPoint | undefined> {
+    const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+    try {
+      const granted: boolean = await requestLocationPermission(context);
+      if (!granted) {
+        return undefined;
+      }
+      if (!this.locating) {
+        this.locating = true;
+      }
+      const fix: LocationFix = await getLocationFix(PHOTO_LOCATION_TIMEOUT_MS);
+      this.locating = false;
+      const point: PhotoGpsPoint = {
+        lat: fix.point.latitude,
+        lon: fix.point.longitude
+      };
+      return point;
+    } catch (err) {
+      this.locating = false;
+      // 取不到就退回「刚刚导航用过的真实定位」（10 分钟内）
+      try {
+        const recent: GeoPoint | undefined = getStore().freshOrigin(10 * 60 * 1000);
+        if (recent !== undefined) {
+          const point: PhotoGpsPoint = {
+            lat: recent.latitude,
+            lon: recent.longitude
+          };
+          return point;
+        }
+      } catch (inner) {
+        // 没有就没有
+      }
+      return undefined;
+    }
   }
 
   private async uploadCheckInPhotoIfPossible(uri: string, placeID: string): Promise<void> {
@@ -451,6 +626,25 @@ export struct RevealView {
     return '位置已验证 · 照片就在目的地附近';
   }
 
+  /** 「收进图鉴」是否被门禁拦住（真实地点 + 还没通过验证） */
+  private collectBlocked(): boolean {
+    if (this.hasCollected) {
+      return false;
+    }
+    return this.requiresPhotoVerification() && !this.verifiedArrival;
+  }
+
+  /** 拦住了要说清下一步该干什么（一句话，放在按钮上方） */
+  private collectBlockedText(): string {
+    if (this.checkInUri.length === 0) {
+      return '先拍一张现场照片，验证你在目的地 ' + String(PHOTO_RADIUS_METERS) + ' 米内';
+    }
+    if (this.verifyFailTitle.length > 0) {
+      return this.verifyFailTitle + ' · 点上面的「重拍」再试';
+    }
+    return '这张照片还不能算「到了」 · 走近一点重拍';
+  }
+
   /** 到达实拍区块（与 iOS RevealView.checkInPhotoSection 同语义） */
   @Builder
   checkInPhotoSection() {
@@ -520,11 +714,11 @@ export struct RevealView {
         Row({ space: 10 }) {
           Button() {
             Row({ space: 6 }) {
-              SymbolGlyph($r('sys.symbol.pin'))
+              SymbolGlyph($r(this.locating ? 'sys.symbol.clock' : 'sys.symbol.pin'))
                 .fontSize(WAFont.caption)
                 .fontColor([WAColor.ink])
                 .renderingStrategy(SymbolRenderingStrategy.SINGLE)
-              Text('拍一张 · 记下这一刻')
+              Text(this.locating ? '正在定位…' : '拍一张 · 记下这一刻')
                 .fontSize(WAFont.caption)
                 .fontWeight(FontWeight.Medium)
                 .fontColor(WAColor.ink)
@@ -541,6 +735,7 @@ export struct RevealView {
             radius: WASize.cardRadiusSm,
             style: BorderStyle.Dashed
           })
+          .enabled(!this.locating)
           .onClick(() => {
             this.capturePhoto(true);
           })
@@ -617,6 +812,16 @@ export struct RevealView {
   // ============================================================
 
   private playOpening(): void {
+    // 已经揭晓过（用户关掉又回来）：不要再放一遍开盒动画，
+    // 直接落到卡片 —— 同一张卡放两次盒子会让人以为又抽到了一次。
+    const phase: QuestPhase | undefined = this.snapshot.session === undefined
+      ? undefined
+      : this.snapshot.session.phase;
+    if (phase === QuestPhase.Revealed || phase === QuestPhase.Collected) {
+      this.showCard = true;
+      return;
+    }
+
     // 盒子抖动 600ms（±6° 三次）
     animateTo({
       duration: 100,
@@ -680,6 +885,20 @@ export struct RevealView {
   // 交互
   // ============================================================
 
+  /**
+   * 关闭揭晓层。
+   *
+   * 已收录 → 去图鉴（用户期待看到刚收的卡）；未收录 → 直接退出这一层，
+   * 旅程仍在 store 里，从首页「继续」还能回来，不会丢进度。
+   */
+  private closeStage(): void {
+    if (this.hasCollected) {
+      this.onGoCards();
+      return;
+    }
+    this.onClose();
+  }
+
   private collectCard(): void {
     if (this.collecting) {
       return;
@@ -696,6 +915,22 @@ export struct RevealView {
         this.verifyFailHowto = '照片里的位置要和这里一致（' + String(PHOTO_RADIUS_METERS) +
           ' 米内），这样才算你真的来过。';
         this.verifyFailReason = 'needPhoto';
+        this.verifyFailSteps = [
+          '点上面的「拍一张 · 记下这一刻」',
+          '允许定位（照片验证要用拍照那一刻的位置）',
+          '拍完看到「位置已验证」再点收进图鉴'
+        ];
+        this.showToast('先拍一张带位置的现场照片', 'info_circle');
+      } else {
+        // 已经有照片但没通过验证：**必须给出可操作的提示**。
+        // 以前这里直接 return —— 用户点了按钮毫无反应，也没有任何解释。
+        if (this.verifyFailTitle.length === 0) {
+          this.verifyFailTitle = '这张照片还不能算「到了」';
+          this.verifyFailHowto = '照片里的位置要在目的地 ' + String(PHOTO_RADIUS_METERS) +
+            ' 米内。走近一点重拍，或点上面的「重拍」再试一次。';
+          this.verifyFailReason = 'needPhoto';
+        }
+        this.showToast(this.verifyFailTitle, 'info_circle');
       }
       return;
     }
@@ -871,22 +1106,21 @@ export struct RevealView {
         .fontColor(WAColor.creamOnStage)
 
       Blank()
-
-      if (this.hasCollected) {
-        Stack({ alignContent: Alignment.Center }) {
-          SymbolGlyph($r('sys.symbol.xmark'))
-            .fontSize(WAFont.caption)
-            .fontColor([WAColor.creamOnStageDim])
-            .renderingStrategy(SymbolRenderingStrategy.SINGLE)
-        }
-        .width(30)
-        .height(30)
-        .backgroundColor(WAColor.stageClose)
-        .borderRadius(15)
-        .onClick(() => {
-          this.onGoCards();
-          })
+      // 关闭按钮**必须永远在**（全屏覆盖层没有系统的下滑关闭，
+      // 之前只在 hasCollected 时才渲染 → 未收录的用户被彻底关住）。
+      Stack({ alignContent: Alignment.Center }) {
+        SymbolGlyph($r('sys.symbol.xmark'))
+          .fontSize(WAFont.caption)
+          .fontColor([WAColor.creamOnStage])
+          .renderingStrategy(SymbolRenderingStrategy.SINGLE)
       }
+      .width(32)
+      .height(32)
+      .backgroundColor(WAColor.stageCloseBorder)
+      .borderRadius(16)
+      .onClick(() => {
+        this.closeStage();
+      })
     }
     .width('100%')
     .height(46)
@@ -1053,6 +1287,26 @@ export struct RevealView {
       }
       .margin({ top: 12 })
 
+      // 门禁提示就贴在按钮上方：
+      // 照片验证区块在卡片上半部分，用户滚到底部点按钮时是看不到的，
+      // 点了没反应会以为「程序卡死」。这里把「为什么还不能收」放在手指边上。
+      if (this.collectBlocked()) {
+        Row({ space: 6 }) {
+          SymbolGlyph($r('sys.symbol.exclamationmark_circle'))
+            .fontSize(WAFont.microSm)
+            .fontColor([WAColor.ember])
+            .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+          Text(this.collectBlockedText())
+            .fontSize(WAFont.microSm)
+            .fontColor(WAColor.ember)
+            .lineHeight(17)
+            .layoutWeight(1)
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Top)
+        .padding({ top: 10 })
+      }
+
       Row({ space: 8 }) {
         Button() {
           Text(this.hasCollected ? '去看看图鉴' : '收进图鉴')
@@ -1158,17 +1412,28 @@ export struct RevealView {
 
   @Builder
   emptyStage() {
-    Column({ space: 10 }) {
-      Text('今晚的盲盒还没准备好。')
-        .fontSize(WAFont.body)
-        .fontColor(WAColor.creamOnStage)
-      Text('再走一会儿。')
-        .fontSize(WAFont.caption)
-        .fontColor(WAColor.creamOnStageDim)
+    Stack({ alignContent: Alignment.TopStart }) {
+      Column({ space: 10 }) {
+        Text('今晚的盲盒还没准备好。')
+          .fontSize(WAFont.body)
+          .fontColor(WAColor.creamOnStage)
+        Text('再走一会儿。')
+          .fontSize(WAFont.caption)
+          .fontColor(WAColor.creamOnStageDim)
+      }
+      .width('100%')
+      .height('100%')
+      .justifyContent(FlexAlign.Center)
+
+      // 这里同样需要出口：地点数据缺失时这一屏也是全屏层，
+      // 没有关闭按钮同样是「关不掉」的死路。
+      Column({ space: 0 }) {
+        this.stageBar()
+      }
+      .width('100%')
     }
     .width('100%')
     .height('100%')
-    .justifyContent(FlexAlign.Center)
     .backgroundColor(WAColor.stage)
   }
 
@@ -1205,6 +1470,7 @@ export struct RevealView {
       .height('100%')
       .padding({ left: WASize.pagePadding, right: WASize.pagePadding, bottom: 40 })
       .justifyContent(FlexAlign.End)
+      // 只让提示条本身可点，其余区域继续透传给下面的卡片 / 按钮。
       .hitTestBehavior(HitTestMode.None)
     }
     .width('100%')
