@@ -71,6 +71,8 @@ const PARTICLE_INDEXES: number[] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 export struct RevealView {
   @Prop winWidth: number = 400;
   @Prop winHeight: number = 800;
+  /** 从导航页 10 米到达对话框点击「立即拍照打卡」进入时，直接展开卡片并自动拉起相机打卡 */
+  @Prop autoCheckIn: boolean = false;
 
   /** 收录完成 → 回图鉴（Index 切 tab） */
   onGoCards: () => void = () => {
@@ -812,6 +814,18 @@ export struct RevealView {
   // ============================================================
 
   private playOpening(): void {
+    if (this.autoCheckIn) {
+      getStore().confirmReveal();
+      this.load();
+      this.showCard = true;
+      if (!this.verifiedArrival && this.checkInUri.length === 0) {
+        this.stageTimers.push(setTimeout(() => {
+          this.capturePhoto(true);
+        }, 120));
+      }
+      return;
+    }
+
     // 已经揭晓过（用户关掉又回来）：不要再放一遍开盒动画，
     // 直接落到卡片 —— 同一张卡放两次盒子会让人以为又抽到了一次。
     const phase: QuestPhase | undefined = this.snapshot.session === undefined

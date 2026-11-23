@@ -118,6 +118,8 @@ struct Index {
   /** 疆域分享卡：统计与爵位的 JSON 快照（打开时算一次，避免面板里反复算） */
   @State private territoryStatsJson: string = '';
   @State private territoryRankJson: string = '';
+  /** 从 10 米到达对话框点击「立即拍照打卡」进入揭晓页时，自动展开卡片并调起相机打卡 */
+  @State private revealAutoCheckIn: boolean = false;
 
   aboutToAppear(): void {
     // 地图朝向开关：AppStorage 全局共享 + 持久化（重启后保持）
@@ -559,7 +561,8 @@ struct Index {
     this.refresh();
   }
 
-  private openReveal(): void {
+  private openReveal(autoCheckIn: boolean = false): void {
+    this.revealAutoCheckIn = autoCheckIn;
     this.activeOverlay = OVERLAY_REVEAL;
     this.refresh();
   }
@@ -975,7 +978,10 @@ struct Index {
             this.closeJourney();
           },
           onArrived: () => {
-            this.openReveal();
+            this.openReveal(false);
+          },
+          onArriveCheckIn: () => {
+            this.openReveal(true);
           },
           onChanged: () => {
             this.refresh();
@@ -990,14 +996,17 @@ struct Index {
         RevealView({
           winWidth: this.winWidth,
           winHeight: this.winHeight,
+          autoCheckIn: this.revealAutoCheckIn,
           http: this.http,
           kv: this.kv,
           onGoCards: () => {
+            this.revealAutoCheckIn = false;
             this.goCards();
           },
           onClose: () => {
             // 未收录就关掉揭晓层：回到旅程页（iOS 里揭晓是盖在旅程上的
             // fullScreenCover，关掉就是回旅程）。旅程已结束时才退回首页。
+            this.revealAutoCheckIn = false;
             this.activeOverlay = this.hasActiveQuest() ? OVERLAY_JOURNEY : OVERLAY_NONE;
             this.refresh();
           },

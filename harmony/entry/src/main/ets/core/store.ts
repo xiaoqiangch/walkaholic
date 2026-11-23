@@ -641,7 +641,11 @@ export class WalkaholicStore implements WalkaholicStoreApi {
   updateLocation(distanceMeters: number, bearingDegrees?: number): QuestEvent[] {
     const session: QuestSession | undefined = this.sessionValue;
     if (session === undefined) return [];
-    if (session.phase !== QuestPhase.Walking) return [];
+    if (session.phase !== QuestPhase.Walking &&
+      session.phase !== QuestPhase.Arrived &&
+      session.phase !== QuestPhase.Revealed) {
+      return [];
+    }
     const update: SessionUpdate = updateGeo(session, distanceMeters, bearingDegrees);
     this.sessionValue = update.session;
     this.persist(Date.now());
@@ -651,7 +655,12 @@ export class WalkaholicStore implements WalkaholicStoreApi {
   updateGeoLocation(origin: GeoPoint): QuestEvent[] {
     this.setLastKnownOrigin(origin);
     const session: QuestSession | undefined = this.sessionValue;
-    if (session === undefined || session.phase !== QuestPhase.Walking) return [];
+    if (session === undefined) return [];
+    if (session.phase !== QuestPhase.Walking &&
+      session.phase !== QuestPhase.Arrived &&
+      session.phase !== QuestPhase.Revealed) {
+      return [];
+    }
     if (session.target === undefined) return [];
     const remaining: number = distanceBetween(origin, session.target);
     const bearingDegrees: number = bearingBetween(origin, session.target);

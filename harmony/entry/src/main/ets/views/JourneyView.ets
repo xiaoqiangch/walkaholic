@@ -75,6 +75,9 @@ const CLUE_INDEXES: number[] = [0, 1, 2];
  */
 const WATCH_STALL_MS: number = 12000;
 
+/** 导航模式下自动弹出「到达目的地 · 邀请拍照打卡」对话框的距离阈值（米） */
+const NAVIGATION_ARRIVE_DIALOG_METERS: number = 10;
+
 interface UpcomingManeuver {
   maneuver: RouteManeuver;
   distance: number;
@@ -91,6 +94,9 @@ export struct JourneyView {
   };
   /** 到达：由 Index 打开揭晓全屏 */
   onArrived: () => void = () => {
+  };
+  /** 到达 10 米对话框里点击「立即拍照打卡」：直接打开揭晓页并调起拍照打卡 */
+  onArriveCheckIn: () => void = () => {
   };
   /** 任何 store 状态变化后通知 Index 重读 */
   onChanged: () => void = () => {
@@ -122,6 +128,8 @@ export struct JourneyView {
   @State private parkedOverride: boolean = false;
   /** 还离很远就点「已停车」→ 先确认一次 */
   @State private confirmParkedFar: boolean = false;
+  /** 到达目的地 10 米范围内自动弹出的「拍照打卡」邀请对话框 */
+  @State private showArrivalDialog: boolean = false;
 
   private timerId: number = -1;
   /** 定位停滞检测的定时器（-1 = 没有在等） */
@@ -130,6 +138,8 @@ export struct JourneyView {
   private compass: CompassWatcher | undefined = undefined;
   /** 上次看到的会话 id（换了一趟旅程要清掉「已停车」标记） */
   private lastSessionID: string = '';
+  /** 已经自动弹过 10 米到达对话框的会话 id（同一趟旅程只自动弹一次，避免关掉后反复骚扰） */
+  private arrivalDialogSessionID: string = '';
   @State private heading: number = -1;
   @StorageLink('mapFollowsHeading') private mapFollowsHeading: boolean = true;
   @State private compassHeading: number = -1;
@@ -151,17 +161,12 @@ export struct JourneyView {
     if (session === undefined) {
       return;
     }
-    if (session.phase === QuestPhase.Walking && !this.snapshot.demoMode) {
+    if (session.phase !== QuestPhase.Collected && !this.snapshot.demoMode) {
       this.startTracking().catch(() => {
         this.watchFailed = true;
       });
     }
-    if (session.phase === QuestPhase.Arrived) {
-      this.beginArrival();
-    }
-    // 已经揭晓过（用户关掉了揭晓页、还没收录）：不自动弹卡片，
-    // 只把底部按钮变成「打开这张卡」（见 actionSection）。自动弹会变成
-    // 「我关掉了，它又自己回来」，用户没得选。
+    this.checkArrivalDialog();
   }
 
   aboutToDisappear(): void {
@@ -186,12 +191,15 @@ export struct JourneyView {
 
   private load(): void {
     this.snapshot = readSnapshot(this.snapshot);
-    // 换了另一趟旅程：手动停车标记不应该带过去（与 iOS onChange(of: session?.id) 一致）
+    // 换了另一趟旅程：手动停车标记与到达弹窗标记都清掉
     const session: QuestSession | undefined = this.session();
     const currentID: string = session === undefined ? '' : session.id;
     if (this.lastSessionID.length > 0 && currentID !== this.lastSessionID) {
       this.parkedOverride = false;
       this.confirmParkedFar = false;
+      this.showArrivalDialog = false;
+      this.arrivalDialogSessionID = '';
+      this.arrivalHandled = false;
     }
     this.lastSessionID = currentID;
   }
@@ -383,32 +391,81 @@ export struct JourneyView {
   }
 
   // ============================================================
-  // 事件 / 到达
+  // 事件 / 到达（10 米范围内自动弹对话框邀请拍照打卡）
   // ============================================================
 
+  /** 当前是否已进入目的地 10 米范围内（直线距离 ≤ 10m 或路线剩余距离 ≤ 10m） */
+  private isWithinTenMeters(): boolean {
+    const session: QuestSession | undefined = this.session();
+    if (session === undefined || session.totalMeters <= 0) return false;
+    if (session.phase === QuestPhase.Collected) return false;
+    if (this.isDriveSegment()) return false;
+    if (this.remainingMeters() <= NAVIGATION_ARRIVE_DIALOG_METERS) {
+      return true;
+    }
+    const progress: RouteProgress | undefined = this.routeProgress();
+    if (progress !== undefined && progress.offRoute <= 45 &&
+      this.routeRemaining(progress) <= NAVIGATION_ARRIVE_DIALOG_METERS) {
+      return true;
+    }
+    return false;
+  }
+
+  /** 进入目的地 10 米范围内时，自动弹出到达对话框，邀请用户拍照打卡 */
+  private checkArrivalDialog(): void {
+    const session: QuestSession | undefined = this.session();
+    if (session === undefined) return;
+    if (!this.isWithinTenMeters()) return;
+    if (session.phase === QuestPhase.Walking) {
+      getStore().arriveNow();
+      this.load();
+      this.onChanged();
+    }
+    if (this.arrivalDialogSessionID === session.id) return;
+    this.arrivalDialogSessionID = session.id;
+    this.showArrivalDialog = true;
+  }
+
+  /** 对话框中点击「立即拍照打卡」：确保到达态并直接进入揭晓页调起相机打卡 */
+  private confirmArrivalCheckIn(): void {
+    this.showArrivalDialog = false;
+    const session: QuestSession | undefined = this.session();
+    if (session !== undefined && session.phase === QuestPhase.Walking) {
+      getStore().arriveNow();
+      this.load();
+      this.onChanged();
+    }
+    this.onArriveCheckIn();
+  }
+
   private handleEvents(events: QuestEvent[]): void {
+    if (this.isWithinTenMeters()) {
+      this.checkArrivalDialog();
+      return;
+    }
+    // 真实导航模式下，只有进入 10 米范围内才自动弹出到达拍照打卡对话框；
+    // 30 米时 store 进入 Arrived 态（底部按钮可用），但继续保持定位与导航直到 ≤10 米。
+    if (this.isRealMode()) {
+      return;
+    }
     for (let i = 0; i < events.length; i++) {
       const event: QuestEvent = events[i];
       if (event.type === QuestEventType.Arrived) {
-        this.beginArrival();
+        const session: QuestSession | undefined = this.session();
+        if (session !== undefined && this.arrivalDialogSessionID !== session.id) {
+          this.arrivalDialogSessionID = session.id;
+          this.showArrivalDialog = true;
+        }
       }
-    }
-    const session: QuestSession | undefined = this.session();
-    if (session !== undefined && session.phase === QuestPhase.Arrived && !this.arrivalHandled) {
-      this.beginArrival();
     }
   }
 
   private async beginArrival(): Promise<void> {
     if (this.arrivalHandled) {
+      this.onArrived();
       return;
     }
     this.arrivalHandled = true;
-
-    if (this.watcher !== undefined) {
-      this.watcher.stop();
-      this.watcher = undefined;
-    }
 
     animateTo({ duration: 220, curve: Curve.EaseOut }, () => {
       this.flashOpacity = 1;
@@ -442,10 +499,10 @@ export struct JourneyView {
   }
 
   private arriveNow(): void {
-    const events: QuestEvent[] = getStore().arriveNow();
+    getStore().arriveNow();
     this.load();
     this.onChanged();
-    this.handleEvents(events);
+    this.beginArrival();
   }
 
   private togglePause(): void {
@@ -1555,6 +1612,113 @@ export struct JourneyView {
           .padding(18)
           .backgroundColor(WAColor.paper)
           .borderRadius(WASize.cardRadius)
+          .margin({ left: WASize.pagePadding, right: WASize.pagePadding })
+        }
+        .width('100%')
+        .height('100%')
+      }
+
+      // 到达目的地 10 米范围内：自动弹出到达对话框，邀请用户拍照打卡
+      if (this.showArrivalDialog) {
+        Stack({ alignContent: Alignment.Center }) {
+          Column()
+            .width('100%')
+            .height('100%')
+            .backgroundColor(WAColor.scrim)
+            .onClick(() => {
+              this.showArrivalDialog = false;
+            })
+
+          Column({ space: 14 }) {
+            Row({ space: 10 }) {
+              Stack({ alignContent: Alignment.Center }) {
+                Circle()
+                  .width(40)
+                  .height(40)
+                  .fill(WAColor.amberSoft)
+                SymbolGlyph($r('sys.symbol.pin'))
+                  .fontSize(20)
+                  .fontColor([WAColor.amber])
+                  .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+              }
+
+              Column({ space: 2 }) {
+                Text('已到达目的地 · 10 米范围内')
+                  .fontSize(WAFont.micro)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(WAColor.amber)
+                Text('到了，拍照打卡吧！')
+                  .fontSize(WAFont.titleSm)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor(WAColor.ink)
+              }
+              .alignItems(HorizontalAlign.Start)
+              .layoutWeight(1)
+            }
+            .width('100%')
+            .alignItems(VerticalAlign.Center)
+
+            Text('你已进入目的地 10 米范围内。现在拍一张现场照片完成打卡验证，即可揭晓盲盒并把这张地点卡收进你的城市图鉴。')
+              .fontSize(WAFont.caption)
+              .fontColor(WAColor.ink2)
+              .lineHeight(20)
+              .width('100%')
+
+            Button() {
+              Row({ space: 6 }) {
+                SymbolGlyph($r('sys.symbol.pin'))
+                  .fontSize(WAFont.caption)
+                  .fontColor([WAColor.iconOnBrand])
+                  .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+                Text('立即拍照打卡')
+                  .fontSize(WAFont.bodySm)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(WAColor.iconOnBrand)
+              }
+            }
+            .type(ButtonType.Capsule)
+            .height(44)
+            .width('100%')
+            .backgroundColor(WAColor.amber)
+            .onClick(() => {
+              this.confirmArrivalCheckIn();
+            })
+
+            Button() {
+              Text('先看看盲盒卡片')
+                .fontSize(WAFont.caption)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(WAColor.ink)
+            }
+            .type(ButtonType.Capsule)
+            .height(40)
+            .width('100%')
+            .backgroundColor(WAColor.paper2)
+            .onClick(() => {
+              this.showArrivalDialog = false;
+              this.beginArrival();
+            })
+
+            Button() {
+              Text('稍后再拍')
+                .fontSize(WAFont.microSm)
+                .fontColor(WAColor.ink3)
+            }
+            .type(ButtonType.Capsule)
+            .height(32)
+            .width('100%')
+            .backgroundColor('#00000000')
+            .onClick(() => {
+              this.showArrivalDialog = false;
+            })
+          }
+          .width('100%')
+          .constraintSize({ maxWidth: 380 })
+          .padding(20)
+          .backgroundColor(WAColor.paper)
+          .borderRadius(WASize.panelRadius)
+          .border({ width: 1, color: WAColor.line, radius: WASize.panelRadius })
+          .shadow({ radius: 24, color: WAColor.shadowLift, offsetX: 0, offsetY: 10 })
           .margin({ left: WASize.pagePadding, right: WASize.pagePadding })
         }
         .width('100%')

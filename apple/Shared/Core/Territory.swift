@@ -116,7 +116,7 @@ public enum TerritoryMath {
 
     /// 有真实坐标 + 真实来源的地点才计入疆域
     public static let realSources: Set<String> = [
-        "curated", "osm", "wikipedia", "amap", "baidu", "wiki"
+        "curated", "osm", "wikipedia", "amap", "baidu", "wiki", "apple"
     ]
 
     // MARK: 疆域统计

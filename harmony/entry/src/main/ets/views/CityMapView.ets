@@ -57,6 +57,8 @@ import {
   projectToCanvas,
   staticMapUrl,
   panViewport,
+  worldPixel,
+  worldPixelToLatLon,
   zoomViewportAtPoint
 } from '../core/staticmap';
 
@@ -66,6 +68,10 @@ const WINDOW_RECENT: string = 'recent';
 
 /** 画布高度（vp） */
 const MAP_HEIGHT: number = 380;
+/** 允许前端继续放大到 19 级（高德底图最多到 17 级，17→19 级由 17 级高清底图无损放大 1–4 倍） */
+const MAX_DISPLAY_ZOOM: number = 19;
+/** 初始自动框选的最大缩放级别（避免只有 1–2 个近距离点时一进来就顶到 17 级上限，留出放大空间） */
+const FIT_MAX_INITIAL_ZOOM: number = 15;
 /** 单条线最多画多少个点（画布画几千个点会卡） */
 const MAX_POINTS_PER_DAY: number = 400;
 /** 最多画多少天（更早的合并到「更早」里） */
@@ -123,27 +129,28 @@ export struct CityMapView {
   @State private snapshot: AppSnapshot = emptySnapshot();
   @State private window: string = WINDOW_ALL;
   @State private canvasWidth: number = 320;
-  /** 底图 URL（有 Key 才有；变化时 Image 自动重载） */
+  /** 当前请求中的底图 URL（有 Key 才有） */
   @State private basemapUrl: string = '';
+  /** 已解码完成的底图 URL（双缓冲：新底图未下载完成前保持旧底图并按当前视窗实时缩放/平移） */
+  @State private loadedBasemapUrl: string = '';
+  /** 已加载底图相对当前视窗的实时缩放与位移（保证缩放/拖动时底图与地点零延迟同步随动） */
+  @State private basemapScale: number = 1;
+  @State private basemapOffsetX: number = 0;
+  @State private basemapOffsetY: number = 0;
   /** 是否已经拿到地图 Key */
   @State private hasKey: boolean = false;
   /** 当前视窗（中心 + 缩放），缩放/拖动都改它 */
-  @State private zoom: number = 16;
+  @State private zoom: number = 15;
   @State private centerLat: number = 0;
   @State private centerLon: number = 0;
   /** 比例尺文案 */
   @State private scaleText: string = '';
-  /** 拖动中的实时位移（底图与标记一起平移，松手才提交） */
-  @State private panOffsetX: number = 0;
-  @State private panOffsetY: number = 0;
-  /** 双指缩放预览：底图缩放、POI/轨迹按新视窗重投影 */
+  /** 手指正在地图区域内交互（锁定外层 Scroll，防止拖动地图变成拖动整页） */
+  @State private mapInteracting: boolean = false;
+  /** 双指缩放激活态 */
   @State private pinchActive: boolean = false;
-  @State private pinchScale: number = 1;
   @State private pinchCenterX: number = 0;
   @State private pinchCenterY: number = 0;
-  @State private previewZoom: number = 16;
-  @State private previewCenterLat: number = 0;
-  @State private previewCenterLon: number = 0;
   /** 屏幕上要显示的地点文字标签 */
   @State private labels: PlaceLabel[] = [];
   /** 疆域统计（页面刷新时重算） */
@@ -161,15 +168,19 @@ export struct CityMapView {
   /** 是否被点数门槛卡住（docs §三） */
   @State private territoryCapped: boolean = false;
   /** 是否需要「重新框选」（用户手动缩放/拖动后就不再自动复位） */
-  private userMoved: boolean = false;
+  @State private userMoved: boolean = false;
   /** 高德 Key（拉不到就退化为手绘网格） */
   private mapKey: string = '';
-  /** 拖动起点（windowX/Y；用绝对值算位移，不依赖元素自身位置） */
-  private dragStartX: number = 0;
-  private dragStartY: number = 0;
-  private pinchStartViewport: MapViewport = new MapViewport(0, 0, 16);
-  private pinchStartZoom: number = 16;
+  /** 单指拖动起点视窗 */
+  private panStartViewport: MapViewport = new MapViewport(0, 0, 15);
+  private panActive: boolean = false;
+  private pinchStartViewport: MapViewport = new MapViewport(0, 0, 15);
+  private pinchStartZoom: number = 15;
   private multiTouchActive: boolean = false;
+  /** 已加载底图对应的视窗与请求中底图对应的视窗 */
+  private loadedViewport: MapViewport = new MapViewport(0, 0, 15);
+  private pendingViewport: MapViewport = new MapViewport(0, 0, 15);
+  private pageScroller: Scroller = new Scroller();
 
   /** 平台能力（拉地图 Key） */
   http: HttpClient | undefined = undefined;
@@ -383,9 +394,6 @@ export struct CityMapView {
 
   /** 当前视窗（中心为 GCJ-02，因为高德底图吃这个） */
   private viewport(): MapViewport {
-    if (this.pinchActive) {
-      return new MapViewport(this.previewCenterLat, this.previewCenterLon, this.previewZoom);
-    }
     return new MapViewport(this.centerLat, this.centerLon, this.zoom);
   }
 
@@ -397,29 +405,29 @@ export struct CityMapView {
     const bounds: number[] = this.computeBounds();
     if (bounds.length === 0) {
       this.basemapUrl = '';
+      this.loadedBasemapUrl = '';
       return;
     }
-    const centerWgs = wgs84ToGcj02(
-      (bounds[0] + bounds[1]) / 2,
-      (bounds[2] + bounds[3]) / 2
-    );
-    this.centerLat = centerWgs.latitude;
-    this.centerLon = centerWgs.longitude;
-    // 用 GCJ 后的范围算缩放（偏移量几十米，对选档没影响）
-    const zoom: number = fitZoom(
-      bounds[0], bounds[1], bounds[2], bounds[3],
+    const minGcj: GeoPoint = wgs84ToGcj02(bounds[0], bounds[2]);
+    const maxGcj: GeoPoint = wgs84ToGcj02(bounds[1], bounds[3]);
+    this.centerLat = (minGcj.latitude + maxGcj.latitude) / 2;
+    this.centerLon = (minGcj.longitude + maxGcj.longitude) / 2;
+    const fitted: number = fitZoom(
+      minGcj.latitude, maxGcj.latitude, minGcj.longitude, maxGcj.longitude,
       this.canvasWidth, MAP_HEIGHT, 44
     );
-    this.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom));
+    // 初始框选上限到 15 级（约 1 公里视野），给单点或紧邻点留出继续放大的空间
+    this.zoom = Math.max(MIN_ZOOM, Math.min(FIT_MAX_INITIAL_ZOOM, fitted));
     this.userMoved = false;
     this.refreshBasemap();
   }
 
-  /** 重算底图 URL + 比例尺文案，然后重画 */
-  private refreshBasemap(): void {
+  /** 更新比例尺文案 + 已加载底图的实时墨卡托对齐变换 */
+  private syncScaleAndTransform(): void {
     if (this.centerLat === 0 && this.centerLon === 0) {
-      this.basemapUrl = '';
-      this.draw();
+      this.basemapScale = 1;
+      this.basemapOffsetX = 0;
+      this.basemapOffsetY = 0;
       return;
     }
     const mpp: number = metersPerPixel(this.centerLat, this.zoom);
@@ -428,98 +436,182 @@ export struct CityMapView {
       ? (metersAcross / 1000).toFixed(1) + ' 公里宽'
       : Math.round(metersAcross) + ' 米宽';
 
+    if (this.loadedBasemapUrl.length === 0 ||
+      (this.loadedViewport.centerLat === 0 && this.loadedViewport.centerLon === 0)) {
+      this.basemapScale = 1;
+      this.basemapOffsetX = 0;
+      this.basemapOffsetY = 0;
+      return;
+    }
+    const current: MapViewport = this.viewport();
+    const scale: number = Math.pow(2, current.zoom - this.loadedViewport.zoom);
+    const loadedCenterInCurrent: MapPixel = worldPixel(
+      this.loadedViewport.centerLat,
+      this.loadedViewport.centerLon,
+      current.zoom
+    );
+    const currentCenter: MapPixel = worldPixel(
+      current.centerLat,
+      current.centerLon,
+      current.zoom
+    );
+    this.basemapScale = scale;
+    this.basemapOffsetX = loadedCenterInCurrent.x - currentCenter.x;
+    this.basemapOffsetY = loadedCenterInCurrent.y - currentCenter.y;
+  }
+
+  /** 请求匹配当前视窗的高清静态底图，同时立即重算当前底图与标记的对齐位置 */
+  private refreshBasemap(): void {
+    if (this.centerLat === 0 && this.centerLon === 0) {
+      this.basemapUrl = '';
+      this.draw();
+      return;
+    }
+    this.syncScaleAndTransform();
+
     if (this.hasKey && this.mapKey.length > 0) {
-      this.basemapUrl = staticMapUrl(this.viewport(), this.canvasWidth, MAP_HEIGHT, this.mapKey);
+      const tileZoom: number = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.round(this.zoom)));
+      const requestVp: MapViewport = new MapViewport(this.centerLat, this.centerLon, tileZoom);
+      this.pendingViewport = requestVp;
+      this.basemapUrl = staticMapUrl(requestVp, this.canvasWidth, MAP_HEIGHT, this.mapKey);
     } else {
       this.basemapUrl = '';
+      this.loadedBasemapUrl = '';
     }
     this.draw();
   }
 
+  /** 新底图在后台解码完成后原子切换，消除网络延迟期间底图与地点的错位 */
+  private commitLoadedBasemap(url: string): void {
+    if (url.length === 0) return;
+    this.loadedBasemapUrl = url;
+    this.loadedViewport = new MapViewport(
+      this.pendingViewport.centerLat,
+      this.pendingViewport.centerLon,
+      this.pendingViewport.zoom
+    );
+    this.syncScaleAndTransform();
+    this.draw();
+  }
+
+  /** 围绕画布指定焦点缩放（支持 3..19 连续缩放） */
+  private zoomAtFocalPoint(
+    viewport: MapViewport,
+    targetZoom: number,
+    focalX: number,
+    focalY: number
+  ): MapViewport {
+    const zoom: number = Math.max(MIN_ZOOM, Math.min(MAX_DISPLAY_ZOOM, targetZoom));
+    if (zoom <= MAX_ZOOM && viewport.zoom <= MAX_ZOOM) {
+      return zoomViewportAtPoint(viewport, zoom, focalX, focalY, this.canvasWidth, MAP_HEIGHT);
+    }
+    const offsetX: number = focalX - this.canvasWidth / 2;
+    const offsetY: number = focalY - MAP_HEIGHT / 2;
+    const oldCenter: MapPixel = worldPixel(viewport.centerLat, viewport.centerLon, viewport.zoom);
+    const focalGeoPixel: MapPixel = new MapPixel(oldCenter.x + offsetX, oldCenter.y + offsetY);
+    const focalGeo: MapPixel = worldPixelToLatLon(focalGeoPixel, viewport.zoom);
+    const focalAtZoom: MapPixel = worldPixel(focalGeo.x, focalGeo.y, zoom);
+    const nextCenterPixel: MapPixel = new MapPixel(focalAtZoom.x - offsetX, focalAtZoom.y - offsetY);
+    const center: MapPixel = worldPixelToLatLon(nextCenterPixel, zoom);
+    return new MapViewport(center.x, center.y, zoom);
+  }
+
   /** 缩放一档（dir = +1 放大 / -1 缩小） */
   private zoomBy(dir: number): void {
-    const next: number = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, this.zoom + dir));
-    if (next === this.zoom) return;
+    if (this.centerLat === 0 && this.centerLon === 0) return;
+    const base: number = dir > 0 ? Math.floor(this.zoom + 0.001) : Math.ceil(this.zoom - 0.001);
+    const next: number = Math.max(MIN_ZOOM, Math.min(MAX_DISPLAY_ZOOM, base + dir));
+    if (Math.abs(next - this.zoom) < 0.01) return;
     this.zoom = next;
     this.userMoved = true;
     this.refreshBasemap();
   }
 
-  /** 拖动平移：把画布像素位移换算成新的视窗中心 */
-  private panBy(deltaX: number, deltaY: number): void {
+  /** 单指拖动开始 */
+  private beginPan(): void {
     if (this.centerLat === 0 && this.centerLon === 0) return;
-    const next: MapViewport = panViewport(this.viewport(), deltaX, deltaY);
-    this.centerLat = next.centerLat;
-    this.centerLon = next.centerLon;
+    if (this.pinchActive || this.multiTouchActive) return;
+    this.panStartViewport = new MapViewport(this.centerLat, this.centerLon, this.zoom);
+    this.panActive = true;
+    this.mapInteracting = true;
+  }
+
+  /** 单指拖动中：实时推进视窗中心，底图与地点同帧重绘 */
+  private updatePan(deltaX: number, deltaY: number): void {
+    if (!this.panActive || this.pinchActive || this.multiTouchActive) return;
+    if (!isFinite(deltaX) || !isFinite(deltaY)) return;
+    const moved: MapViewport = panViewport(this.panStartViewport, deltaX, deltaY);
+    this.centerLat = moved.centerLat;
+    this.centerLon = moved.centerLon;
     this.userMoved = true;
+    this.syncScaleAndTransform();
+    this.draw();
+  }
+
+  /** 单指拖动结束：后台请求新位置的高清底图 */
+  private finishPan(): void {
+    if (!this.panActive) return;
+    this.panActive = false;
     this.refreshBasemap();
+  }
+
+  private clampFocalX(x: number): number {
+    if (!isFinite(x) || x <= 0) return this.canvasWidth / 2;
+    return Math.max(0, Math.min(this.canvasWidth, x));
+  }
+
+  private clampFocalY(y: number): number {
+    if (!isFinite(y) || y <= 0) return MAP_HEIGHT / 2;
+    return Math.max(0, Math.min(MAP_HEIGHT, y));
   }
 
   private beginPinch(event: GestureEvent): void {
     if (this.centerLat === 0 && this.centerLon === 0) return;
+    this.panActive = false;
     this.pinchStartViewport = new MapViewport(this.centerLat, this.centerLon, this.zoom);
     this.pinchStartZoom = this.zoom;
-    this.pinchCenterX = event.pinchCenterX;
-    this.pinchCenterY = event.pinchCenterY;
-    this.previewZoom = this.zoom;
-    this.previewCenterLat = this.centerLat;
-    this.previewCenterLon = this.centerLon;
-    this.pinchScale = 1;
+    this.pinchCenterX = this.clampFocalX(event.pinchCenterX);
+    this.pinchCenterY = this.clampFocalY(event.pinchCenterY);
     this.pinchActive = true;
-    this.panOffsetX = 0;
-    this.panOffsetY = 0;
+    this.mapInteracting = true;
     this.userMoved = true;
   }
 
   private updatePinch(event: GestureEvent): void {
     if (!this.pinchActive) return;
-    const rawZoom: number = this.pinchStartZoom + Math.log(event.scale) / Math.LN2;
-    const nextZoom: number = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, rawZoom));
-    const preview: MapViewport = zoomViewportAtPoint(
+    const safeScale: number = isFinite(event.scale) && event.scale > 0.05 ? event.scale : 1;
+    const rawZoom: number = this.pinchStartZoom + Math.log(safeScale) / Math.LN2;
+    const nextZoom: number = Math.max(MIN_ZOOM, Math.min(MAX_DISPLAY_ZOOM, rawZoom));
+    const zoomed: MapViewport = this.zoomAtFocalPoint(
       this.pinchStartViewport,
       nextZoom,
       this.pinchCenterX,
-      this.pinchCenterY,
-      this.canvasWidth,
-      MAP_HEIGHT
+      this.pinchCenterY
     );
-    this.previewZoom = preview.zoom;
-    this.previewCenterLat = preview.centerLat;
-    this.previewCenterLon = preview.centerLon;
-    this.pinchScale = Math.pow(2, nextZoom - this.pinchStartZoom);
+    const curFocalX: number = this.clampFocalX(event.pinchCenterX);
+    const curFocalY: number = this.clampFocalY(event.pinchCenterY);
+    const moved: MapViewport = panViewport(
+      zoomed,
+      curFocalX - this.pinchCenterX,
+      curFocalY - this.pinchCenterY
+    );
+    this.zoom = moved.zoom;
+    this.centerLat = moved.centerLat;
+    this.centerLon = moved.centerLon;
+    this.syncScaleAndTransform();
     this.draw();
   }
 
   private finishPinch(): void {
     if (!this.pinchActive) return;
-    const targetZoom: number = Math.max(
-      MIN_ZOOM,
-      Math.min(MAX_ZOOM, Math.round(this.previewZoom))
-    );
-    const committed: MapViewport = zoomViewportAtPoint(
-      this.pinchStartViewport,
-      targetZoom,
-      this.pinchCenterX,
-      this.pinchCenterY,
-      this.canvasWidth,
-      MAP_HEIGHT
-    );
-    this.zoom = committed.zoom;
-    this.centerLat = committed.centerLat;
-    this.centerLon = committed.centerLon;
-    this.pinchScale = 1;
     this.pinchActive = false;
     this.refreshBasemap();
   }
 
   /**
-   * 重算文字标签。
+   * 重算文字标签（与圆点同一次 draw 在 Canvas 内绘制，彻底消除组件叠层不同步与错位）。
    *
-   * 为什么要单独算而不是画在 Canvas 里：Canvas 画中文在不同机型上字体不一致，
-   * 用组件叠层既清晰又能自动处理省略号。
-   *
-   * 重叠处理：按距离由近到远取前 MAX_LABELS 个，且两两之间屏幕距离
-   * 小于 `labelGap` 的只保留第一个 —— 否则密集街区会糊成一片。
+   * 重叠处理：按屏幕位置取前 MAX_LABELS 个，两两间距 < 64vp 的只保留第一个。
    */
   private refreshLabels(): void {
     this.labels = [];
@@ -553,6 +645,85 @@ export struct CityMapView {
     this.labels = kept;
   }
 
+  /** 在 Canvas 上绘制地点名胶囊（与圆点同一帧同一坐标系，水平严格居中） */
+  private drawPlaceLabel(ctx: CanvasRenderingContext2D, label: PlaceLabel): void {
+    const rawName: string = label.name.trim();
+    if (rawName.length === 0) return;
+    const text: string = rawName.length > 8 ? rawName.substring(0, 7) + '…' : rawName;
+    ctx.save();
+    ctx.font = '500 10vp sans-serif';
+    let textWidth: number = 0;
+    try {
+      textWidth = ctx.measureText(text).width;
+    } catch (err) {
+      textWidth = text.length * 10;
+    }
+    if (!isFinite(textWidth) || textWidth <= 0) {
+      textWidth = text.length * 10;
+    }
+    const padX: number = 6;
+    const pillW: number = Math.min(116, Math.max(28, textWidth + padX * 2));
+    const pillH: number = 18;
+    const pillX: number = Math.max(4, Math.min(this.canvasWidth - pillW - 4, label.x - pillW / 2));
+    const pillY: number = label.y + 9;
+    const r: number = 5;
+
+    ctx.beginPath();
+    ctx.moveTo(pillX + r, pillY);
+    ctx.lineTo(pillX + pillW - r, pillY);
+    ctx.arcTo(pillX + pillW, pillY, pillX + pillW, pillY + r, r);
+    ctx.lineTo(pillX + pillW, pillY + pillH - r);
+    ctx.arcTo(pillX + pillW, pillY + pillH, pillX + pillW - r, pillY + pillH, r);
+    ctx.lineTo(pillX + r, pillY + pillH);
+    ctx.arcTo(pillX, pillY + pillH, pillX, pillY + pillH - r, r);
+    ctx.lineTo(pillX, pillY + r);
+    ctx.arcTo(pillX, pillY, pillX + r, pillY, r);
+    ctx.closePath();
+
+    ctx.fillStyle = '#E6FFFFFF';
+    ctx.fill();
+    ctx.strokeStyle = '#33182431';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.fillStyle = WAColor.ink;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, pillX + pillW / 2, pillY + pillH / 2);
+    ctx.restore();
+  }
+
+  /** 底图尚未加载完成或无 Key 时，绘制随视窗缩放/平移的墨卡托网格底图 */
+  private drawBackdropGrid(ctx: CanvasRenderingContext2D, width: number, height: number): void {
+    ctx.save();
+    ctx.fillStyle = '#F2EEE6';
+    ctx.fillRect(0, 0, width, height);
+    if (this.centerLat === 0 && this.centerLon === 0) {
+      ctx.restore();
+      return;
+    }
+    const vp: MapViewport = this.viewport();
+    const baseZoom: number = Math.floor(vp.zoom);
+    const fracScale: number = Math.pow(2, vp.zoom - baseZoom);
+    const step: number = 48 * fracScale;
+    const centerWorld: MapPixel = worldPixel(vp.centerLat, vp.centerLon, vp.zoom);
+    const offsetX: number = ((width / 2 - centerWorld.x) % step + step) % step;
+    const offsetY: number = ((height / 2 - centerWorld.y) % step + step) % step;
+    ctx.strokeStyle = '#14182431';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = offsetX; x < width; x += step) {
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, height);
+    }
+    for (let y = offsetY; y < height; y += step) {
+      ctx.moveTo(0, y);
+      ctx.lineTo(width, y);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
   /** 经纬度（WGS-84）→ 画布像素 */
   private project(point: GeoPoint): MapPixel {
     const gcj = wgs84ToGcj02(point.latitude, point.longitude);
@@ -566,10 +737,9 @@ export struct CityMapView {
     if (width <= 0) return;
     const ctx: CanvasRenderingContext2D = this.ctx;
     ctx.clearRect(0, 0, width, height);
-    // 底图由 Image(basemapUrl) 铺在下面；这里只在没有 Key 时画个底色
-    if (this.basemapUrl.length === 0) {
-      ctx.fillStyle = '#F2EEE6';
-      ctx.fillRect(0, 0, width, height);
+    // 底图由 Image(loadedBasemapUrl) 铺在下面；底图未就绪时画随视窗联动的网格底色
+    if (this.loadedBasemapUrl.length === 0) {
+      this.drawBackdropGrid(ctx, width, height);
     }
 
     if (this.centerLat === 0 && this.centerLon === 0) return;
@@ -623,8 +793,10 @@ export struct CityMapView {
     const hullPixels: MapPixel[] = this.territoryHullPixels();
     if (hullPixels.length >= 3) {
       const rankColor: string = this.territoryRankColor;
+      const fallbackFill: string = rankColor + '33';
 
-      // ① 面：爵位色 20%（#RRGGBB + '33' = 20% alpha）
+      // ① 面：爵位色 20% 半透明（用 globalAlpha = 0.2 避免鸿蒙 #AARRGGBB 解析把红通道当成不透明度）
+      ctx.save();
       ctx.beginPath();
       for (let i = 0; i < hullPixels.length; i += 1) {
         if (i === 0) {
@@ -634,8 +806,10 @@ export struct CityMapView {
         }
       }
       ctx.closePath();
-      ctx.fillStyle = rankColor + '33';
+      ctx.globalAlpha = 0.2;
+      ctx.fillStyle = rankColor.length > 0 ? rankColor : fallbackFill;
       ctx.fill();
+      ctx.restore();
 
       // ② 描边：爵位色，线宽 2.5
       ctx.strokeStyle = rankColor;
@@ -655,8 +829,11 @@ export struct CityMapView {
       }
     }
 
-    // 圆点画完再算文字标签（标签用组件叠层渲染，不画在 Canvas 里）
+    // ④ 地点文字标签（直接画在 Canvas 上，与圆点/凸包同帧随动）
     this.refreshLabels();
+    for (let i = 0; i < this.labels.length; i += 1) {
+      this.drawPlaceLabel(ctx, this.labels[i]);
+    }
   }
 
 
@@ -882,121 +1059,146 @@ export struct CityMapView {
 
   @Builder
   mapCard() {
-    // 注意结构：**外层 Stack 负责接收手势，且它自己不平移**；
-    // 只有内层 Stack（底图 + 轨迹 + 标签）跟着手指 translate。
-    //
-    // 之前把 PanGesture 挂在「会被 translate 的那个元素」自己身上，
-    // 于是每次 onActionUpdate 改 panOffset → 元素被移动 → 手指相对它的偏移又变了
-    // → 下一帧算出不同位移 …… 形成正反馈，表现就是「兴趣点疯狂乱跳」。
+    // 结构说明：
+    //   1. 已加载底图（loadedBasemapUrl）通过墨卡托缩放+位移实时对齐当前视窗，
+    //      新底图（basemapUrl）在后台静默加载，onComplete 解码完成后再原子切换，
+    //      彻底消除缩放/拖动时「地点先跳、底图半秒后才动」的不同步问题。
+    //   2. 轨迹、地点圆点、疆域半透明凸包与文字标签全部在同一 Canvas 同帧绘制。
+    //   3. 手势层固定不动，按下即锁定外层 Scroll（mapInteracting = true）并拦截 Pan/Pinch，
+    //      彻底杜绝在地图内拖动时带动整个页面滚动。
     Stack({ alignContent: Alignment.TopStart }) {
-      // 内层：唯一被平移的图层，底图/轨迹/标签共用同一变换，绝不会错位
-      Stack({ alignContent: Alignment.TopStart }) {
-        // ① 真实地图底图（高德 staticmap）：一张真路网图，有路名、有水系
-        if (this.basemapUrl.length > 0) {
-          Image(this.basemapUrl)
+      // ① 已就绪的真实地图底图：随当前视窗实时缩放与平移
+      if (this.loadedBasemapUrl.length > 0) {
+        Stack({ alignContent: Alignment.Center }) {
+          Image(this.loadedBasemapUrl)
             .width('100%')
             .height(MAP_HEIGHT)
             .objectFit(ImageFit.Fill)
             .interpolation(ImageInterpolation.High)
             .scale({
-              x: this.pinchScale,
-              y: this.pinchScale,
-              centerX: this.pinchCenterX,
-              centerY: this.pinchCenterY
+              x: this.basemapScale,
+              y: this.basemapScale,
+              centerX: '50%',
+              centerY: '50%'
             })
         }
-
-        // ② 轨迹与地点圆点（与底图共用墨卡托投影，严格对齐）
-        Canvas(this.ctx)
-          .width('100%')
-          .height(MAP_HEIGHT)
-          .onReady(() => {
-            this.ready = true;
-            if (this.centerLat === 0 && this.centerLon === 0) {
-              this.resetView();
-            }
-            this.draw();
-          })
-          .onAreaChange((oldValue: Area, newValue: Area) => {
-            const next: number = parseFloat(newValue.width.toString());
-            if (Math.abs(next - this.canvasWidth) > 1) {
-              this.canvasWidth = next;
-              if (!this.userMoved) {
-                this.resetView();
-              } else {
-                this.refreshBasemap();
-              }
-            }
-          })
-
-        // ③ 地点文字标签（组件叠层：中文渲染清晰、自动省略）
-        ForEach(this.labels, (label: PlaceLabel) => {
-          Text(label.name)
-            .fontSize(WAFont.micro)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(WAColor.ink)
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .constraintSize({ maxWidth: 108 })
-            .padding({ left: 5, right: 5, top: 2, bottom: 2 })
-            .backgroundColor('#E6FFFFFF')
-            .borderRadius(5)
-            .border({ width: 1, color: '#33000000', radius: 5 })
-            .position({ x: label.x - 54, y: label.y + 8 })
-            .textAlign(TextAlign.Center)
-        }, (label: PlaceLabel) => label.name + '@' + label.x.toFixed(0))
-      }
-      .width('100%')
-      .height(MAP_HEIGHT)
-      .translate({ x: this.panOffsetX, y: this.panOffsetY })
-
-      // 手势层：透明、固定不动，只负责把拖动量交给地图
-      Column()
         .width('100%')
         .height(MAP_HEIGHT)
-        .onTouch((event: TouchEvent) => {
-          // 用 TouchEvent 而不是 PanGesture：偏移量按「按下点」的手动差值算，
-          // 与元素自身是否移动完全无关，天然不会形成反馈环。
-          if (event.touches.length > 1) {
-            this.multiTouchActive = true;
-            this.panOffsetX = 0;
-            this.panOffsetY = 0;
-            return;
+        .translate({ x: this.basemapOffsetX, y: this.basemapOffsetY })
+      }
+
+      // ①-b 后台预加载的新底图：解码完成后原子替换 loadedBasemapUrl
+      if (this.basemapUrl.length > 0 && this.basemapUrl !== this.loadedBasemapUrl) {
+        Image(this.basemapUrl)
+          .width('100%')
+          .height(MAP_HEIGHT)
+          .objectFit(ImageFit.Fill)
+          .opacity(0.01)
+          .onComplete((event) => {
+            if (event !== undefined && (event.loadingStatus === 1 ||
+              (this.loadedBasemapUrl.length === 0 && event.width > 0))) {
+              this.commitLoadedBasemap(this.basemapUrl);
+            }
+          })
+      }
+
+      // ② 轨迹、地点圆点、半透明疆域凸包与地点标签（与底图共用墨卡托投影，严格同帧对齐）
+      Canvas(this.ctx)
+        .width('100%')
+        .height(MAP_HEIGHT)
+        .onReady(() => {
+          this.ready = true;
+          if (this.centerLat === 0 && this.centerLon === 0) {
+            this.resetView();
           }
-          if (event.touches.length === 0) {
-            this.multiTouchActive = false;
-            this.panOffsetX = 0;
-            this.panOffsetY = 0;
-            return;
-          }
-          if (this.multiTouchActive || this.pinchActive) return;
-          const touch: TouchObject = event.touches[0];
-          if (event.type === TouchType.Down) {
-            this.dragStartX = touch.windowX;
-            this.dragStartY = touch.windowY;
-            this.panOffsetX = 0;
-            this.panOffsetY = 0;
-          } else if (event.type === TouchType.Move) {
-            this.panOffsetX = touch.windowX - this.dragStartX;
-            this.panOffsetY = touch.windowY - this.dragStartY;
-          } else {
-            const dx: number = touch.windowX - this.dragStartX;
-            const dy: number = touch.windowY - this.dragStartY;
-            this.panOffsetX = 0;
-            this.panOffsetY = 0;
-            if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
-              this.panBy(dx, dy);
+          this.draw();
+        })
+        .onAreaChange((oldValue: Area, newValue: Area) => {
+          const next: number = parseFloat(newValue.width.toString());
+          if (Math.abs(next - this.canvasWidth) > 1) {
+            this.canvasWidth = next;
+            if (!this.userMoved) {
+              this.resetView();
+            } else {
+              this.refreshBasemap();
             }
           }
         })
 
-      // ④ 缩放按钮（右上角，不跟地图一起平移）
+      // ③ 手势层：透明、固定不动，独占地图区域内的单指拖动与双指缩放，阻止外层页面滚动
+      Column()
+        .width('100%')
+        .height(MAP_HEIGHT)
+        .backgroundColor('#00000000')
+        .onTouch((event: TouchEvent) => {
+          event.stopPropagation();
+          if (event.touches.length > 1) {
+            this.multiTouchActive = true;
+            this.mapInteracting = true;
+            return;
+          }
+          if (event.type === TouchType.Down) {
+            this.multiTouchActive = false;
+            this.mapInteracting = true;
+          } else if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+            this.multiTouchActive = false;
+            if (!this.pinchActive && !this.panActive) {
+              this.mapInteracting = false;
+            }
+          }
+        })
+        .priorityGesture(
+          GestureGroup(
+            GestureMode.Parallel,
+            PanGesture({ fingers: 1, distance: 1 })
+              .onActionStart(() => {
+                this.beginPan();
+              })
+              .onActionUpdate((event: GestureEvent) => {
+                this.updatePan(event.offsetX, event.offsetY);
+              })
+              .onActionEnd(() => {
+                this.finishPan();
+                if (!this.pinchActive) {
+                  this.mapInteracting = false;
+                }
+              })
+              .onActionCancel(() => {
+                this.finishPan();
+                if (!this.pinchActive) {
+                  this.mapInteracting = false;
+                }
+              }),
+            PinchGesture({ fingers: 2, distance: 2 })
+              .onActionStart((event: GestureEvent) => {
+                this.beginPinch(event);
+              })
+              .onActionUpdate((event: GestureEvent) => {
+                this.updatePinch(event);
+              })
+              .onActionEnd(() => {
+                this.finishPinch();
+                this.multiTouchActive = false;
+                this.mapInteracting = false;
+              })
+              .onActionCancel(() => {
+                this.finishPinch();
+                this.multiTouchActive = false;
+                this.mapInteracting = false;
+              })
+          )
+        )
+
+      // ④ 缩放与复位按钮（右上角，位于手势层之上）
       Column({ space: 6 }) {
         this.zoomButton('+', () => {
           this.zoomBy(1);
         })
         this.zoomButton('−', () => {
           this.zoomBy(-1);
+        })
+        this.zoomButton('⌖', () => {
+          this.resetView();
         })
       }
       .position({ x: this.canvasWidth - 46, y: 10 })
@@ -1029,21 +1231,6 @@ export struct CityMapView {
     .borderRadius(WASize.cardRadius)
     .border({ width: 1, color: WAColor.line, radius: WASize.cardRadius })
     .clip(true)
-    .gesture(
-      PinchGesture({ fingers: 2, distance: 5 })
-        .onActionStart((event: GestureEvent) => {
-          this.beginPinch(event);
-        })
-        .onActionUpdate((event: GestureEvent) => {
-          this.updatePinch(event);
-        })
-        .onActionEnd(() => {
-          this.finishPinch();
-        })
-        .onActionCancel(() => {
-          this.finishPinch();
-        })
-    )
   }
 
   @Builder
@@ -1117,7 +1304,7 @@ export struct CityMapView {
         .height('100%')
         .backgroundColor(WAColor.cream)
 
-      Scroll() {
+      Scroll(this.pageScroller) {
         Column({ space: 0 }) {
           this.header()
 
@@ -1162,6 +1349,7 @@ export struct CityMapView {
       }
       .width('100%')
       .height('100%')
+      .scrollable(this.mapInteracting ? ScrollDirection.None : ScrollDirection.Vertical)
       .scrollBar(BarState.Off)
       .edgeEffect(EdgeEffect.Spring)
     }

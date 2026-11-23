@@ -13,7 +13,7 @@ public extension QuestSession {
     /// 规则：起点即显示第 1 条线索；剩余 ≤200m 解锁第 2 条；≤60m 解锁第 3 条；≤30m 到达。
     @discardableResult
     mutating func update(remainingMeters newRemaining: Int) -> [QuestEvent] {
-        guard phase == .walking || phase == .arrived else { return [] }
+        guard phase == .walking || phase == .arrived || phase == .revealed else { return [] }
         var events: [QuestEvent] = []
         let clamped = max(0, min(totalMeters, newRemaining))
         remainingMeters = clamped

@@ -103,7 +103,9 @@ export function progressOf(session: QuestSession): number {
 export function updateSession(session: QuestSession, newRemainingMeters: number): SessionUpdate {
   const events: QuestEvent[] = [];
   const next: QuestSession = cloneSession(session);
-  if (next.phase !== QuestPhase.Walking && next.phase !== QuestPhase.Arrived) {
+  if (next.phase !== QuestPhase.Walking &&
+    next.phase !== QuestPhase.Arrived &&
+    next.phase !== QuestPhase.Revealed) {
     const unchanged: SessionUpdate = { session: next, events: events };
     return unchanged;
   }

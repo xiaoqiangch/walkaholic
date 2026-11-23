@@ -148,8 +148,11 @@ export struct TerritoryShareCard {
         }
       }
       ctx.closePath();
-      ctx.fillStyle = layout.color + '33';
+      ctx.save();
+      ctx.globalAlpha = 0.2;
+      ctx.fillStyle = layout.color;
       ctx.fill();
+      ctx.restore();
       ctx.strokeStyle = layout.color;
       ctx.lineWidth = 3;
       ctx.lineJoin = 'round';

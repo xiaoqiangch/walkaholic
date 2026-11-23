@@ -1067,6 +1067,13 @@ test('Store：真实定位 —— startQuest(origin) 生成目标，靠近后自
   assert.ok(arrivedSnap.revealSerial !== undefined);
   if (arrivedSnap.revealSerial !== undefined) assert.match(arrivedSnap.revealSerial, /^\d{4}$/);
   assert.ok(arrivedSnap.lastKnownOrigin !== undefined);
+
+  // 继续走近到 10 米内（6m）：即使已进入 Arrived 态，剩余距离也必须继续实时更新到 ≤10m，供导航页触发 10 米拍照打卡弹窗
+  const withinTen: GeoPoint = offset(snap0.session.target, 6, 0);
+  store.updateGeoLocation(withinTen);
+  const tenSnap = store.snapshot();
+  assert.ok(tenSnap.session !== undefined && tenSnap.session.remainingMeters <= 10,
+    '进入 10m 范围后 remainingMeters 应继续更新到 ≤10m');
 });
 
 test('Store：reactToPost 第一次 +1、第二次取消', async (): Promise<void> => {

@@ -67,6 +67,9 @@ struct JourneyView: View {
     @State private var locatingIssue: String?
 
     @State private var showReveal = false
+    @State private var revealAutoCheckIn = false
+    @State private var showArrivalDialog = false
+    @State private var arrivalDialogSessionID: String?
     @State private var isPaused = false
     @State private var pauseStartedAt: Date?
     @State private var pausedDuration: TimeInterval = 0
@@ -78,6 +81,9 @@ struct JourneyView: View {
     @State private var parkedOverride = false
     /// 还离很远就点「已停车」→ 先确认一次（避免手滑把 15 公里当成停好车）
     @State private var confirmParkedFar = false
+
+    /// 导航模式下自动弹出「到达目的地 · 邀请拍照打卡」对话框的距离阈值（米）
+    private static let navigationArrivalDialogMeters = 10
 
     var body: some View {
         ZStack {
@@ -96,12 +102,20 @@ struct JourneyView: View {
             if curatedNoticeVisible {
                 curatedNotice
             }
+
+            if showArrivalDialog {
+                arrivalDialogOverlay
+            }
         }
         .fullScreenCover(isPresented: $showReveal) {
             RevealView(
                 store: store,
                 onCollected: handleCollected,
-                onClose: { showReveal = false }
+                onClose: {
+                    revealAutoCheckIn = false
+                    showReveal = false
+                },
+                autoCheckIn: revealAutoCheckIn
             )
         }
         .onAppear(perform: handleAppear)
@@ -121,9 +135,13 @@ struct JourneyView: View {
             Text("现在离目的地还有 \(distanceText(meters: store.session?.remainingMeters ?? 0))。按步行段继续后，线索仍按真实距离解锁。")
         }
         .onChange(of: store.session?.id) { _, _ in
-            // 换了另一趟旅程：手动停车标记不应该带过去
+            // 换了另一趟旅程：手动停车标记与到达弹窗状态一并重置
             parkedOverride = false
             confirmParkedFar = false
+            showArrivalDialog = false
+            arrivalDialogSessionID = nil
+            revealAutoCheckIn = false
+            hasTriggeredArrival = false
         }
         .onChange(of: scenePhase) { _, phase in
             // 从「设置」改完权限回来：重新尝试真实定位（暂停中不打扰）
@@ -1281,7 +1299,7 @@ struct JourneyView: View {
         }
     }
 
-    // MARK: 到达闪屏
+    // MARK: 到达闪屏与 10 米到达拍照打卡对话框
 
     private var arrivalOverlay: some View {
         ZStack {
@@ -1296,6 +1314,105 @@ struct JourneyView: View {
                     .foregroundStyle(WATheme.paper.opacity(0.7))
             }
             .transition(.opacity)
+        }
+    }
+
+    /// 到达目的地 10 米范围内自动弹出的「拍照打卡」邀请对话框
+    private var arrivalDialogOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.45)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    withAnimation(WAAnimation.quick) {
+                        showArrivalDialog = false
+                    }
+                }
+
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 12) {
+                    ZStack {
+                        Circle()
+                            .fill(WATheme.amberSoft)
+                            .frame(width: 42, height: 42)
+                        Image(systemName: "camera.fill")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(WATheme.amberDeep)
+                    }
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("已到达目的地 · 10 米范围内")
+                            .font(WATheme.caption(11.5))
+                            .fontWeight(.semibold)
+                            .foregroundStyle(WATheme.amberDeep)
+                        Text("到了，拍照打卡吧！")
+                            .font(WATheme.title(17))
+                            .foregroundStyle(WATheme.ink)
+                    }
+
+                    Spacer(minLength: 0)
+                }
+
+                Text("你已进入目的地 10 米范围内。现在拍一张现场照片完成打卡验证，即可揭晓盲盒并把这张地点卡收进你的城市图鉴。")
+                    .font(WATheme.body(13.5))
+                    .foregroundStyle(WATheme.ink2)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button(action: confirmArrivalCheckIn) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "camera.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text("立即拍照打卡")
+                            .font(WAType.cta(15))
+                    }
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 44)
+                    .background(WATheme.amberDeep)
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(WAPressEffectStyle())
+
+                Button {
+                    withAnimation(WAAnimation.quick) {
+                        showArrivalDialog = false
+                    }
+                    revealAutoCheckIn = false
+                    triggerArrival()
+                } label: {
+                    Text("先看看盲盒卡片")
+                        .font(WATheme.title(14))
+                        .foregroundStyle(WATheme.ink)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 40)
+                        .background(WATheme.paper2)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(WAPressEffectStyle())
+
+                Button {
+                    withAnimation(WAAnimation.quick) {
+                        showArrivalDialog = false
+                    }
+                } label: {
+                    Text("稍后再拍")
+                        .font(WATheme.caption(12.5))
+                        .foregroundStyle(WATheme.ink3)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 32)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(20)
+            .frame(maxWidth: 360)
+            .background(WATheme.paper)
+            .clipShape(RoundedRectangle(cornerRadius: WATheme.panelRadius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: WATheme.panelRadius, style: .continuous)
+                    .stroke(WATheme.line, lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.18), radius: 24, x: 0, y: 10)
+            .padding(.horizontal, WATheme.pagePadding)
+            .transition(.scale(scale: 0.95).combined(with: .opacity))
         }
     }
 
@@ -1372,8 +1489,9 @@ struct JourneyView: View {
     }
 
     private func arriveNow() {
-        let events = store.arriveNow()
-        handle(events: events)
+        _ = store.arriveNow()
+        revealAutoCheckIn = false
+        triggerArrival()
     }
 
     private func switchToDemo() {
@@ -1390,7 +1508,9 @@ struct JourneyView: View {
     private func handleAppear() {
         demoService.sync(remaining: store.session?.remainingMeters)
 
-        if store.session?.phase == .arrived || store.reveal != nil {
+        if isWithinTenMeters() {
+            checkArrivalDialogIfNeeded()
+        } else if (store.session?.phase == .arrived || store.reveal != nil) && locationMode == .demo {
             triggerArrival()
         }
 
@@ -1440,8 +1560,9 @@ struct JourneyView: View {
         }
         waAfter(milliseconds / 1000.0) {
             guard store.session?.phase == .walking else { return }
-            let events = store.arriveNow()
-            handle(events: events)
+            _ = store.arriveNow()
+            revealAutoCheckIn = false
+            triggerArrival()
         }
     }
 
@@ -1455,7 +1576,7 @@ struct JourneyView: View {
     /// - 截图/演示走查默认留在演示模式，避免系统权限弹窗打断截图；
     ///   `WA_PREVIEW=live` 或 `WA_LIVE_GPS=1` 时走真实定位（模拟器自检用）。
     private func startLiveLocationIfPossible() {
-        guard let session = store.session, session.phase == .walking else {
+        guard let session = store.session, session.phase != .collected else {
             refreshMode()
             return
         }
@@ -1629,6 +1750,8 @@ struct JourneyView: View {
                 bearingDegrees: reading.bearingDegrees
             )
             handle(events: events)
+        } else {
+            checkArrivalDialogIfNeeded()
         }
 
         refreshMode()
@@ -1679,7 +1802,51 @@ struct JourneyView: View {
         WAHaptics.light()
     }
 
-    // MARK: 事件
+    // MARK: 事件与 10 米到达拍照打卡判定
+
+    /// 当前是否已进入目的地 10 米范围内（直线距离 ≤ 10m 或步行路线剩余距离 ≤ 10m）
+    private func isWithinTenMeters() -> Bool {
+        guard let session = store.session,
+              session.totalMeters > 0,
+              session.phase != .collected,
+              !isDriveSegment else { return false }
+        if session.remainingMeters <= Self.navigationArrivalDialogMeters {
+            return true
+        }
+        if let progress = currentRouteProgress,
+           abs(progress.lateral) <= 45,
+           Int(progress.remaining.rounded()) <= Self.navigationArrivalDialogMeters {
+            return true
+        }
+        return false
+    }
+
+    /// 进入目的地 10 米范围内时，自动弹出到达对话框，邀请用户拍照打卡
+    private func checkArrivalDialogIfNeeded() {
+        guard let session = store.session, isWithinTenMeters() else { return }
+        if session.phase == .walking {
+            _ = store.arriveNow()
+        }
+        guard arrivalDialogSessionID != session.id else { return }
+        arrivalDialogSessionID = session.id
+        WAHaptics.success()
+        withAnimation(WAAnimation.regular) {
+            showArrivalDialog = true
+        }
+    }
+
+    /// 对话框中点击「立即拍照打卡」：确保到达态并直接进入揭晓页调起相机打卡
+    private func confirmArrivalCheckIn() {
+        withAnimation(WAAnimation.quick) {
+            showArrivalDialog = false
+        }
+        if store.session?.phase == .walking {
+            _ = store.arriveNow()
+        }
+        hasTriggeredArrival = true
+        revealAutoCheckIn = true
+        showReveal = true
+    }
 
     private func handle(events: [QuestEvent]) {
         for event in events {
@@ -1690,17 +1857,29 @@ struct JourneyView: View {
             case .revealed:
                 break
             case .arrived:
-                triggerArrival()
+                if isWithinTenMeters() {
+                    checkArrivalDialogIfNeeded()
+                } else if locationMode == .demo {
+                    guard let session = store.session, arrivalDialogSessionID != session.id else { break }
+                    arrivalDialogSessionID = session.id
+                    WAHaptics.success()
+                    withAnimation(WAAnimation.regular) {
+                        showArrivalDialog = true
+                    }
+                }
             }
         }
 
-        if store.session?.phase == .arrived {
-            triggerArrival()
+        if isWithinTenMeters() {
+            checkArrivalDialogIfNeeded()
         }
     }
 
     private func triggerArrival() {
-        guard !hasTriggeredArrival else { return }
+        if hasTriggeredArrival {
+            showReveal = true
+            return
+        }
         hasTriggeredArrival = true
         WAHaptics.success()
 

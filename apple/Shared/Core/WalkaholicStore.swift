@@ -396,7 +396,8 @@ public final class WalkaholicStore {
     /// 模拟步行：减少剩余米数，返回事件（线索解锁 / 到达）
     @discardableResult
     public func advance(byMeters meters: Int, now: Date = Date()) -> [QuestEvent] {
-        guard var session, session.phase == .walking else { return [] }
+        guard var session,
+              session.phase == .walking || session.phase == .arrived || session.phase == .revealed else { return [] }
         let events = session.update(remainingMeters: session.remainingMeters - abs(meters))
         self.session = session
         self.lastEvents = events
@@ -410,7 +411,8 @@ public final class WalkaholicStore {
     /// 由 `LiveLocationService` 在每次定位回调里调用。
     @discardableResult
     public func updateLocation(distanceMeters: Double, bearingDegrees: Double?, now: Date = Date()) -> [QuestEvent] {
-        guard var session, session.phase == .walking else { return [] }
+        guard var session,
+              session.phase == .walking || session.phase == .arrived || session.phase == .revealed else { return [] }
         let events = session.updateGeo(distanceMeters: distanceMeters, bearingDegrees: bearingDegrees)
         self.session = session
         self.lastEvents = events

@@ -65,7 +65,18 @@ struct CityMapView: View {
     }
 
     private var territoryColor: Color {
-        TerritoryStyle.color(for: territoryRank)
+        // 已形成凸包（>=3 点）但面积尚未达到「士」门槛时，白身默认色为灰色，
+        // 在地图底图上半透明填充不易辨识；此时使用品牌色做半透明填充与描边。
+        if territoryHull.count >= 3, territoryRank.key == "commoner" {
+            return WATheme.amber
+        }
+        return TerritoryStyle.color(for: territoryRank)
+    }
+
+    private var closedTerritoryHullCoordinates: [CLLocationCoordinate2D] {
+        let coords = territoryHull.map(Self.coordinate)
+        guard let first = coords.first, coords.count >= 3 else { return coords }
+        return coords + [first]
     }
 
     private var allCoordinates: [GeoPoint] {
@@ -154,11 +165,17 @@ struct CityMapView: View {
     private var mapCard: some View {
         ZStack(alignment: .topTrailing) {
             Map(position: $camera, interactionModes: [.pan, .zoom]) {
-                // 疆域多边形必须在轨迹 / 地点之前，否则会被后画的图层盖住
+                // 疆域多边形：MapPolygon 专职半透明区域填充（22% 不透明度），
+                // 闭合 MapPolyline 专职绘制凸包边界连接线，避免 SwiftUI MapKit 中 .stroke 覆盖填充样式。
                 if territoryHull.count >= 3 {
                     MapPolygon(coordinates: territoryHull.map(Self.coordinate))
-                        .foregroundStyle(territoryColor.opacity(0.20))
-                        .stroke(territoryColor, lineWidth: 2.5)
+                        .foregroundStyle(territoryColor.opacity(0.22))
+
+                    MapPolyline(coordinates: closedTerritoryHullCoordinates)
+                        .stroke(
+                            territoryColor,
+                            style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round)
+                        )
 
                     ForEach(Array(territoryHull.enumerated()), id: \.offset) { _, point in
                         Annotation("", coordinate: Self.coordinate(point)) {

@@ -18,6 +18,8 @@ struct RevealView: View {
     /// 由于揭晓页是从旅程页全屏推入的，只有调用方（JourneyView）能真正收起它；
     /// 没传就不显示关闭按钮，避免出现按了没反应 / 误跳到图鉴的路径。
     var onClose: (() -> Void)? = nil
+    /// 从导航页 10 米到达对话框点击「立即拍照打卡」进入时，直接展开卡片并自动拉起相机打卡。
+    var autoCheckIn: Bool = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -705,6 +707,13 @@ struct RevealView: View {
                 photoGpsDistance = nil
                 photoGpsVerified = false
             }
+        } else if let origin = store.lastKnownOrigin, let target = place?.coordinate {
+            // App 内相机（UIImagePickerController）拍出的 UIImage 不含 EXIF Data，用拍照时刻的真实定位兜底验证
+            let fallbackResult = PhotoGpsResult.ok(lat: origin.latitude, lon: origin.longitude)
+            photoGpsResult = fallbackResult
+            let verification = PhotoGps.verify(target: target, photo: fallbackResult)
+            photoGpsDistance = verification.distance
+            photoGpsVerified = verification.ok
         } else {
             // UIImagePickerController 的 UIImage 通常已丢 EXIF（相机路径会提示重拍/选相册）
             photoGpsResult = .failed(reason: .noExif)
@@ -799,6 +808,17 @@ struct RevealView: View {
         guard !didStart else { return }
         didStart = true
         WAHaptics.success()
+
+        if autoCheckIn {
+            store.beginReveal()
+            showCard = true
+            if checkInImage == nil && !photoGpsVerified {
+                waAfter(0.15) {
+                    showCamera = true
+                }
+            }
+            return
+        }
 
         if reduceMotion {
             store.beginReveal()
