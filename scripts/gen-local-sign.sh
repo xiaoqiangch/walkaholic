@@ -21,7 +21,7 @@ KEYTOOL="$HOME_DEVECO/jbr/Contents/Home/bin/keytool"
 OUT="${LOCAL_SIGN_DIR:-$HOME/.deveco/localsign}"
 
 for f in "$JAVA" "$SIGN" "$KEYTOOL" "$LIB/OpenHarmony.p12"; do
-  [ -f "$f" ] || { echo "缺少 $f（先跑 scripts/setup-deveco-cli.sh）"; exit 1; }
+  [ -f "$f" ] || { echo "缺少 ${f}（先跑 scripts/setup-deveco-cli.sh）"; exit 1; }
 done
 
 BUNDLE="${BUNDLE_NAME:-com.walkaholic.harmony}"
