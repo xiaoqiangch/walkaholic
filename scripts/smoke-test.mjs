@@ -120,9 +120,12 @@ async function main() {
     await goto(BASE + "?fresh=1#/home");
     check("首页加载", (await text()).includes("今天，想去哪儿？"));
 
-    await click('[data-action="open-setup"]');
-    await wait(500);
-    check("打开抽盒 sheet", (await text()).includes("这次的盲盒，你想要什么？"));
+    // 首页改成方向罗盘（对齐鸿蒙）：点「东」应带方向打开抽盒 sheet
+    await click('[data-action="explore-direction"][data-bearing="90"]');
+    await wait(600);
+    const sheetText = await text();
+    check("罗盘点东 → 打开抽盒 sheet 且带方向",
+      sheetText.includes("往东") && sheetText.includes("方向探索"));
 
     await click('[data-action="shake"]');
     let entered = false;
