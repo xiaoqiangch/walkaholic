@@ -33,6 +33,7 @@ import {
 import { WAColor, WAFont, WASize } from '../theme/Theme';
 import { greeting, kilometers, relativeDay } from '../components/Format';
 import { currentMoment, momentBoxTitle, momentEmoji, momentLine } from '../core/moment';
+import { DirectionDial } from '../components/DirectionDial';
 
 class FriendInfo {
   name: string;
@@ -55,6 +56,12 @@ export struct HomeView {
   @Prop winHeight: number = 800;
 
   onOpenSetup: () => void = () => {
+  };
+  /** 罗盘方向探索：bearing 0=北 90=东 180=南 270=西 */
+  onExploreDirection: (bearing: number) => void = () => {
+  };
+  /** 罗盘中心：在当前位置埋一个盲盒 */
+  onBuryHere: () => void = () => {
   };
   /** 打开埋惊喜面板（首页「埋下一个」） */
   onOpenBury: () => void = () => {
@@ -86,6 +93,13 @@ export struct HomeView {
 
   private isWide(): boolean {
     return this.winWidth >= WASize.wideBreakpoint;
+  }
+
+  /** 罗盘直径：短屏缩小，宽屏略大，保持视觉重心 */
+  private dialSize(): number {
+    if (this.isShort()) return 210;
+    if (this.winWidth >= WASize.wideBreakpoint) return 268;
+    return 244;
   }
 
   private isShort(): boolean {
@@ -299,21 +313,28 @@ export struct HomeView {
       .width('100%')
       .constraintSize({ minHeight: 24 })
 
+      // 方向罗盘：四个方向 + 中心「在此埋下」
       Row() {
-        WaBoxArt({ artSize: this.isShort() ? 86 : 112 })
+        DirectionDial({
+          dialSize: this.dialSize(),
+          hasActiveSession: this.hasActiveSession(),
+          sessionCaption: this.hasActiveSession() ? this.sessionRemaining() + ' m' : '',
+          onExploreDirection: (bearing: number) => {
+            this.onExploreDirection(bearing);
+          },
+          onBuryHere: () => {
+            this.onBuryHere();
+          },
+          onResume: () => {
+            this.onOpenJourney();
+          }
+        })
       }
       .width('100%')
       .justifyContent(FlexAlign.Center)
-      .margin({ top: 2, bottom: 8 })
+      .margin({ top: 14, bottom: 8 })
 
-      WaPrimaryButton({
-        title: '开一个盲盒',
-        onTap: () => {
-          this.onOpenSetup();
-        }
-      })
-
-      Row() {
+      Row({ space: 4 }) {
         Blank()
         Text(this.scopeCaption())
           .fontSize(WAFont.micro)

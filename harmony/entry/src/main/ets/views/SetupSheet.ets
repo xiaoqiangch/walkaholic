@@ -140,6 +140,11 @@ export struct SetupSheet {
   readBundledKeys: () => string | undefined = () => undefined;
   adminBase: string = 'http://127.0.0.1:8802';
 
+  /** 方向偏好（度）；主界面罗盘点了「东」就传 90。undefined = 全向（原行为） */
+  @Prop direction: number = -1;
+  /** 方向文案（东/南/西/北），用于顶部提示 */
+  @Prop directionLabel: string = '';
+
   onClose: () => void = () => {
   };
   onStarted: () => void = () => {
@@ -365,7 +370,8 @@ export struct SetupSheet {
           startTier: this.searchTier >= 2 ? 2 : 0,
           scope: this.snapshot.selectedScope,
           excludedPlaceIDs: this.collectedPlaceIDs(),
-          moment: currentMoment()
+          moment: currentMoment(),
+          direction: this.direction >= 0 ? this.direction : undefined
         }, Math.random());
       } catch (err) {
         result = undefined;
@@ -813,14 +819,31 @@ export struct SetupSheet {
 
         Scroll() {
           Column({ space: 0 }) {
-            Text('这次的盲盒，你想要什么？')
+            // 方向标签：从罗盘进来时明确告诉用户「这次是朝哪边走」
+            if (this.directionLabel.length > 0) {
+              Row({ space: 6 }) {
+                Text('往' + this.directionLabel)
+                  .fontSize(WAFont.microSm)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(WAColor.amberDeep)
+                Text('方向探索')
+                  .fontSize(WAFont.microSm)
+                  .fontColor(WAColor.ink3)
+              }
+              .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+              .backgroundColor(WAColor.amberSoft)
+              .borderRadius(WASize.chipRadius)
+              .margin({ bottom: 8 })
+            }
+
+            Text(this.directionLabel.length > 0 ? '往' + this.directionLabel + '边走，随机给你一个这边的惊喜' : '这次的盲盒，你想要什么？')
               .fontSize(this.isShort() ? 19 : 22)
               .fontWeight(FontWeight.Bold)
               .fontColor(WAColor.ink)
               .width('100%')
               .maxLines(2)
 
-            Text('选完就出发，目的地保密。')
+            Text(this.directionLabel.length > 0 ? '方向定了，目的地还是保密。' : '选完就出发，目的地保密。')
               .fontSize(WAFont.caption)
               .fontColor(WAColor.ink3)
               .width('100%')

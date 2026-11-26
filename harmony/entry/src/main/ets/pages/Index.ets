@@ -269,8 +269,26 @@ struct Index {
     this.revision = this.revision + 1;
   }
 
+  /** 当前探索方向（0=北 90=东 180=南 270=西；-1=全向） */
+  @State private exploreDirection: number = -1;
+
   private openSetup(): void {
+    this.exploreDirection = -1;
     this.activeOverlay = OVERLAY_SETUP;
+  }
+
+  /** 罗盘点了某个方向 → 带着方向打开设置页 */
+  private openSetupWithDirection(bearing: number): void {
+    this.exploreDirection = bearing;
+    this.activeOverlay = OVERLAY_SETUP;
+  }
+
+  private directionLabelOf(bearing: number): string {
+    if (bearing === 0) return '北';
+    if (bearing === 90) return '东';
+    if (bearing === 180) return '南';
+    if (bearing === 270) return '西';
+    return '';
   }
 
   private closeSetup(): void {
@@ -626,6 +644,13 @@ struct Index {
           onOpenSetup: () => {
             this.openSetup();
           },
+          onExploreDirection: (bearing: number) => {
+            this.openSetupWithDirection(bearing);
+          },
+          onBuryHere: () => {
+            this.activeOverlay = OVERLAY_BURY;
+            this.refresh();
+          },
           onOpenJourney: () => {
             this.activeOverlay = OVERLAY_JOURNEY;
             // 恢复上次旅程时路线不落盘：不重新规划就会退回「抽象地图」，
@@ -818,6 +843,8 @@ struct Index {
           kv: this.kv,
           readBundledKeys: (): string | undefined => this.bundledKeys,
           adminBase: this.adminBase,
+          direction: this.exploreDirection,
+          directionLabel: this.directionLabelOf(this.exploreDirection),
           onClose: () => {
             this.closeSetup();
           },

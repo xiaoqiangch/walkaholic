@@ -381,6 +381,13 @@ function coreText(name) {
   return fs.readFileSync(file, 'utf8');
 }
 
+/** 读 ets 目录下任意相对路径的文件（components/、views/、pages/ 都行） */
+function etsText(relativePath) {
+  const file = path.join(ETS_ROOT, relativePath);
+  if (!fs.existsSync(file)) return '';
+  return fs.readFileSync(file, 'utf8');
+}
+
 function expectIn(section, file, text, needles) {
   let missing = 0;
   for (const needle of needles) {
@@ -1037,6 +1044,75 @@ function checkPhotoGpsGuard() {
 }
 
 // ============================================================
+// 15) 首页方向罗盘（四向探索 + 中心埋盒）
+// ============================================================
+
+/**
+ * 首页从「一个开盒按钮」改成「方向罗盘」。守四件事：
+ *   A. 组件存在且四向方位角齐全（0/90/180/270）
+ *   B. 中心按钮文案是「在此埋下」而不是「开一个盲盒」
+ *   C. 方向能一路传到引擎（HomeView → Index → SetupSheet → prepareQuest）
+ *   D. 引擎侧真的有方向扇区过滤，且扇区空时回退全向（不能因方向没货而失败）
+ */
+function checkDirectionDial() {
+  const dial = etsText('components/DirectionDial.ets');
+  if (dial.length === 0) {
+    fail('方向罗盘', '缺少 components/DirectionDial.ets（首页主交互）');
+  } else {
+    expectIn('方向罗盘', 'components/DirectionDial.ets', dial, [
+      "bearing: 0", "bearing: 90", "bearing: 180", "bearing: 270",
+      "label: '北'", "label: '东'", "label: '南'", "label: '西'",
+      // 中心按钮（不是原来的「开一个盲盒」）
+      "'在此埋下'",
+      'onExploreDirection',
+      'onBuryHere',
+      'onResume',
+      // 进行中的旅程要能继续，避免误触开新盒
+      'hasActiveSession'
+    ]);
+  }
+
+  // B. 首页主卡必须用罗盘，且不再有单按钮
+  const home = etsText('views/HomeView.ets');
+  if (home.length === 0) {
+    fail('方向罗盘', '缺少 views/HomeView.ets');
+  } else {
+    expectIn('方向罗盘', 'views/HomeView.ets', home, ['DirectionDial({', 'onExploreDirection', 'onBuryHere']);
+    if (home.includes("title: '开一个盲盒'")) {
+      fail('方向罗盘', 'HomeView 里仍有旧的「开一个盲盒」单按钮（应已换成 DirectionDial）');
+    }
+  }
+
+  // C. 方向要一路传到引擎
+  const index = etsText('pages/Index.ets');
+  const setup = etsText('views/SetupSheet.ets');
+  if (!index.includes('openSetupWithDirection')) {
+    fail('方向罗盘', 'pages/Index.ets 缺少 openSetupWithDirection（罗盘点击没接到设置页）');
+  }
+  if (!setup.includes('@Prop direction')) {
+    fail('方向罗盘', 'views/SetupSheet.ets 缺少 @Prop direction');
+  }
+  if (!setup.includes('direction: this.direction >= 0')) {
+    fail('方向罗盘', 'views/SetupSheet.ets 没把 direction 传给 prepareQuest');
+  }
+
+  // D. 引擎侧的方向过滤 + 回退
+  const parity = coreText('parity.ts');
+  expectIn('方向罗盘', 'core/parity.ts', parity, [
+    'direction?: number',
+    'DIRECTION_TOLERANCE_DEG',
+    'export function angularGap',
+    'poolInDirection',
+    // 关键：扇区空必须回退全向，否则某些方向会一直抽不出盒子
+    'narrowed.length > 0'
+  ]);
+  const search = coreText('search.ts');
+  expectIn('方向罗盘', 'core/search.ts', search, ['direction?: number', 'direction: options.direction']);
+  const flow = coreText('flow.ts');
+  expectIn('方向罗盘', 'core/flow.ts', flow, ['direction?: number', 'direction: input.direction']);
+}
+
+// ============================================================
 // 输出
 // ============================================================
 
@@ -1054,7 +1130,8 @@ const sections = [
   ['布局陷阱', checkBlankScreenPattern],
   ['iOS 对齐', checkIosParity],
   ['疆域对齐', checkTerritory],
-  ['拍照验证', checkPhotoGpsGuard]
+  ['拍照验证', checkPhotoGpsGuard],
+  ['方向罗盘', checkDirectionDial]
 ];
 
 console.log('═══ 步迷 Walkaholic · HarmonyOS ArkTS 静态自检 ═══');
