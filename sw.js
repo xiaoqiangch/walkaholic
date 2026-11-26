@@ -5,7 +5,7 @@
  *   - 其他同源请求：网络优先，失败回落缓存
  *   - 跨域请求一律不碰
  */
-const VERSION = "walkaholic-v56-steps"
+const VERSION = "walkaholic-v57-cachefix"
 const SHELL = [
   "./",
   "./index.html",
@@ -26,7 +26,15 @@ const SHELL = [
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(VERSION).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting())
+    // 关键：不能用 cache.addAll（会命中 HTTP 缓存，抓到旧 app.js）。
+    // 必须 cache: 'reload' 强制走网络，否则「SW 装了新版本、实际还是旧代码」。
+    caches.open(VERSION)
+      .then((cache) => Promise.all(SHELL.map((url) =>
+        fetch(new Request(url, { cache: 'reload' }))
+          .then((res) => (res.ok ? cache.put(url, res) : undefined))
+          .catch(() => undefined)
+      )))
+      .then(() => self.skipWaiting())
   );
 });
 
