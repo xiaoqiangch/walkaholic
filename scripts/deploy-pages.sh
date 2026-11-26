@@ -44,7 +44,7 @@ else
 fi
 
 echo "== 3) 推送 $BRANCH =="
-git push --force "git@github.com:${REPO}.git" "${PUSH_REF}:refs/heads/${BRANCH}"
+git push --force origin "${PUSH_REF}:refs/heads/${BRANCH}"
 echo "   pushed $PUSH_REF -> $BRANCH"
 
 echo "== 4) 开启 GitHub Pages（若未开）=="
