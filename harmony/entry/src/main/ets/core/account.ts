@@ -528,7 +528,13 @@ export interface ProviderAvailability {
 /** 全部登录方式 */
 export interface ProvidersAvailability {
   password: ProviderAvailability;
+  /**
+   * Apple 登录：**只给 iOS 端用**。
+   * 鸿蒙/安卓客户端必须忽略这一项 —— 否则会出现「鸿蒙版里显示通过 Apple 登录」的平台错乱。
+   */
   apple: ProviderAvailability;
+  /** 华为账号登录：鸿蒙端的原生登录方式 */
+  huawei: ProviderAvailability;
   sms: ProviderAvailability;
   wechat: ProviderAvailability;
 }
@@ -565,6 +571,7 @@ export async function fetchProviders(
   const result: ProvidersAvailability = {
     password: emptyAvailability(),
     apple: emptyAvailability(),
+    huawei: emptyAvailability(),
     sms: emptyAvailability(),
     wechat: emptyAvailability()
   };
@@ -581,9 +588,54 @@ export async function fetchProviders(
   const record: Record<string, unknown> = providers as Record<string, unknown>;
   result.password = readAvailability(record['password']);
   result.apple = readAvailability(record['apple']);
+  result.huawei = readAvailability(record['huawei']);
   result.sms = readAvailability(record['sms']);
   result.wechat = readAvailability(record['wechat']);
   return result;
+}
+
+// ============================================================
+// 华为账号登录（HUAWEI ID）—— 鸿蒙端原生登录
+// ============================================================
+
+/**
+ * 用华为账号授权码换本站会话。
+ * 授权码由 AccountKit（@kit.AccountKit）在客户端取得，这里只做交换。
+ */
+export async function loginWithHuawei(
+  client: HttpClient,
+  kv: KeyValueStore,
+  baseUrl: string,
+  code: string
+): Promise<AccountResult<AccountUser>> {
+  const trimmed: string = code.trim();
+  if (trimmed.length === 0) {
+    return failResult<AccountUser>('没有拿到华为账号授权码', 'BAD_REQUEST');
+  }
+  const body: Record<string, unknown> = { code: trimmed };
+  let outcome: ApiOutcome;
+  try {
+    outcome = await callApi(client, baseUrl, '/api/auth/huawei', 'POST', '', body);
+  } catch (error) {
+    return failResult<AccountUser>(errorText(error));
+  }
+  if (outcome.status < 200 || outcome.status >= 300) {
+    const code_: string = errorCodeOf(outcome.json);
+    const message: string = accountErrorText(code_, errorMessageOf(outcome.json, '华为账号登录失败'));
+    return failResult<AccountUser>(message, code_);
+  }
+  const user: AccountUser | undefined = userOf(outcome.json);
+  if (user === undefined) {
+    return failResult<AccountUser>('服务没有返回账号信息');
+  }
+  const cookie: string = extractCookie(outcome.headers);
+  const config: AccountConfig = {
+    baseUrl: normalizeBaseUrl(baseUrl),
+    user: user
+  };
+  if (cookie.length > 0) config.cookie = cookie;
+  writeAccountConfig(kv, config);
+  return { ok: true, value: user };
 }
 
 // ============================================================

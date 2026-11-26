@@ -44,6 +44,7 @@ import {
 } from '../components/Common';
 import { WaAbstractMap } from '../components/AbstractMap';
 import { WaFogPath } from '../components/FogPath';
+import { BurySurprisePanel } from '../components/BurySurprisePanel';
 import {
   CompassWatcher,
   GeoWatcher,
@@ -92,6 +93,9 @@ export struct JourneyView {
   /** 返回首页（保留旅程，首页可「继续」） */
   onBack: () => void = () => {
   };
+  /** 用户主动终止探索（放弃这次盲盒）*/
+  onAborted: () => void = () => {
+  };
   /** 到达：由 Index 打开揭晓全屏 */
   onArrived: () => void = () => {
   };
@@ -107,6 +111,12 @@ export struct JourneyView {
 
   @State private snapshot: AppSnapshot = emptySnapshot();
   @State private nowMs: number = 0;
+  /** 「确定放弃这次探索？」确认弹层 */
+  @State private confirmAbort: boolean = false;
+  /** 探索途中「随手埋一个惊喜」面板 */
+  @State private showBuryHere: boolean = false;
+  /** 刚埋完的提示（2 秒后自动消失） */
+  @State private buryToast: string = '';
   @State private paused: boolean = false;
   @State private pausedAccumMs: number = 0;
   @State private pauseStartedAt: number = 0;
@@ -505,6 +515,40 @@ export struct JourneyView {
     this.beginArrival();
   }
 
+  /** 埋完的轻提示：2 秒后自动消失，不打断继续走 */
+  private flashBuryToast(text: string): void {
+    this.buryToast = text;
+    setTimeout(() => {
+      this.buryToast = '';
+    }, 2400);
+  }
+
+  /** 只暂停计时（确认弹层期间时间不该继续走）*/
+  private pauseOnly(): void {
+    if (!this.paused) {
+      this.pauseStartedAt = Date.now();
+      this.paused = true;
+    }
+  }
+
+  /** 从确认弹层返回（继续走）*/
+  private resumeFromAbort(): void {
+    if (this.paused) {
+      this.togglePause();
+    }
+  }
+
+  /**
+   * 终止探索：清掉会话与路线，保留已走里程（足迹）。
+   * 这是用户主动放弃 —— 必须真的把 session 清掉，否则下次进来还是这个盲盒。
+   */
+  private abortQuest(): void {
+    getStore().abandonQuest();
+    this.load();
+    this.onChanged();
+    this.onAborted();
+  }
+
   private togglePause(): void {
     if (this.paused) {
       this.pausedAccumMs = this.pausedAccumMs + Math.max(0, Date.now() - this.pauseStartedAt);
@@ -864,6 +908,29 @@ export struct JourneyView {
 
       Blank()
 
+      // 探索途中随手埋：突然看到有意思的东西，拍一张就能埋在这
+      Button() {
+        Row({ space: 4 }) {
+          SymbolGlyph($r('sys.symbol.camera_fill'))
+            .fontSize(WAFont.captionSm)
+            .fontColor([WAColor.amber])
+            .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+          Text('埋一个')
+            .fontSize(WAFont.captionSm)
+            .fontColor(WAColor.amber)
+        }
+      }
+      .type(ButtonType.Capsule)
+      .height(28)
+      .padding({ left: 10, right: 11 })
+      .backgroundColor(WAColor.amberSoft)
+      .border({ width: 1, color: WAColor.amberBorder, radius: WASize.chipRadius })
+      .onClick(() => {
+        this.pauseOnly();
+        this.showBuryHere = true;
+      })
+      .accessibilityText('在当前位置埋一个惊喜')
+
       Button() {
         Text(this.paused ? '继续' : '暂停')
           .fontSize(WAFont.captionSm)
@@ -877,6 +944,23 @@ export struct JourneyView {
       .onClick(() => {
         this.togglePause();
       })
+
+      // 终止探索：走确认弹层，避免误触把走了半天的盲盒丢掉
+      Button() {
+        Text('终止')
+          .fontSize(WAFont.captionSm)
+          .fontColor(WAColor.ember)
+      }
+      .type(ButtonType.Capsule)
+      .height(28)
+      .padding({ left: 11, right: 11 })
+      .backgroundColor('#1AFA2A2D')
+      .border({ width: 1, color: '#33FA2A2D', radius: WASize.chipRadius })
+      .onClick(() => {
+        this.pauseOnly();
+        this.confirmAbort = true;
+      })
+      .accessibilityText('终止这次探索')
     }
     .width('100%')
     .padding({ left: WASize.pagePadding, right: WASize.pagePadding, top: 6, bottom: 6 })
@@ -1553,6 +1637,118 @@ export struct JourneyView {
         .justifyContent(FlexAlign.Center)
         .backgroundColor(WAColor.stage)
         .opacity(this.flashOpacity)
+      }
+
+      // 探索途中「随手埋一个惊喜」：全屏面板盖在旅程页上，埋完回来继续走
+      if (this.showBuryHere) {
+        Stack({ alignContent: Alignment.TopStart }) {
+          Column()
+            .width('100%')
+            .height('100%')
+            .backgroundColor(WAColor.cream)
+
+          BurySurprisePanel({
+            winWidth: this.winWidth,
+            winHeight: this.winHeight,
+            onClose: () => {
+              this.showBuryHere = false;
+              this.resumeFromAbort();
+            },
+            onBuried: (surpriseID: string) => {
+              this.showBuryHere = false;
+              this.resumeFromAbort();
+              this.flashBuryToast('埋好了 · 就在这儿，回来还能找到');
+              this.onChanged();
+            },
+            onChanged: () => {
+              this.onChanged();
+            }
+          })
+        }
+        .width('100%')
+        .height('100%')
+      }
+
+      // 埋完的轻提示
+      if (this.buryToast.length > 0) {
+        Column({ space: 4 }) {
+          Text(this.buryToast)
+            .fontSize(WAFont.captionSm)
+            .fontColor(WAColor.creamOnStage)
+        }
+        .padding({ left: 16, right: 16, top: 10, bottom: 10 })
+        .backgroundColor('#CC182431')
+        .borderRadius(WASize.chipRadius)
+        .position({ x: 0, y: 96 })
+        .width('100%')
+        .alignItems(HorizontalAlign.Center)
+        .hitTestBehavior(HitTestMode.None)
+      }
+
+      // 「确定放弃这次探索？」确认弹层
+      if (this.confirmAbort) {
+        Stack({ alignContent: Alignment.Center }) {
+          Column()
+            .width('100%')
+            .height('100%')
+            .backgroundColor(WAColor.scrim)
+            .onClick(() => {
+              this.confirmAbort = false;
+              this.resumeFromAbort();
+            })
+
+          Column({ space: 12 }) {
+            Text('确定终止这次探索？')
+              .fontSize(WAFont.titleSm)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(WAColor.ink)
+              .width('100%')
+
+            Text('已经走过的 ' + this.distanceShort(this.walkedMeters()) +
+              ' 会保留在足迹里，但这个盲盒不会揭晓 —— 目的地是哪里、藏着什么，你都不会知道了。')
+              .fontSize(WAFont.caption)
+              .fontColor(WAColor.ink2)
+              .lineHeight(20)
+              .width('100%')
+
+            Button() {
+              Text('继续走，别放弃')
+                .fontSize(WAFont.caption)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(WAColor.iconOnBrand)
+            }
+            .type(ButtonType.Capsule)
+            .height(42)
+            .width('100%')
+            .backgroundColor(WAColor.amber)
+            .onClick(() => {
+              this.confirmAbort = false;
+              this.resumeFromAbort();
+            })
+
+            Button() {
+              Text('终止探索')
+                .fontSize(WAFont.caption)
+                .fontColor(WAColor.ember)
+            }
+            .type(ButtonType.Capsule)
+            .height(40)
+            .width('100%')
+            .backgroundColor(WAColor.paper2)
+            .onClick(() => {
+              this.confirmAbort = false;
+              this.abortQuest();
+            })
+          }
+          .width('100%')
+          .constraintSize({ maxWidth: 380 })
+          .padding(18)
+          .backgroundColor(WAColor.paper)
+          .borderRadius(WASize.cardRadius)
+          .margin({ left: WASize.pagePadding, right: WASize.pagePadding })
+        }
+        .width('100%')
+        .height('100%')
       }
 
       // 「还没到停车圈，确定已经停好车了吗？」确认弹层

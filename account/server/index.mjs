@@ -46,6 +46,11 @@ import {
   claimSurprise
 } from './surprises.mjs';
 import {
+  publicHuaweiConfig,
+  resolveHuaweiConfig,
+  verifyHuaweiCode
+} from './huawei.mjs';
+import {
   EconomyError,
   ECONOMY,
   ensureWallet,
@@ -396,7 +401,10 @@ export function createServer(options = {}) {
         ok: true,
         providers: {
           password: { enabled: true },
+          // apple 保留给 iOS 端；鸿蒙/安卓客户端必须忽略它（平台错乱修复）
           apple: { enabled: true, clientId: appleClientId() },
+          // 华为账号：鸿蒙端的原生登录方式
+          huawei: publicHuaweiConfig(env),
           sms: publicSmsConfig(Object.assign({}, env, options.smsEnv || {})),
           wechat: publicWechatConfigShim()
         }
@@ -444,6 +452,61 @@ export function createServer(options = {}) {
       store.bindIdentity('apple', identity.sub, user.id, {
         nickname: body.fullName || null,
         avatar: null
+      }, now());
+      createLoginResponse(req, res, user);
+      return;
+    }
+
+    // ---------- 华为账号登录（HUAWEI ID）----------
+    // 鸿蒙端的原生登录方式。未配 AGC 凭据时明确 503，不假装可用。
+    if (pathname === '/api/auth/huawei' && method === 'POST') {
+      const body = await readBody(req);
+      const huaweiConfig = resolveHuaweiConfig(env);
+      if (!huaweiConfig.enabled) {
+        throw new ApiError(
+          '服务端还没配置华为账号登录（缺 ' + huaweiConfig.missing.join('、') + '）',
+          'HUAWEI_NOT_CONFIGURED',
+          503
+        );
+      }
+      const code = typeof body.code === 'string' ? body.code : '';
+      if (code.length === 0) {
+        throw new ApiError('缺少华为账号授权码', 'HUAWEI_NO_CODE', 400);
+      }
+      let identity;
+      try {
+        identity = await verifyHuaweiCode(huaweiConfig, code, options.huaweiFetch || fetch);
+      } catch (err) {
+        throw new ApiError('华为账号校验失败：' + (err && err.message ? err.message : '未知原因'), 'HUAWEI_INVALID', 401);
+      }
+
+      const bound = store.findIdentity('huawei', identity.sub);
+      if (bound) {
+        const existing = store.findUserById(bound.userId);
+        if (existing) {
+          store.bindIdentity('huawei', identity.sub, existing.id, {
+            nickname: identity.nickname || null,
+            avatar: identity.avatar || null
+          }, now());
+          createLoginResponse(req, res, existing);
+          return;
+        }
+      }
+
+      const base = sanitizeWeChatUsername(identity.nickname) || ('huawei_' + identity.sub.slice(0, 8));
+      let username = base;
+      let attempt = 1;
+      while (store.findUserByUsername(username)) {
+        attempt += 1;
+        username = (base.slice(0, 18) + '_' + attempt).slice(0, 24);
+        if (attempt > 50) throw new ApiError('用户名冲突过多，请稍后再试', 'USERNAME_TAKEN', 409);
+      }
+      const placeholder = generateSessionToken();
+      const hashed = hashPassword(placeholder);
+      const user = store.createUser(username, hashed.hash, hashed.salt, now());
+      store.bindIdentity('huawei', identity.sub, user.id, {
+        nickname: identity.nickname || null,
+        avatar: identity.avatar || null
       }, now());
       createLoginResponse(req, res, user);
       return;

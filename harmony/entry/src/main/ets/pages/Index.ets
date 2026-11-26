@@ -1004,6 +1004,10 @@ struct Index {
           onBack: () => {
             this.closeJourney();
           },
+          onAborted: () => {
+            // 终止探索：关掉旅程页回首页（session 已被 abandonQuest 清掉）
+            this.closeJourney();
+          },
           onArrived: () => {
             this.openReveal(false);
           },

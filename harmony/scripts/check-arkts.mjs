@@ -1147,6 +1147,58 @@ function checkDirectionDial() {
 }
 
 // ============================================================
+// 16) 登录方式平台正确性（鸿蒙不该出现 Apple 登录）
+// ============================================================
+
+/**
+ * 用户明确反馈：「鸿蒙版本里面怎么会出现了什么 Apple ID 登录…你应该是用华为的 ID 进行登录」
+ *
+ * 守三件事：
+ *   A. 鸿蒙 UI 里不许出现「通过 Apple 登录」这类 iOS 专属入口
+ *   B. 必须有华为账号登录入口，且走 AccountKit
+ *   C. 服务端要有 huawei provider（客户端才不会永远显示「不可用」）
+ */
+function checkLoginPlatform() {
+  const panel = etsText('components/AccountPanel.ets');
+  if (panel.length === 0) {
+    fail('登录平台', '缺少 components/AccountPanel.ets');
+    return;
+  }
+  // A. 禁止 Apple/微信 出现在鸿蒙登录主入口
+  if (panel.includes("'通过 Apple 登录'")) {
+    fail('登录平台', 'AccountPanel 仍显示「通过 Apple 登录」—— 鸿蒙端不该有 Apple 登录');
+  }
+  if (panel.includes("oauthRow('微信登录'")) {
+    fail('登录平台', 'AccountPanel 仍显示「微信登录」入口（未接入，属于假按钮）');
+  }
+  // B. 必须有华为账号入口
+  expectIn('登录平台', 'components/AccountPanel.ets', panel, [
+    "'华为账号登录'",
+    'signInWithHuawei',
+    'requestHuaweiAuthCode'
+  ]);
+  const huaweiId = etsText('components/HuaweiSignIn.ts');
+  if (huaweiId.length === 0) {
+    fail('登录平台', '缺少 components/HuaweiSignIn.ts（华为账号登录实现）');
+  } else {
+    expectIn('登录平台', 'components/HuaweiSignIn.ts', huaweiId, [
+      "@kit.AccountKit",
+      'HuaweiIDProvider',
+      'createLoginWithHuaweiIDRequest',
+      'AuthenticationController',
+      'authorizationCode'
+    ]);
+  }
+  // 服务端要认 huawei 登录方式
+  const accountCore = etsText('core/account.ts');
+  expectIn('登录平台', 'core/account.ts', accountCore, [
+    'huawei: ProviderAvailability',
+    '/api/auth/huawei',
+    'loginWithHuawei'
+  ]);
+}
+
+// ============================================================
 // 输出
 // ============================================================
 
@@ -1165,7 +1217,8 @@ const sections = [
   ['iOS 对齐', checkIosParity],
   ['疆域对齐', checkTerritory],
   ['拍照验证', checkPhotoGpsGuard],
-  ['方向罗盘', checkDirectionDial]
+  ['方向罗盘', checkDirectionDial],
+  ['登录平台', checkLoginPlatform]
 ];
 
 console.log('═══ 步迷 Walkaholic · HarmonyOS ArkTS 静态自检 ═══');

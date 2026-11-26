@@ -16,7 +16,7 @@ import { BuriedSurprise, GeoPoint } from '../core/types';
 import { getStore } from '../core/store';
 import { WAColor, WAFont, WASize } from '../theme/Theme';
 import { WaIconButton, WaMicroLabel, WaPrimaryButton, WaQuietButton } from './Common';
-import { PickedPhoto, adoptPhoto, pickPhotoFromAlbum, toImageUri } from './PhotoPick';
+import { PickedPhoto, adoptPhoto, pickPhotoFromAlbum, takePhoto, toImageUri } from './PhotoPick';
 import { getCurrentLocationOnce, requestLocationPermission } from './Location';
 
 const MESSAGE_LIMIT: number = 60;
@@ -115,6 +115,26 @@ export struct BurySurprisePanel {
   // 照片
   // ============================================================
 
+  /**
+   * 拍照：走到半路突然看到有意思的东西 —— 直接举起手机拍，
+   * 不用先退出探索、再进相册找图。
+   */
+  private async shootPhoto(): Promise<void> {
+    if (this.busy) return;
+    this.errorText = '';
+    let mediaUri: string | undefined = undefined;
+    try {
+      mediaUri = await takePhoto();
+    } catch (err) {
+      mediaUri = undefined;
+    }
+    if (mediaUri === undefined) {
+      // 没有相机权限 / 用户取消：不当作错误，用户还能改用相册
+      return;
+    }
+    await this.adoptChosenPhoto(mediaUri);
+  }
+
   private async choosePhoto(): Promise<void> {
     if (this.busy) return;
     this.errorText = '';
@@ -122,6 +142,11 @@ export struct BurySurprisePanel {
     if (mediaUri === undefined) {
       return;
     }
+    await this.adoptChosenPhoto(mediaUri);
+  }
+
+  /** 读取并压缩「已选中的那张图」（拍照与相册共用） */
+  private async adoptChosenPhoto(mediaUri: string): Promise<void> {
     this.busy = true;
     let adopted: PickedPhoto | undefined = undefined;
     try {
@@ -359,11 +384,11 @@ export struct BurySurprisePanel {
 
         Button() {
           Row({ space: 6 }) {
-            SymbolGlyph($r('sys.symbol.bag_fill'))
+            SymbolGlyph($r('sys.symbol.camera_fill'))
               .fontSize(WAFont.bodySm)
               .fontColor([WAColor.iconOnBrand])
               .renderingStrategy(SymbolRenderingStrategy.SINGLE)
-            Text(this.busy ? '正在读取…' : '从相册选')
+            Text(this.busy ? '正在读取…' : '拍一张')
               .fontSize(WAFont.bodySm)
               .fontWeight(FontWeight.Medium)
               .fontColor(WAColor.iconOnBrand)
@@ -373,6 +398,29 @@ export struct BurySurprisePanel {
         .height(WASize.buttonHeight)
         .padding({ left: 22, right: 22 })
         .backgroundColor(WAColor.amber)
+        .enabled(!this.busy)
+        .opacity(this.busy ? 0.5 : 1)
+        .onClick(() => {
+          this.shootPhoto();
+        })
+
+        Button() {
+          Row({ space: 6 }) {
+            SymbolGlyph($r('sys.symbol.square_grid_2x2'))
+              .fontSize(WAFont.bodySm)
+              .fontColor([WAColor.ink2])
+              .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+            Text('从相册选')
+              .fontSize(WAFont.bodySm)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(WAColor.ink2)
+          }
+        }
+        .type(ButtonType.Capsule)
+        .height(WASize.buttonHeight)
+        .padding({ left: 22, right: 22 })
+        .backgroundColor(WAColor.paper2)
+        .border({ width: 1, color: WAColor.line, radius: WASize.chipRadius })
         .enabled(!this.busy)
         .opacity(this.busy ? 0.5 : 1)
         .onClick(() => {

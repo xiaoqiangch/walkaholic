@@ -14,6 +14,7 @@ import { promptAction } from '@kit.ArkUI';
 import {
   ACCOUNT_BASE_DEFAULT,
   AccountConfig,
+  AccountResult,
   AccountUser,
   ProvidersAvailability,
   accountStatusText,
@@ -23,6 +24,7 @@ import {
   isValidPhone,
   isValidSmsCode,
   login,
+  loginWithHuawei,
   loginWithSms,
   logout,
   me,
@@ -36,6 +38,7 @@ import {
 import { KeyValueStore } from '../core/contract';
 import { HttpClient } from '../core/http';
 import { WAColor, WAFont, WASize } from '../theme/Theme';
+import { HuaweiAuthCodeResult, requestHuaweiAuthCode } from './HuaweiSignIn';
 
 /** 面板状态 */
 const MODE_IDLE: string = 'idle';
@@ -46,6 +49,7 @@ function emptyProviders(): ProvidersAvailability {
   const providers: ProvidersAvailability = {
     password: { enabled: true, missing: [], appid: '', clientId: '' },
     apple: { enabled: false, missing: [], appid: '', clientId: '' },
+    huawei: { enabled: false, missing: [], appid: '', clientId: '' },
     sms: { enabled: false, missing: [], appid: '', clientId: '' },
     wechat: { enabled: false, missing: [], appid: '', clientId: '' }
   };
@@ -81,7 +85,7 @@ export struct WaAccountPanel {
   @State private baseUrlText: string = ACCOUNT_BASE_DEFAULT;
   @State private usernameText: string = '';
   @State private passwordText: string = '';
-  /** 账号密码收在「其他方式」里，默认收起（主入口只留 Apple / 微信） */
+  /** 账号密码收在「其他方式」里，默认收起（主入口：华为账号 → 手机号） */
   @State private passwordExpanded: boolean = false;
   @State private deletePassword: string = '';
   @State private confirmDelete: boolean = false;
@@ -356,16 +360,32 @@ export struct WaAccountPanel {
   @Builder
   loginForm() {
     Column({ space: 10 }) {
-      // ---------- 主入口：Apple / 微信 ----------
-      // 鸿蒙侧：Apple 登录在本平台不提供；微信登录需要 @tencent/wechat_open_sdk
-      // 并在 AGC 登记包名+签名，服务端 appid 也还没配。两者如实标注「暂不可用」，
-      // 不画点了没反应的按钮；账号密码收在下面「用账号密码登录」里作为兜底。
-      this.oauthRow('通过 Apple 登录', false, () => {
-        this.showMessage('鸿蒙端不提供 Apple 登录', true);
-      })
-      this.oauthRow('微信登录', false, () => {
-        this.showMessage('微信登录还没接入（需要 WeChatOpenSDK 与服务端 appid）', true);
-      })
+      // ---------- 主入口：华为账号（鸿蒙原生）----------
+      // 重要：鸿蒙端绝不显示 Apple 登录 —— 那是 iOS 的登录方式，出现在这里就是平台错乱。
+      // 移动端登录优先级：华为账号 > 手机号 > 账号密码。
+      if (this.providers.huawei.enabled) {
+        this.oauthRow('华为账号登录', true, () => {
+          this.signInWithHuawei();
+        })
+      } else {
+        // 如实说明缺什么，不画点了没反应的假按钮
+        Column({ space: 3 }) {
+          Text('华为账号登录暂不可用')
+            .fontSize(WAFont.captionSm)
+            .fontColor(WAColor.ink2)
+          Text('服务端还没配置华为账号登录（缺 ' + this.providers.huawei.missing.join('、') +
+            '）。在 AGC「项目设置 → 应用」里配置后即可启用。')
+            .fontSize(WAFont.microSm)
+            .fontColor(WAColor.ink3)
+            .lineHeight(16)
+            .width('100%')
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding(10)
+        .backgroundColor(WAColor.paper2)
+        .borderRadius(WASize.cardRadiusXs)
+      }
 
       if (!this.passwordExpanded) {
         Button() {
@@ -386,6 +406,42 @@ export struct WaAccountPanel {
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
+  }
+
+  /**
+   * 华为账号登录：走 AccountKit 拿 authorizationCode，再交服务端换本站会话。
+   *
+   * 为什么不在客户端直接验：华为账号的 client_secret 必须留在服务端，
+   * 客户端只负责拿授权码。
+   */
+  private async signInWithHuawei(): Promise<void> {
+    if (this.kv === undefined || this.http === undefined) {
+      this.showMessage('账号功能还没准备好，稍后再试', true);
+      return;
+    }
+    let outcome: HuaweiAuthCodeResult;
+    try {
+      outcome = await requestHuaweiAuthCode();
+    } catch (err) {
+      outcome = { code: '', reason: '华为账号登录启动失败' };
+    }
+    if (outcome.code.length === 0) {
+      // reason 为空 = 用户自己取消，不用报错打扰
+      if (outcome.reason.length > 0) {
+        this.showMessage(outcome.reason, true);
+      }
+      return;
+    }
+    const result: AccountResult<AccountUser> =
+      await loginWithHuawei(this.http, this.kv, this.config.baseUrl, outcome.code);
+    if (!result.ok) {
+      const reason: string = result.error === undefined ? '华为账号登录失败' : result.error;
+      this.showMessage(reason, true);
+      return;
+    }
+    this.load();
+    this.showMessage('已用华为账号登录', false);
+    this.onChanged();
   }
 
   /** 第三方登录按钮：不可用时置灰并说明原因，不做假按钮 */
