@@ -20,8 +20,7 @@
  * - 四向按钮用方位字（北/东/南/西）+ 箭头，字号比正文小，靠位置表意
  * - 中心按钮用品牌色实心，视觉权重最高
  */
-import { WASize, WATheme, WAFont, WAColor, WA_DUR_FAST, WA_EASE, WA_DUR_REGULAR } from '../theme/Theme';
-import { compassLabel } from '../core/geo';
+import { WASize, WAFont, WAColor, WA_DUR_QUICK, WA_EASE } from '../theme/Theme';
 
 /** 四个方向：方位角沿用地理惯例（0=北，顺时针） */
 export interface DialDirection {
@@ -40,6 +39,13 @@ const DIRECTIONS: DialDirection[] = [
 export struct DirectionDial {
   /** 罗盘直径；首页按可用宽度给 */
   @Prop dialSize: number = 236;
+  /**
+   * 手机朝向（度，0=正北，顺时针）。>=0 时整个罗盘跟着手机转，
+   * 让「北」始终指向真实北方。负值 = 罗盘不可用（静止朝北）。
+   */
+  @Prop heading: number = -1;
+  /** 罗盘不可用时的提示 */
+  @Prop headingUnavailable: boolean = false;
   /** 有进行中的旅程时，中心变成「继续」 */
   @Prop hasActiveSession: boolean = false;
   /** 中心按钮副标题（旅程剩余米数等） */
@@ -61,6 +67,20 @@ export struct DirectionDial {
 
   private centerSize(): number {
     return Math.max(74, Math.round(this.dialSize * 0.335));
+  }
+
+  /** 按钮文字的反向旋转角：父级转了 -heading，这里补回 +heading */
+  private counterAngle(): number {
+    const h: number = this.heading;
+    if (h < 0) return 0;
+    return h;
+  }
+
+  /** 旋转层角度：-heading（让北指向真实北） */
+  private rotorAngle(): number {
+    const h: number = this.heading;
+    if (h < 0) return 0;
+    return 0 - h;
   }
 
   /** 方向按钮的轨道半径 */
@@ -87,9 +107,9 @@ export struct DirectionDial {
     .border({ width: 1, color: WAColor.amberBorder })
     .shadow({ radius: 6, color: WAColor.shadowSoft, offsetX: 0, offsetY: 1 })
     // 反向旋转抵消父级旋转：按钮「位置」跟着罗盘转到真实方位，但文字始终正着
-    .rotate({ angle: this.heading >= 0 ? this.heading : 0 })
+    .rotate({ angle: this.counterAngle() })
     .scale({ x: this.pressedBearing === dir.bearing ? 0.91 : 1, y: this.pressedBearing === dir.bearing ? 0.91 : 1 })
-    .animation({ duration: WA_DUR_FAST, curve: WA_EASE })
+    .animation({ duration: WA_DUR_QUICK, curve: WA_EASE })
     .onClick(() => {
       this.onExploreDirection(dir.bearing);
     })
@@ -142,7 +162,7 @@ export struct DirectionDial {
     .border({ width: 3, color: this.hasActiveSession ? '#33FFFFFF' : '#26FFFFFF' })
     .shadow({ radius: 14, color: WAColor.shadowLift, offsetX: 0, offsetY: 4 })
     .scale({ x: this.centerPressed ? 0.94 : 1, y: this.centerPressed ? 0.94 : 1 })
-    .animation({ duration: WA_DUR_FAST, curve: WA_EASE })
+    .animation({ duration: WA_DUR_QUICK, curve: WA_EASE })
     .onClick(() => {
       if (this.hasActiveSession) {
         this.onResume();
@@ -201,15 +221,19 @@ export struct DirectionDial {
         .strokeWidth(1)
         .shadow({ radius: 8, color: WAColor.shadowSoft, offsetX: 0, offsetY: 2 })
 
-      // ③ 四个方向键
+      // ③ 四个方向键（@Builder 不能直接挂 .position，包一层 Stack 再定位）
       ForEach(DIRECTIONS, (dir: DialDirection) => {
-        this.directionButton(dir)
-          .position({
-            x: this.dialSize / 2 - this.dirButtonSize() / 2 + Math.sin((dir.bearing * Math.PI) / 180) *
-              ((this.dialSize - this.dirButtonSize()) / 2 - 2),
-            y: this.dialSize / 2 - this.dirButtonSize() / 2 - Math.cos((dir.bearing * Math.PI) / 180) *
-              ((this.dialSize - this.dirButtonSize()) / 2 - 2)
-          })
+        Stack({ alignContent: Alignment.Center }) {
+          this.directionButton(dir)
+        }
+        .width(this.dirButtonSize())
+        .height(this.dirButtonSize())
+        .position({
+          x: this.dialSize / 2 - this.dirButtonSize() / 2 + Math.sin((dir.bearing * Math.PI) / 180) *
+            this.orbitRadius(),
+          y: this.dialSize / 2 - this.dirButtonSize() / 2 - Math.cos((dir.bearing * Math.PI) / 180) *
+            this.orbitRadius()
+        })
       }, (dir: DialDirection) => String(dir.bearing))
     }
     .width(this.dialSize)
@@ -234,7 +258,7 @@ export struct DirectionDial {
       }
       .width(this.dialSize)
       .height(this.dialSize)
-      .rotate({ angle: this.heading >= 0 ? -this.heading : 0 })
+      .rotate({ angle: this.rotorAngle() })
 
       // 中心按钮不跟着转（「在当前位置埋下」与朝向无关）
       this.centerButton()

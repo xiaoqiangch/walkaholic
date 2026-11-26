@@ -141,7 +141,7 @@ export struct SetupSheet {
   adminBase: string = 'http://127.0.0.1:8802';
 
   /** 方向偏好（度）；主界面罗盘点了「东」就传 90。undefined = 全向（原行为） */
-  @Prop direction: number = -1;
+  @Prop exploreBearing: number = -1;
   /** 方向文案（东/南/西/北），用于顶部提示 */
   @Prop directionLabel: string = '';
 
@@ -371,7 +371,7 @@ export struct SetupSheet {
           scope: this.snapshot.selectedScope,
           excludedPlaceIDs: this.collectedPlaceIDs(),
           moment: currentMoment(),
-          direction: this.direction >= 0 ? this.direction : undefined
+          direction: this.exploreBearing >= 0 ? this.exploreBearing : undefined
         }, Math.random());
       } catch (err) {
         result = undefined;

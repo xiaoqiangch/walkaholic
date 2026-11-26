@@ -843,7 +843,7 @@ struct Index {
           kv: this.kv,
           readBundledKeys: (): string | undefined => this.bundledKeys,
           adminBase: this.adminBase,
-          direction: this.exploreDirection,
+          exploreBearing: this.exploreDirection,
           directionLabel: this.directionLabelOf(this.exploreDirection),
           onClose: () => {
             this.closeSetup();

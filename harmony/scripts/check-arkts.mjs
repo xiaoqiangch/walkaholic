@@ -1089,11 +1089,15 @@ function checkDirectionDial() {
   if (!index.includes('openSetupWithDirection')) {
     fail('方向罗盘', 'pages/Index.ets 缺少 openSetupWithDirection（罗盘点击没接到设置页）');
   }
-  if (!setup.includes('@Prop direction')) {
-    fail('方向罗盘', 'views/SetupSheet.ets 缺少 @Prop direction');
+  // 注意：不能叫 direction —— ArkUI CustomComponent 已有同名内置属性，会编译报错
+  if (!setup.includes('@Prop exploreBearing')) {
+    fail('方向罗盘', 'views/SetupSheet.ets 缺少 @Prop exploreBearing');
   }
-  if (!setup.includes('direction: this.direction >= 0')) {
-    fail('方向罗盘', 'views/SetupSheet.ets 没把 direction 传给 prepareQuest');
+  if (setup.includes('@Prop direction:')) {
+    fail('方向罗盘', 'views/SetupSheet.ets 用了 @Prop direction（与 ArkUI 内置属性冲突，编译会失败）');
+  }
+  if (!setup.includes('direction: this.exploreBearing >= 0')) {
+    fail('方向罗盘', 'views/SetupSheet.ets 没把 exploreBearing 传给 prepareQuest');
   }
 
   // C2. 罗盘绑定传感器：手机转动时方向盘要跟着转
@@ -1103,12 +1107,16 @@ function checkDirectionDial() {
   if (!home.includes('heading: this.compassHeading')) {
     fail('方向罗盘', 'HomeView 没把 compassHeading 传给 DirectionDial');
   }
-  if (!dial.includes('rotate({ angle: this.heading >= 0 ? -this.heading : 0 })')) {
+  // 旋转走 helper（避免 ArkTS 的 arkts-no-polymorphic-unops）
+  if (!dial.includes('rotorAngle()') || !dial.includes('return 0 - h;')) {
     fail('方向罗盘', 'DirectionDial 缺少按朝向反向旋转的旋转层');
   }
-  // 按钮内部要反向旋转，否则文字会跟着倒过来
-  if (!dial.includes('angle: this.heading >= 0 ? this.heading : 0')) {
+  if (!dial.includes('counterAngle()')) {
     fail('方向罗盘', 'DirectionDial 的四向按钮没有反向旋转（文字会倒）');
+  }
+  // @Prop heading 必须存在（之前漏了，真编译才暴露）
+  if (!dial.includes('@Prop heading: number')) {
+    fail('方向罗盘', 'DirectionDial 缺少 @Prop heading（罗盘不会跟随手机）');
   }
 
   // C3. 首页下方要有「最近探索」和统计，不能是空白

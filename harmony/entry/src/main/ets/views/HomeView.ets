@@ -433,7 +433,30 @@ export struct HomeView {
 
   @Builder
   recentSection() {
-    if (this.recentPlaces().length > 0) {
+    if (this.recentPlaces().length === 0) {
+      // 还没有探索记录：也要把这块显示出来（否则用户以为界面是空的）
+      Column({ space: 6 }) {
+        Row() {
+          Text('最近探索')
+            .fontSize(WAFont.titleSm)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(WAColor.ink)
+          Blank()
+        }
+        .width('100%')
+        Text('还没有走过的地点。点一个方向开始，路上遇到的都会出现在这里。')
+          .fontSize(WAFont.microSm)
+          .fontColor(WAColor.ink3)
+          .lineHeight(18)
+          .width('100%')
+      }
+      .width('100%')
+      .padding({ left: 16, right: 16, top: 14, bottom: 14 })
+      .backgroundColor(WAColor.paper)
+      .borderRadius(WASize.cardRadius)
+      .border({ width: 1, color: WAColor.lineSoft })
+      .alignItems(HorizontalAlign.Start)
+    } else {
       Column({ space: 10 }) {
         Row() {
           Text('最近探索')
