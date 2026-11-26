@@ -4232,3 +4232,196 @@ body[data-sheet="1"] .toast,
 .photoverify__step-text strong {
   font-weight: 700;
 }
+
+/* ============================================================
+   44. 方向罗盘（首页主交互，对齐鸿蒙 DirectionDial）
+   ============================================================ */
+
+.dial-wrap {
+  display: flex;
+  justify-content: center;
+  margin: 14px 0 10px;
+}
+
+.dial {
+  position: relative;
+  width: var(--dial-size, 236px);
+  height: var(--dial-size, 236px);
+  flex: none;
+}
+
+/* 旋转层：跟着手机朝向转，「北」始终指向真实北方 */
+.dial__rotor {
+  position: absolute;
+  inset: 0;
+  transition: transform .12s linear;
+  will-change: transform;
+}
+
+.dial__ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1px dashed rgba(17, 24, 39, .18);
+}
+
+.dial__ring-inner {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 62%;
+  height: 62%;
+  border-radius: 50%;
+  /* 卡片本身是浅紫底，内圈用半透明白而不是实白，否则会变成一个抢眼的白盘 */
+  background: rgba(255, 255, 255, .45);
+  border: 1px solid rgba(255, 255, 255, .6);
+}
+
+/* 正北标记：红色小三角，永远指向真实北方 */
+.dial__north {
+  position: absolute;
+  left: 50%;
+  top: 1px;
+  transform: translateX(-50%);
+  font-size: 9px;
+  line-height: 1;
+  color: #FF6B6B;
+}
+
+/* 罗盘刻度 */
+.dial__tick {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 2px;
+  height: 5px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: rgba(17, 24, 39, .18);
+  transform-origin: 50% 0;
+}
+
+.dial__tick--major {
+  height: 9px;
+  background: rgba(91, 108, 255, .35);
+}
+
+/* 四向按钮 */
+.dial__dir {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 52px;
+  height: 52px;
+  margin: -26px 0 0 -26px;
+  border-radius: 50%;
+  border: 1px solid rgba(91, 108, 255, .3);
+  background: #FFFFFF;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, .07);
+  cursor: pointer;
+  padding: 0;
+  /* 摆到圆周上：先转到方位角，再沿半径推出去 */
+  transform: rotate(var(--dial-angle)) translateY(calc(var(--dial-size) / -2 + 26px)) rotate(calc(-1 * var(--dial-angle)));
+  transition: box-shadow .15s ease;
+}
+
+.dial__dir:active {
+  box-shadow: 0 3px 12px rgba(91, 108, 255, .2);
+}
+
+.dial__dir:active .dial__dir-inner {
+  transform: rotate(var(--dial-counter, 0deg)) scale(.91);
+}
+
+/* 内部反向旋转：按钮位置跟着罗盘转，但文字永远正着 */
+.dial__dir-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  width: 100%;
+  height: 100%;
+  transform: rotate(var(--dial-counter, 0deg));
+  transition: transform .12s linear;
+}
+
+.dial__dir-label {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--amber, #5B6CFF);
+  line-height: 1;
+}
+
+.dial__dir-arrow {
+  font-size: 11px;
+  color: var(--amber, #5B6CFF);
+  opacity: .7;
+  line-height: 1;
+}
+
+/* 中心按钮 */
+.dial__center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 82px;
+  height: 82px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, .15);
+  background: var(--amber-deep, #3D4FE0);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .16);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  cursor: pointer;
+  padding: 0;
+  transition: transform .12s ease;
+}
+
+.dial__center:active { transform: translate(-50%, -50%) scale(.94); }
+
+.dial__center--resume { background: var(--teal, #14B8A6); }
+
+.dial__center-title {
+  font-size: 14px;
+  font-weight: 650;
+  color: #FFFFFF;
+  line-height: 1.15;
+}
+
+.dial__center-sub {
+  font-size: 10px;
+  color: rgba(255, 255, 255, .82);
+  line-height: 1;
+}
+
+/* 状态提示 */
+.dial__statusrow {
+  display: flex;
+  justify-content: center;
+  margin: 2px 0 2px;
+}
+
+.dial__status {
+  font-size: 10.5px;
+  color: var(--amber, #5B6CFF);
+}
+
+.dial__status--dim { color: var(--ink-3, #9CA3AF); }
+
+/* 设置页方向标签 */
+.sheet__dirtag {
+  display: inline-block;
+  margin: 0 auto 8px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(91, 108, 255, .1);
+  color: var(--amber-deep, #3D4FE0);
+  font-size: 11px;
+  font-weight: 650;
+}

@@ -7,7 +7,7 @@
 
   var D = window.WA_DATA;
   var STORE_KEY = 'walkaholic:v1';
-  var APP_VERSION = 'v57';
+  var APP_VERSION = 'v58';
   var APP_BUILT_AT = '2026-11-09 14:10';
 
   var ROUTES = ['/home', '/setup', '/journey', '/reveal', '/cards', '/social', '/profile', '/debug',
@@ -31,6 +31,13 @@
     arriving: false,
     shaking: false,
     boardOpen: false,
+    /* 方向探索（罗盘）：0=北 90=东 180=南 270=西；null=全向 */
+    exploreDirection: null,
+    headingBound: false,
+    headingAt: 0,
+    deviceHeading: null,
+    moveHeading: null,
+    moveHeadingAt: 0,
     /* 埋惊喜 / 寻惊喜 */
     myLocation: null,
     buryLocation: null,
@@ -757,6 +764,27 @@
     }
   }
 
+  /**
+   * 只更新罗盘旋转，不重绘整页。
+   * 整页 render() 会让滚动位置跳回顶部、按下的按钮失焦 —— 必须局部更新。
+   */
+  function updateDialRotation() {
+    var rotor = document.querySelector('.dial__rotor');
+    if (!rotor) return;
+    var info = dialHeadingInfo();
+    if (!info.following) return;
+    rotor.style.transform = 'rotate(' + (-info.heading) + 'deg)';
+    var counter = info.heading + 'deg';
+    var inners = document.querySelectorAll('.dial__dir');
+    for (var i = 0; i < inners.length; i += 1) {
+      inners[i].style.setProperty('--dial-counter', counter);
+    }
+    var status = document.querySelector('.dial__status');
+    if (status && status.textContent.indexOf('已跟随') < 0) {
+      status.textContent = '🧭 罗盘已跟随手机';
+    }
+  }
+
   function startHeadingTracking() {
     if (ui.headingBound) return;
     ui.headingBound = true;
@@ -764,11 +792,16 @@
       window.addEventListener('deviceorientationabsolute', onOrientationEvent, true);
       window.addEventListener('deviceorientation', onOrientationEvent, true);
     } catch (e) { /* ignore */ }
-    // 有罗盘就每 350ms 重画一次（低通后的朝向变化不会太频繁）
+    // 有罗盘就定期刷新：旅程页重画迷雾路径，首页让罗盘跟着转
     if (!ui.headingTimer) {
       ui.headingTimer = window.setInterval(function () {
-        if (currentRoute() === '/journey') schedulePathRedraw();
-      }, 200);
+        var route = currentRoute();
+        if (route === '/journey') {
+          schedulePathRedraw();
+        } else if (route === '/home' && ui.deviceHeading !== null) {
+          updateDialRotation();
+        }
+      }, 120);
     }
   }
 
@@ -1557,8 +1590,7 @@
       '</div>' +
       '<article class="boxcard" aria-label="今晚的盲盒">' +
       '<div class="boxcard__top"><span class="micro">今日盲盒</span>' + resumeChip() + '</div>' +
-      '<div class="boxcard__art" aria-hidden="true">' + boxArtSVG() + '</div>' +
-      '<button class="btn btn--primary btn--block" data-action="open-setup" aria-label="开一个盲盒">开一个盲盒</button>' +
+      directionDialHTML() +
       '<p class="boxcard__meta">预计 30 分钟 · 1.6 km 内</p>' +
       '</article>' +
       '<div class="stats" aria-label="本周统计">' +
@@ -1959,8 +1991,17 @@
     return '<div class="scrim" data-action="close-setup" aria-hidden="true"></div>' +
       '<section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">' +
       '<div class="sheet__grabber" aria-hidden="true"></div>' +
-      '<h2 class="sheet__title" id="sheet-title">这次的盲盒，你想要什么？</h2>' +
-      '<p class="sheet__sub">选完就出发，目的地保密。</p>' +
+      (ui.exploreDirection !== null && ui.exploreDirection !== undefined
+        ? '<span class="sheet__dirtag">往' + esc(dialLabelOf(ui.exploreDirection)) + ' · 方向探索</span>'
+        : '') +
+      '<h2 class="sheet__title" id="sheet-title">' +
+      (ui.exploreDirection !== null && ui.exploreDirection !== undefined
+        ? '往' + esc(dialLabelOf(ui.exploreDirection)) + '边走，随机给你一个这边的惊喜'
+        : '这次的盲盒，你想要什么？') + '</h2>' +
+      '<p class="sheet__sub">' +
+      (ui.exploreDirection !== null && ui.exploreDirection !== undefined
+        ? '方向定了，目的地还是保密。'
+        : '选完就出发，目的地保密。') + '</p>' +
       '<div class="field"><span class="field__label">时长</span><div class="segmented">' + durations + '</div></div>' +
       '<div class="field"><span class="field__label">心情</span><div class="moods">' + moods + '</div></div>' +
       '<div class="field"><span class="field__label">区域</span><div class="areachips">' + areas + '</div></div>' +
@@ -1971,6 +2012,91 @@
       '<button type="button" class="btn btn--quiet" data-action="close-setup" aria-label="今天不想出门">今天不想出门</button>' +
       '</div>' +
       '</section>';
+  }
+
+
+  /* ============================================================
+     方向罗盘（首页主交互，与鸿蒙 DirectionDial 对齐）
+     - 上下左右四向按钮 → 朝该方向探索
+     - 中心「在此埋下」→ 当前位置埋盲盒
+     - 跟随手机朝向旋转：「北」始终指向真实北方
+     ============================================================ */
+  var DIAL_DIRECTIONS = [
+    { bearing: 0, label: '北', arrow: '↑' },
+    { bearing: 90, label: '东', arrow: '→' },
+    { bearing: 180, label: '南', arrow: '↓' },
+    { bearing: 270, label: '西', arrow: '←' }
+  ];
+
+  function dialLabelOf(bearing) {
+    if (bearing === 0) return '北';
+    if (bearing === 90) return '东';
+    if (bearing === 180) return '南';
+    if (bearing === 270) return '西';
+    return '';
+  }
+
+  /** 罗盘可用性：有新鲜罗盘事件才算「在跟随」 */
+  function dialHeadingInfo() {
+    var now = Date.now();
+    var fresh = ui.deviceHeading !== null && ui.deviceHeading !== undefined &&
+      ui.headingAt && now - ui.headingAt < HEADING_FRESH_MS;
+    return {
+      heading: fresh ? ui.deviceHeading : -1,
+      following: fresh,
+      supported: !!ui.headingBound
+    };
+  }
+
+  function directionDialHTML() {
+    var info = dialHeadingInfo();
+    var rotate = info.following ? -info.heading : 0;
+    var counter = info.following ? info.heading : 0;
+
+    var dirs = DIAL_DIRECTIONS.map(function (d) {
+      return '<button type="button" class="dial__dir" data-action="explore-direction" data-bearing="' + d.bearing + '"' +
+        ' style="--dial-angle:' + d.bearing + 'deg;--dial-counter:' + counter + 'deg"' +
+        ' aria-label="向' + d.label + '探索">' +
+        '<span class="dial__dir-inner">' +
+        '<span class="dial__dir-label">' + d.label + '</span>' +
+        '<span class="dial__dir-arrow" aria-hidden="true">' + d.arrow + '</span>' +
+        '</span></button>';
+    }).join('');
+
+    var ticks = '';
+    for (var i = 0; i < 8; i += 1) {
+      var deg = i * 45;
+      ticks += '<span class="dial__tick' + (deg % 90 === 0 ? ' dial__tick--major' : '') +
+        '" style="transform: rotate(' + deg + 'deg) translateY(calc(var(--dial-size) / -2 + 4px))"></span>';
+    }
+
+    var statusChip = info.following
+      ? '<span class="dial__status">🧭 罗盘已跟随手机</span>'
+      : (info.supported
+        ? '<span class="dial__status dial__status--dim">罗盘待激活</span>'
+        : '');
+
+    var center = state.session
+      ? '<button type="button" class="dial__center dial__center--resume" data-action="open-journey" aria-label="继续上次的旅程">' +
+        '<span class="dial__center-title">继续</span>' +
+        '<span class="dial__center-sub">' + Math.round(state.session.remaining || 0) + ' m</span></button>'
+      : '<button type="button" class="dial__center" data-action="bury-here" aria-label="在当前位置埋一个盲盒">' +
+        '<span class="dial__center-title">在此埋下</span>' +
+        '<span class="dial__center-sub">埋一个盲盒</span></button>';
+
+    return '<div class="dial-wrap">' +
+      '<div class="dial" style="--dial-size:236px">' +
+      '<div class="dial__rotor" style="transform: rotate(' + rotate + 'deg)">' +
+      '<span class="dial__ring" aria-hidden="true"></span>' +
+      '<span class="dial__ring-inner" aria-hidden="true"></span>' +
+      '<span class="dial__north" aria-hidden="true">▲</span>' +
+      ticks +
+      dirs +
+      '</div>' +
+      center +
+      '</div>' +
+      '</div>' +
+      (statusChip ? '<div class="dial__statusrow">' + statusChip + '</div>' : '');
   }
 
   function bearingFor(remaining) {
@@ -4466,6 +4592,8 @@
     switch (route) {
       case '/home':
         html = homeHTML();
+        // 首页罗盘：iOS 需要用户手势授权才能拿罗盘（没授权则显示「罗盘待激活」）
+        requestHeadingPermission();
         break;
       case '/setup':
         html = homeHTML();
@@ -4827,7 +4955,20 @@
   function handleAction(action, target, event) {
     switch (action) {
       case 'open-setup':
+        ui.exploreDirection = null;
         navigate('/setup');
+        break;
+      case 'explore-direction': {
+        var bearing = parseInt(target.getAttribute('data-bearing'), 10);
+        ui.exploreDirection = isNaN(bearing) ? null : bearing;
+        navigate('/setup');
+        break;
+      }
+      case 'bury-here':
+        navigate('/bury');
+        break;
+      case 'open-journey':
+        navigate('/journey');
         break;
       case 'close-setup':
         navigate('/home');
