@@ -86,6 +86,8 @@ export struct DirectionDial {
     .backgroundColor(WAColor.paper)
     .border({ width: 1, color: WAColor.amberBorder })
     .shadow({ radius: 6, color: WAColor.shadowSoft, offsetX: 0, offsetY: 1 })
+    // 反向旋转抵消父级旋转：按钮「位置」跟着罗盘转到真实方位，但文字始终正着
+    .rotate({ angle: this.heading >= 0 ? this.heading : 0 })
     .scale({ x: this.pressedBearing === dir.bearing ? 0.91 : 1, y: this.pressedBearing === dir.bearing ? 0.91 : 1 })
     .animation({ duration: WA_DUR_FAST, curve: WA_EASE })
     .onClick(() => {
@@ -172,7 +174,9 @@ export struct DirectionDial {
       .rotate({ angle: angleDeg })
   }
 
-  build() {
+  /** 罗盘主体：环 + 刻度 + 四向按钮（这一层跟着手机朝向旋转） */
+  @Builder
+  rotatingDial() {
     Stack({ alignContent: Alignment.Center }) {
       // ⓪ 罗盘刻度（八个方位，先画在最底层）
       ForEach([0, 45, 90, 135, 180, 225, 270, 315], (deg: number) => {
@@ -207,8 +211,32 @@ export struct DirectionDial {
               ((this.dialSize - this.dirButtonSize()) / 2 - 2)
           })
       }, (dir: DialDirection) => String(dir.bearing))
+    }
+    .width(this.dialSize)
+    .height(this.dialSize)
+  }
 
-      // ④ 中心按钮
+  /** 正北标记：罗盘旋转时跟着转到真实北方 */
+  @Builder
+  northMark() {
+    Text('▲')
+      .fontSize(9)
+      .fontColor(WAColor.ember)
+      .position({ x: this.dialSize / 2 - 5, y: 0 })
+  }
+
+  build() {
+    Stack({ alignContent: Alignment.Center }) {
+      // 旋转层：环 + 刻度 + 四向按钮 + 正北标记，一起跟着手机转
+      Stack({ alignContent: Alignment.Center }) {
+        this.rotatingDial()
+        this.northMark()
+      }
+      .width(this.dialSize)
+      .height(this.dialSize)
+      .rotate({ angle: this.heading >= 0 ? -this.heading : 0 })
+
+      // 中心按钮不跟着转（「在当前位置埋下」与朝向无关）
       this.centerButton()
     }
     .width(this.dialSize)

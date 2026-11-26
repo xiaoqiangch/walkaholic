@@ -1096,6 +1096,32 @@ function checkDirectionDial() {
     fail('方向罗盘', 'views/SetupSheet.ets 没把 direction 传给 prepareQuest');
   }
 
+  // C2. 罗盘绑定传感器：手机转动时方向盘要跟着转
+  if (!home.includes('CompassWatcher')) {
+    fail('方向罗盘', 'HomeView 没接入 CompassWatcher（方向盘不会跟手机转）');
+  }
+  if (!home.includes('heading: this.compassHeading')) {
+    fail('方向罗盘', 'HomeView 没把 compassHeading 传给 DirectionDial');
+  }
+  if (!dial.includes('rotate({ angle: this.heading >= 0 ? -this.heading : 0 })')) {
+    fail('方向罗盘', 'DirectionDial 缺少按朝向反向旋转的旋转层');
+  }
+  // 按钮内部要反向旋转，否则文字会跟着倒过来
+  if (!dial.includes('angle: this.heading >= 0 ? this.heading : 0')) {
+    fail('方向罗盘', 'DirectionDial 的四向按钮没有反向旋转（文字会倒）');
+  }
+
+  // C3. 首页下方要有「最近探索」和统计，不能是空白
+  if (!home.includes('this.recentSection()')) {
+    fail('方向罗盘', 'HomeView 没调用 recentSection（首页下方会是空白）');
+  }
+  if (!home.includes("'最近探索'")) {
+    fail('方向罗盘', 'HomeView 最近探索区块缺少标题文案');
+  }
+  if (!home.includes('this.statsRow()')) {
+    fail('方向罗盘', 'HomeView 缺少统计行');
+  }
+
   // D. 引擎侧的方向过滤 + 回退
   const parity = coreText('parity.ts');
   expectIn('方向罗盘', 'core/parity.ts', parity, [

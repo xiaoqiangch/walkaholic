@@ -34,6 +34,8 @@ import { WAColor, WAFont, WASize } from '../theme/Theme';
 import { greeting, kilometers, relativeDay } from '../components/Format';
 import { currentMoment, momentBoxTitle, momentEmoji, momentLine } from '../core/moment';
 import { DirectionDial } from '../components/DirectionDial';
+import { CompassWatcher } from '../components/Location';
+import { placeByID } from '../core/catalog';
 
 class FriendInfo {
   name: string;
@@ -60,6 +62,12 @@ export struct HomeView {
   /** 罗盘方向探索：bearing 0=北 90=东 180=南 270=西 */
   onExploreDirection: (bearing: number) => void = () => {
   };
+
+  /** 手机朝向（度，0=北顺时针）；-1 = 罗盘不可用 */
+  @State private compassHeading: number = -1;
+  /** 罗盘传感器起不来时置 true（不阻塞界面，只是不转） */
+  @State private compassFailed: boolean = false;
+  private compass: CompassWatcher | undefined = undefined;
   /** 罗盘中心：在当前位置埋一个盲盒 */
   onBuryHere: () => void = () => {
   };
@@ -81,6 +89,7 @@ export struct HomeView {
 
   aboutToAppear(): void {
     this.load();
+    this.startCompass();
   }
 
   onRevisionChanged(propName: string): void {
@@ -89,6 +98,33 @@ export struct HomeView {
 
   private load(): void {
     this.snapshot = readSnapshot(this.snapshot);
+  }
+
+  /**
+   * 起罗盘：让首页方向盘跟着手机转，「北」始终指向真实北方。
+   * 传感器失败不阻塞首页 —— 罗盘退化成固定朝北的静态方向盘。
+   */
+  private startCompass(): void {
+    if (this.compass !== undefined) return;
+    const watcher: CompassWatcher = new CompassWatcher((heading: number) => {
+      this.compassHeading = heading;
+    });
+    if (watcher.start()) {
+      this.compass = watcher;
+    } else {
+      this.compassFailed = true;
+    }
+  }
+
+  private stopCompass(): void {
+    if (this.compass !== undefined) {
+      this.compass.stop();
+      this.compass = undefined;
+    }
+  }
+
+  aboutToDisappear(): void {
+    this.stopCompass();
   }
 
   private isWide(): boolean {
@@ -303,20 +339,35 @@ export struct HomeView {
   @Builder
   blindBoxCard() {
     Column({ space: 0 }) {
-      Row() {
+      Row({ space: 6 }) {
         WaMicroLabel({ text: '今日盲盒' })
         Blank()
         if (this.hasActiveSession()) {
           this.resumeChip()
+        } else if (this.compassHeading >= 0) {
+          // 罗盘已跟随：告诉用户「转手机，方向盘会转」，否则用户不知道这个特性
+          Row({ space: 3 }) {
+            Text('🧭')
+              .fontSize(WAFont.microSm)
+            Text('罗盘已跟随手机')
+              .fontSize(WAFont.microSm)
+              .fontColor(WAColor.amber)
+          }
+        } else if (this.compassFailed) {
+          Text('罗盘不可用 · 已固定朝北')
+            .fontSize(WAFont.microSm)
+            .fontColor(WAColor.ink3)
         }
       }
       .width('100%')
-      .constraintSize({ minHeight: 24 })
+      .constraintSize({ minHeight: 22 })
 
       // 方向罗盘：四个方向 + 中心「在此埋下」
       Row() {
         DirectionDial({
           dialSize: this.dialSize(),
+          heading: this.compassHeading,
+          headingUnavailable: this.compassFailed,
           hasActiveSession: this.hasActiveSession(),
           sessionCaption: this.hasActiveSession() ? this.sessionRemaining() + ' m' : '',
           onExploreDirection: (bearing: number) => {
@@ -349,6 +400,90 @@ export struct HomeView {
     .borderRadius(WASize.cardRadius)
     .border({ width: 1, color: WAColor.inkSoft, radius: WASize.cardRadius })
     .shadow({ radius: 12, color: WAColor.shadowSoft, offsetX: 0, offsetY: 2 })
+  }
+
+
+  // ============================================================
+  // 最近探索（首页下方，替代原来那块空白）
+  // ============================================================
+
+  /** 最近探索过的地点（按收录时间倒序，最多 8 个） */
+  private recentPlaces(): Place[] {
+    const cards: PlaceCard[] = this.snapshot.profile.cards;
+    const sorted: PlaceCard[] = cards.slice().sort((a: PlaceCard, b: PlaceCard) => b.collectedAt - a.collectedAt);
+    const out: Place[] = [];
+    for (let i = 0; i < sorted.length && out.length < 8; i += 1) {
+      const place: Place | undefined = placeByID(sorted[i].placeID);
+      if (place === undefined) continue;
+      out.push(place);
+    }
+    return out;
+  }
+
+  /** 本周新增卡片数（最近 7 天收录的） */
+  private weeklyNewCards(): number {
+    const weekAgo: number = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    let count: number = 0;
+    const cards: PlaceCard[] = this.snapshot.profile.cards;
+    for (let i = 0; i < cards.length; i += 1) {
+      if (cards[i].collectedAt >= weekAgo) count += 1;
+    }
+    return count;
+  }
+
+  @Builder
+  recentSection() {
+    if (this.recentPlaces().length > 0) {
+      Column({ space: 10 }) {
+        Row() {
+          Text('最近探索')
+            .fontSize(WAFont.titleSm)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(WAColor.ink)
+          Blank()
+          Text('近 7 天 +' + String(this.weeklyNewCards()))
+            .fontSize(WAFont.microSm)
+            .fontColor(WAColor.ink3)
+        }
+        .width('100%')
+
+        Scroll() {
+          Row({ space: 10 }) {
+            ForEach(this.recentPlaces(), (place: Place) => {
+              Column({ space: 4 }) {
+                Stack({ alignContent: Alignment.Center }) {
+                  Text(place.emoji)
+                    .fontSize(22)
+                }
+                .width(52)
+                .height(52)
+                .backgroundColor(WAColor.paper)
+                .borderRadius(WASize.cardRadiusSm)
+                .border({ width: 1, color: WAColor.lineSoft })
+
+                Text(place.name)
+                  .fontSize(WAFont.microSm)
+                  .fontColor(WAColor.ink2)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .width(60)
+                  .textAlign(TextAlign.Center)
+              }
+              .width(60)
+            }, (place: Place) => place.id)
+          }
+        }
+        .scrollable(ScrollDirection.Horizontal)
+        .scrollBar(BarState.Off)
+        .width('100%')
+      }
+      .width('100%')
+      .padding({ left: 16, right: 16, top: 14, bottom: 14 })
+      .backgroundColor(WAColor.paper)
+      .borderRadius(WASize.cardRadius)
+      .border({ width: 1, color: WAColor.lineSoft })
+      .alignItems(HorizontalAlign.Start)
+    }
   }
 
   @Builder
@@ -558,13 +693,14 @@ export struct HomeView {
           this.statsRow()
 
           Column() {
+            this.recentSection()
           }
-          .margin({ top: 22 })
+          .margin({ top: 18 })
 
           Column() {
             this.surpriseHub()
           }
-          .margin({ top: 22 })
+          .margin({ top: 18 })
         }
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
@@ -588,6 +724,7 @@ export struct HomeView {
       .margin({ top: 20 })
 
       Column() {
+        this.recentSection()
       }
       .margin({ top: 22 })
 
