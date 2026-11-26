@@ -214,7 +214,9 @@ import {
   scoreWalkworthy,
   sortByDistance,
   tierParams,
-  trimDiverse
+  trimDiverse,
+  angularGap,
+  DIRECTION_TOLERANCE_DEG
 } from '../entry/src/main/ets/core/parity';
 import {
   baiduUrl,
@@ -5152,4 +5154,99 @@ test('拍照验证：iPhone 关键场景的指引要对', () => {
   const noGps: string = photoFailSteps('noGpsTag').join(' ');
   assert.ok(noGps.includes('位置信息') || noGps.includes('定位'),
     '相机没开定位必须提到位置信息/定位设置项');
+});
+
+test('方向偏好：只在所选方向的扇区里挑，绝不跨方向', () => {
+  const origin: GeoPoint = { latitude: 32.06, longitude: 118.77 };
+  // 东边 800m、西边 800m、南边 800m、北边 800m 各放一个候选
+  const mk = (id: string, bearingDeg: number): PoiCandidate => {
+    const p: GeoPoint = offset(origin, 800, bearingDeg);
+    return { id: id, name: '某某公园', latitude: p.latitude, longitude: p.longitude } as PoiCandidate;
+  };
+  const candidates: PoiCandidate[] = [
+    mk('east', 90), mk('west', 270), mk('south', 180), mk('north', 0)
+  ];
+  // 向「东」探索 → 100 次都不该挑到西/南/北
+  let eastHits: number = 0;
+  for (let i = 0; i < 100; i += 1) {
+    const picked = pickCandidate(candidates, {
+      origin: origin, mood: 'relax' as Mood, relax: 0,
+      minDistance: 100, maxDistance: 3000,
+      random: (i + 1) / 101, direction: 90
+    });
+    assert.ok(picked !== undefined, '应向东挑到候选');
+    if (picked === undefined) return;
+    assert.equal(picked.candidate.id, 'east', '向东探索不能挑到 ' + picked.candidate.id);
+    eastHits += 1;
+  }
+  assert.equal(eastHits, 100);
+});
+
+test('方向偏好：扇区内没有候选时回退全向（不因方向没货而失败）', () => {
+  const origin: GeoPoint = { latitude: 32.06, longitude: 118.77 };
+  // 只有东边有候选，但用户要求「北」
+  const p: GeoPoint = offset(origin, 800, 90);
+  const candidates: PoiCandidate[] = [
+    { id: 'east', name: '某某公园', latitude: p.latitude, longitude: p.longitude } as PoiCandidate
+  ];
+  const picked = pickCandidate(candidates, {
+    origin: origin, mood: 'relax' as Mood, relax: 0,
+    minDistance: 100, maxDistance: 3000, random: 0.5, direction: 0
+  });
+  assert.ok(picked !== undefined, '北向没货时应回退到东边，而不是报失败');
+  if (picked === undefined) return;
+  assert.equal(picked.candidate.id, 'east');
+});
+
+test('方向偏好：不传 direction 时行为与旧版一致（全向）', () => {
+  const origin: GeoPoint = { latitude: 32.06, longitude: 118.77 };
+  const mk = (id: string, bearingDeg: number): PoiCandidate => {
+    const p: GeoPoint = offset(origin, 800, bearingDeg);
+    return { id: id, name: '某某公园', latitude: p.latitude, longitude: p.longitude } as PoiCandidate;
+  };
+  const candidates: PoiCandidate[] = [mk('north', 0), mk('south', 180), mk('east', 90), mk('west', 270)];
+  const seen: string[] = [];
+  for (let i = 0; i < 60; i += 1) {
+    const picked = pickCandidate(candidates, {
+      origin: origin, mood: 'relax' as Mood, relax: 0,
+      minDistance: 100, maxDistance: 3000, random: (i + 1) / 61
+    });
+    if (picked !== undefined) seen.push(picked.candidate.id);
+  }
+  const unique: string[] = [];
+  for (let i = 0; i < seen.length; i += 1) if (unique.indexOf(seen[i]) < 0) unique.push(seen[i]);
+  assert.ok(unique.length >= 2, '全向时应该能挑到多个方向，实际只有 ' + unique.join(','));
+});
+
+test('方向偏好：四个方向各自只命中自己扇区', () => {
+  const origin: GeoPoint = { latitude: 32.06, longitude: 118.77 };
+  const mk = (id: string, bearingDeg: number): PoiCandidate => {
+    const p: GeoPoint = offset(origin, 800, bearingDeg);
+    return { id: id, name: '某某公园', latitude: p.latitude, longitude: p.longitude } as PoiCandidate;
+  };
+  const candidates: PoiCandidate[] = [mk('north', 0), mk('east', 90), mk('south', 180), mk('west', 270)];
+  const expect: string[] = ['north', 'east', 'south', 'west'];
+  const bearings: number[] = [0, 90, 180, 270];
+  for (let d = 0; d < 4; d += 1) {
+    for (let i = 0; i < 20; i += 1) {
+      const picked = pickCandidate(candidates, {
+        origin: origin, mood: 'relax' as Mood, relax: 0,
+        minDistance: 100, maxDistance: 3000,
+        random: (i + 1) / 21, direction: bearings[d]
+      });
+      assert.ok(picked !== undefined);
+      if (picked === undefined) continue;
+      assert.equal(picked.candidate.id, expect[d],
+        '方向 ' + String(bearings[d]) + '° 不该挑到 ' + picked.candidate.id);
+    }
+  }
+});
+
+test('方向偏好：angularGap 计算正确（含跨 0° 边界）', () => {
+  assert.equal(angularGap(0, 0), 0);
+  assert.equal(angularGap(10, 350), 20, '跨 0° 边界应是 20 不是 340');
+  assert.equal(angularGap(350, 10), 20);
+  assert.equal(angularGap(0, 180), 180);
+  assert.equal(angularGap(90, 270), 180);
+  assert.equal(angularGap(45, 90), 45);
 });

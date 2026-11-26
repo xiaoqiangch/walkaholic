@@ -154,7 +154,8 @@ export function pickCurated(
   relax: number,
   minDistance: number,
   maxDistance: number,
-  random: number
+  random: number,
+  direction?: number
 ): CuratedPoi | undefined {
   const candidates: PoiCandidate[] = [];
   for (let i = 0; i < curated.length; i += 1) {
@@ -170,7 +171,8 @@ export function pickCurated(
     relax: relax,
     minDistance: minDistance,
     maxDistance: maxDistance,
-    random: random
+    random: random,
+    direction: direction
   });
   if (picked === undefined) return undefined;
   // 找回原始策展对象（保留 why/task/hints 等扩展字段）
@@ -232,6 +234,8 @@ export interface FindOptions {
   moment?: DayMoment;
   /** 候选条数上限（默认按档位 40 / 60） */
   limit?: number;
+  /** 方向偏好（度，0=北 90=东 180=南 270=西）；主界面四向按钮传值 */
+  direction?: number;
 }
 
 // ============================================================
@@ -301,7 +305,7 @@ function pickFromPool(
 
   // ① 策展数据优先（人工审核过的最可靠；纯本地，不发请求）
   const curatedPick: CuratedPoi | undefined = pickCurated(
-    curated, origin, mood, relax, minDistance, maxDistance, random
+    curated, origin, mood, relax, minDistance, maxDistance, random, options.direction
   );
   if (curatedPick !== undefined) {
     const attempt: TierAttempt = {
@@ -321,7 +325,8 @@ function pickFromPool(
     maxDistance: maxDistance,
     random: random,
     excludedIDs: excluded,
-    moment: moment
+    moment: moment,
+    direction: options.direction
   });
 
   if (picked === undefined) {
@@ -423,7 +428,7 @@ async function attemptTier(
 
   // ① 策展数据优先（人工审核过的最可靠）
   const curatedPick: CuratedPoi | undefined = pickCurated(
-    curated, origin, mood, relax, minDistance, maxDistance, random
+    curated, origin, mood, relax, minDistance, maxDistance, random, options.direction
   );
   if (curatedPick !== undefined) {
     const attempt: TierAttempt = {

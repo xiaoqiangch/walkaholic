@@ -14,7 +14,7 @@
  */
 
 import { Area, GeoPoint, Mood, Rarity, WalkDuration } from './types';
-import { distance, offset as offsetPoint } from './geo';
+import { bearing as bearingBetween, distance, offset as offsetPoint } from './geo';
 import { DayMoment, currentMoment, momentAffinity } from './moment';
 
 // ============================================================
@@ -589,6 +589,23 @@ export interface PickOptions {
   excludedIDs?: string[];
   /** 时段（不传按当前时刻；环境性盲盒的核心） */
   moment?: DayMoment;
+  /**
+   * 方向偏好（度，0=正北，90=正东，顺时针）。
+   * 主界面的「向东/南/西/北探索」按钮会传这个值：
+   * 优先在**该方向 ±DIRECTION_TOLERANCE_DEG** 的扇区里挑；
+   * 扇区里没有合格候选时**回退到全向**，绝不因为方向没点而失败。
+   */
+  direction?: number;
+}
+
+/** 方向扇区的半角（度）：±72° 覆盖 144° 的扇形，比 90° 略宽以免太苛刻 */
+export const DIRECTION_TOLERANCE_DEG: number = 72;
+
+/** 两个方位角之间的最小夹角（0…180） */
+export function angularGap(a: number, b: number): number {
+  let diff: number = ((a - b) % 360 + 360) % 360;
+  if (diff > 180) diff = 360 - diff;
+  return diff;
 }
 
 /**
@@ -600,6 +617,19 @@ export function pickCandidate(
   candidates: PoiCandidate[],
   options: PickOptions
 ): RankedCandidate | undefined {
+  const narrowed: RankedCandidate[] | undefined =
+    options.direction === undefined ? undefined : poolInDirection(candidates, options);
+  // 有方向要求且扇区里有货 → 在扇区里挑；否则回退全向（绝不因方向没货而失败）
+  if (narrowed !== undefined && narrowed.length > 0) {
+    return rollFromRanks(narrowed, options.random);
+  }
+  const pool: RankedCandidate[] = buildPool(candidates, options);
+  if (pool.length === 0) return undefined;
+  return rollFromRanks(pool, options.random);
+}
+
+/** 收集合格候选（不含方向过滤） */
+function buildPool(candidates: PoiCandidate[], options: PickOptions): RankedCandidate[] {
   const pool: RankedCandidate[] = [];
   const excluded: string[] = options.excludedIDs === undefined ? [] : options.excludedIDs;
   for (let i = 0; i < candidates.length; i += 1) {
@@ -615,22 +645,46 @@ export function pickCandidate(
     if (weight <= 0) continue;
     pool.push({ candidate: candidate, weight: weight, distance: meters });
   }
-  if (pool.length === 0) return undefined;
+  return pool;
+}
 
+/** 只保留落在用户所选方向扇区内的候选，并按「越接近正方向权重越高」微调 */
+function poolInDirection(candidates: PoiCandidate[], options: PickOptions): RankedCandidate[] {
+  const wanted: number = options.direction === undefined ? 0 : options.direction;
+  const base: RankedCandidate[] = buildPool(candidates, options);
+  const out: RankedCandidate[] = [];
+  for (let i = 0; i < base.length; i += 1) {
+    const item: RankedCandidate = base[i];
+    const bearing: number = candidateBearing(options.origin, item.candidate);
+    const gap: number = angularGap(bearing, wanted);
+    if (gap > DIRECTION_TOLERANCE_DEG) continue;
+    // 越正对方向权重越高（最差也保留 55%），但仍在扇区内参与随机
+    const align: number = 1 - (gap / DIRECTION_TOLERANCE_DEG) * 0.45;
+    out.push({ candidate: item.candidate, weight: item.weight * align, distance: item.distance });
+  }
+  return out;
+}
+
+/** 从已排序的候选里按权重随机取一个 */
+function rollFromRanks(pool: RankedCandidate[], random: number): RankedCandidate {
   pool.sort((a: RankedCandidate, b: RankedCandidate): number => b.weight - a.weight);
   let keep: number = Math.ceil(pool.length * 0.4);
   if (keep < 3) keep = 3;
   if (keep > pool.length) keep = pool.length;
   const best: RankedCandidate[] = pool.slice(0, keep);
-
   let total: number = 0;
   for (let i = 0; i < best.length; i += 1) total += best[i].weight;
-  let roll: number = options.random * total;
+  let roll: number = random * total;
   for (let i = 0; i < best.length; i += 1) {
     roll -= best[i].weight;
     if (roll <= 0) return best[i];
   }
   return best[best.length - 1];
+}
+
+/** 候选相对起点的方位角 */
+function candidateBearing(origin: GeoPoint, candidate: PoiCandidate): number {
+  return bearingBetween(origin, { latitude: candidate.latitude, longitude: candidate.longitude });
 }
 
 /** 判断「够真实但不够格」（软黑名单）——先记下，继续往更宽档位找更好的 */

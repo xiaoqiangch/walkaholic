@@ -145,7 +145,14 @@ export struct CityMapView {
   @State private centerLon: number = 0;
   /** 比例尺文案 */
   @State private scaleText: string = '';
-  /** 手指正在地图区域内交互（锁定外层 Scroll，防止拖动地图变成拖动整页） */
+  /**
+   * 手指正在地图区域内交互（锁定外层 Scroll，防止拖动地图变成拖动整页）。
+   *
+   * 注意：锁的是 **滚动交互**（enableScrollInteraction / onScrollFrameBegin），
+   * 绝不能拿它去改外层 Scroll 的 `scrollable`。
+   * ArkUI 文档：scrollable 的值一旦被修改会「重置滚动偏移量」——
+   * 手指刚按到地图上的那一帧页面就会跳回顶部，地图只剩一条边露出来。
+   */
   @State private mapInteracting: boolean = false;
   /** 双指缩放激活态 */
   @State private pinchActive: boolean = false;
@@ -1064,8 +1071,8 @@ export struct CityMapView {
     //      新底图（basemapUrl）在后台静默加载，onComplete 解码完成后再原子切换，
     //      彻底消除缩放/拖动时「地点先跳、底图半秒后才动」的不同步问题。
     //   2. 轨迹、地点圆点、疆域半透明凸包与文字标签全部在同一 Canvas 同帧绘制。
-    //   3. 手势层固定不动，按下即锁定外层 Scroll（mapInteracting = true）并拦截 Pan/Pinch，
-    //      彻底杜绝在地图内拖动时带动整个页面滚动。
+    //   3. 手势层固定不动，按下即锁定外层 Scroll 的滚动交互（mapInteracting = true）
+    //      并拦截 Pan/Pinch，杜绝在地图内拖动时带动整个页面滚动。
     Stack({ alignContent: Alignment.TopStart }) {
       // ① 已就绪的真实地图底图：随当前视窗实时缩放与平移
       if (this.loadedBasemapUrl.length > 0) {
@@ -1349,9 +1356,18 @@ export struct CityMapView {
       }
       .width('100%')
       .height('100%')
-      .scrollable(this.mapInteracting ? ScrollDirection.None : ScrollDirection.Vertical)
+      // 方向必须恒定：scrollable 一旦在运行期被改成别的值（哪怕只是 None），
+      // ArkUI 会「重置滚动偏移量」→ 手指刚按上地图整页就跳回顶部。
+      .scrollable(ScrollDirection.Vertical)
+      // 锁「滚动交互」而不是「滚动方向」：enableScrollInteraction 不改布局、不清偏移量。
+      .enableScrollInteraction(!this.mapInteracting)
+      // 兜底：即使某一帧手势还是被外层接走，把本帧实际滚动量置 0，页面也不会跟着地图动。
+      .onScrollFrameBegin((offset: number, state: ScrollState) => {
+        const remain: number = this.mapInteracting ? 0 : offset;
+        return { offsetRemain: remain };
+      })
       .scrollBar(BarState.Off)
-      .edgeEffect(EdgeEffect.Spring)
+      .edgeEffect(this.mapInteracting ? EdgeEffect.None : EdgeEffect.Spring)
     }
     .width('100%')
     .height('100%')

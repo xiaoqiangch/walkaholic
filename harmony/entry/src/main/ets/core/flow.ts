@@ -61,6 +61,8 @@ export interface QuestStartInput {
   excludedPlaceIDs?: string[];
   /** 时段（不传按当前时刻；环境性盲盒） */
   moment?: DayMoment;
+  /** 方向偏好（度，0=北 90=东 180=南 270=西）；主界面四向按钮传值 */
+  direction?: number;
 }
 
 /** 抽盒准备结果 */
@@ -183,7 +185,8 @@ export async function prepareQuest(
   const findOptions: FindOptions = {
     scope: input.scope,
     excludedPlaceIDs: input.excludedPlaceIDs,
-    moment: input.moment
+    moment: input.moment,
+    direction: input.direction
   };
   let outcome: SearchOutcome;
   if (startTier >= 1) {
